@@ -30,7 +30,7 @@ test: tests/render_test.cpp src/art3d.hpp src/art.hpp
 # Mochi's portrait, the Telegram bot's profile picture (dist/mochi-avatar.png).
 avatar: tests/portrait.cpp src/art3d.hpp src/art.hpp
 	$(CXX) -std=c++17 -O2 -Wno-missing-field-initializers $(shell pkg-config --cflags cairo) tests/portrait.cpp -o tests/portrait $(shell pkg-config --libs cairo)
-	./tests/portrait dist/mochi-avatar.png 8.5 650 70 h
+	./tests/portrait dist/mochi-avatar.png 8.5 650 70 o
 
 clean:
 	rm -f xpet tests/render_test tests/portrait
