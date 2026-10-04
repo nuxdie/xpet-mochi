@@ -1722,7 +1722,9 @@ private:
 
     void walkStep(const Seg& sg, double speed, bool allowOff) {
         double nx = px + dir * speed;
-        if (!D.inMonitors(nx + dir * 20, py - 10)) { dir = -dir; return; }
+        // Blocked: turn round and stand. vx must go to zero here, or a pig blocked on both sides (chasing the
+        // pointer at a screen edge, a ledge shorter than its margins) keeps the walk pose and runs on the spot.
+        if (!D.inMonitors(nx + dir * 20, py - 10)) { dir = -dir; vx = 0; return; }
         double margin = sg.id == FLOOR ? 20 : 4;
         bool pastEdge = dir > 0 ? nx > sg.x2 - margin : nx < sg.x1 + margin;
         if (pastEdge && sg.id != FLOOR) {
@@ -1731,6 +1733,7 @@ private:
         if (pastEdge && !(walkOff && sg.id != FLOOR)) {
             dir = -dir;
             edgeDecided = false;
+            vx = 0;
             return;
         }
         px = nx;
