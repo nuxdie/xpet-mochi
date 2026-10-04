@@ -65,7 +65,7 @@ summaries, its own notes), and ends with a small JSON block. That block is the o
   close it (Mochi hears about it next round); "Show me" opens a report; any other option, "Yes, do it" included,
   starts a second run with a broader tool set and the notes Mochi wrote for itself about that answer.
 - **Chat about it** is on every ask: it opens a terminal with Mochi in it, resumed from the very run that raised
-  the question, so it remembers why. There you talk normally, with normal permission prompts. **Open a chat** in
+  the question, so it remembers why. There you talk normally; chats run in bypass-permissions mode, with the relay's never-list still denied. **Open a chat** in
   the pig's menu (or `mochi-brain --chat`) opens a fresh chat any time.
 - **report**: a file worth reading (the morning brief), also behind the dot.
 - **say** with **urgent**: the pig speaks and hops. Reserved for what cannot wait an hour. If you ignore an urgent

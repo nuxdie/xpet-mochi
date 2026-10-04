@@ -204,8 +204,8 @@ round (respect Never forever). **"Show me"** opens the report's file, so use it 
 with your `do` notes, to act on it. So write `do` as if to a colleague who has to execute each option.
 
 **"Chat about it" is always added** to every ask by the relay. It opens a terminal with you in it, resumed from
-the very run that raised the ask, so you remember why. In a chat you're interactive: normal permissions, the
-user approves what you do. Write down what you learn before the chat ends. They can also open a chat from the
+the very run that raised the ask, so you remember why. In a chat you're interactive and run without permission
+prompts (bypass mode, the hard "never" list still holds), so check with them before anything you would have asked about. Write down what you learn before the chat ends. They can also open a chat from the
 pig's menu any time ("Open a chat").
 
 `asks` and `withdraw` may be empty lists; `say` and `report` may be null. Ask ids must be stable across rounds

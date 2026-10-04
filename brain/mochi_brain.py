@@ -234,7 +234,10 @@ class Pet:
 
 def open_chat(session, prompt):
     """A terminal with Mochi in it: resumed from the run that raised the question, if we know it."""
-    cmd = [CLAUDE] + (["--resume", session] if session else []) + [prompt]
+    # Chats run in bypassPermissions (no prompts, the way the user runs Claude Code), but the NEVER list still
+    # applies: deny rules hold even when prompts are bypassed.
+    cmd = ([CLAUDE, "--permission-mode", "bypassPermissions", "--disallowedTools", ",".join(NEVER)]
+           + (["--resume", session] if session else []) + [prompt])
     term = next((t for t in ("x-terminal-emulator", "xfce4-terminal", "gnome-terminal", "konsole", "kitty",
                              "alacritty", "xterm") if shutil.which(t)), None)
     if not term:
