@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Mochi (xpet)
+Comment=Desktop pig
+Exec=sh -c 'systemctl --user import-environment DISPLAY XAUTHORITY && systemctl --user restart xpet.service mochi-brain.service'
+X-GNOME-Autostart-enabled=true

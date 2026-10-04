@@ -1,0 +1,7 @@
+xpet
+*.o
+__pycache__/
+*.pyc
+*.png
+!docs/*.png
+tests/render_test

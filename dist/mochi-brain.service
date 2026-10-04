@@ -1,0 +1,10 @@
+[Unit]
+Description=Mochi's brain (gives xpet initiative)
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+ExecStart=%h/.local/bin/mochi-brain
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1

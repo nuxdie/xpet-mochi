@@ -1,0 +1,22 @@
+{
+ "_comment": "Copy to ~/.config/mochi/sources.json and fill in what you have. Only the keys you set are needed; anything missing falls back to the defaults in brain/mochi_sense.py. Secrets go here or in files it points to; mochi-sense never prints them.",
+ "hosts": {
+  "server": "server.local",
+  "nas": "nas.local"
+ },
+ "web_services": {
+  "Home Assistant": "http://server.local:8123",
+  "Immich (photos)": "http://server.local:2283"
+ },
+ "tg_archive": {"url": "http://server.local:3000", "password": ""},
+ "llm_archive": {"url": "http://server.local:8090", "password": "", "local_db": ""},
+ "immich": {"url": "http://server.local:2283", "api_key": ""},
+ "home_assistant": {"url": "http://server.local:8123", "token": ""},
+ "ssh": {"hosts": {"server": "me@server.local"}},
+ "nas": {"share": "//nas.local/home", "credentials": "~/.config/mochi/samba_credentials"},
+ "mail": {
+  "maildir": "~/Mail",
+  "name": "Your Name",
+  "accounts": {"personal": "me@example.com"}
+ }
+}

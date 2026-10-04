@@ -1,0 +1,11 @@
+[Unit]
+Description=Mochi the desktop pig (xpet)
+# Give up after 5 quick failures (e.g. no X display after logout)
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+ExecStart=%h/.local/bin/xpet
+# Restart on crashes only; choosing "Quit" from the menu exits cleanly and stays quit
+Restart=on-failure
+RestartSec=3
