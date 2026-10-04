@@ -122,6 +122,32 @@ mochi-brain --senses                    # the digest the last round saw
 mochi-brain --discover                  # a long run that only works on the dossier
 ```
 
+### Your phone (Telegram)
+
+Mochi only runs rounds while you're at the computer, so the one thing that matters most, something that can't wait until
+you're back, had no way to reach you. `brain/mochi_telegram.py` (installed as `mochi-telegram`) is a Telegram bot that
+talks to you and only you:
+
+- **While you're away** every ask Mochi raises also arrives on your phone as a message with its options as buttons
+  (plus "Later"). Tap one and the relay acts on it exactly as if you'd clicked the pig; reply to the message in your
+  own words and that becomes the answer. Asks already waiting follow you to the phone, silently, when you leave.
+- **Reports** arrive as their title with a "Show me" button; the body is only sent when you tap it.
+- **An urgent `say`** (the thing the pig would hop for) is sent as a message that may buzz. Buzzing is rationed:
+  `TG_AUDIBLE_PER_DAY` (3) per day, none in `TG_QUIET_HOURS` (23:00-08:00) except an urgent say. Everything else is
+  delivered silently.
+- **Write to it** and the text is a task for Mochi, answered in the chat when it's done. `/asks` re-sends what's
+  waiting, `/brief` the latest report, `/seen` today's journal, `/status`, `/round`.
+- **Away rounds.** With the bot connected, the relay runs a light round every `AWAY_ROUND_EVERY` (2 h) while you're
+  away, outside quiet hours, so there is something to tell you. The brief in `brain/CLAUDE.md` tells Mochi to keep
+  what crosses the wire short and vague: names of things, never contents.
+
+Setup: create a bot with @BotFather, put its token in `~/.config/mochi/telegram.token` (mode 600), open the bot in
+Telegram and press Start, then `mochi-telegram pair --write` (it waits for your message and saves your user id as
+`telegram.owner_id` in `sources.json`). Messages from any other account are ignored. `mochi-telegram status` checks
+the whole chain; `mochi-telegram send hi` is a test. Restart the relay after changing the config. The bot's name, bio
+and command menu are set through the API; `make avatar` renders its profile picture (`dist/mochi-avatar.png`) with the
+pig's own renderer.
+
 ## Talking to it
 
 The pig listens on a user-only Unix datagram socket (`$XDG_RUNTIME_DIR/xpet.sock`), one flat JSON object per message:
@@ -155,5 +181,7 @@ SessionEnd, PreCompact). Run the pig with `--no-details` to keep file names and 
 Mochi is built to read a lot about you: browser history, chat and mail archives, your NAS, your shell history and
 Claude Code transcripts, and it can send mail as you. Everything stays on your machine: its notes live in
 `~/.local/share/mochi/`, its config in `~/.config/mochi/`, and neither is part of this repository. Rounds run through
-Claude Code, so what a round reads is sent to Anthropic's API like any other Claude Code session. The relay enforces
+Claude Code, so what a round reads is sent to Anthropic's API like any other Claude Code session. With the Telegram bot
+set up, Mochi's asks and whatever you tap or type in reply pass through Telegram's servers; the brief tells Mochi to
+keep those messages to names of things and send report bodies only when you ask. The relay enforces
 tool allow and deny lists per run; `brain/CLAUDE.md` sets the rules for what it writes down and when it may send.

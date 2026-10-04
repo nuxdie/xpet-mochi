@@ -14,10 +14,14 @@ What this file does, on purpose, and nothing more:
     things you said yes to or asked for, and a deny list no level can override
   - carries messages between the pig and the runs (offers, clicks, asks, Claude Code hook events)
   - keeps the quiet rule: only something marked urgent reaches you as a bubble
+  - while you're away, mirrors asks to your phone through the Telegram bot (mochi-telegram) and carries your
+    taps and typed messages back; an urgent say may buzz the phone, within a daily cap and quiet hours
 """
 
 import ctypes
 import datetime as dt
+import importlib.machinery
+import importlib.util
 import json
 import os
 import queue
@@ -53,6 +57,9 @@ ROUND_EVERY = 30 * 60        # between rounds while you're at the computer
 MAX_ROUNDS_PER_DAY = 24
 AWAY_AFTER = 10 * 60         # idle this long = away: no rounds
 LONG_BREAK = 2 * 3600        # away this long = a round when you're back, even if one isn't due
+AWAY_ROUND_EVERY = 2 * 3600  # while you're away and the Telegram bot is set up: a light round this often
+TG_AUDIBLE_PER_DAY = 3       # Telegram messages that may buzz your phone per day; the rest arrive silently
+TG_QUIET_HOURS = (23, 8)     # nothing buzzes between these hours, except an urgent say
 ROUND_MODEL = "sonnet"
 TASK_MODEL = None            # things you asked for or approved: the default model
 
@@ -170,6 +177,24 @@ Do it. Work in their home directory unless the request points elsewhere; your ow
 workspace (memory/, journal/) and you may update them if you learned something. Be brief; if you changed
 anything, say exactly what. End with the mochi block; a short "say" is welcome here since the user asked:
 {block}"""
+
+
+def load_sibling(name, exe):
+    """mochi_telegram.py from the repo, or the installed `mochi-telegram` next to this executable."""
+    here = Path(__file__).resolve().parent
+    for p in (here / f"{name}.py", here / exe, Path(shutil.which(exe) or ""), HOME / ".local/bin" / exe):
+        if p.is_file():
+            spec = importlib.util.spec_from_loader(name, importlib.machinery.SourceFileLoader(name, str(p)))
+            mod = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(mod)
+                return mod
+            except Exception:
+                return None
+    return None
+
+
+TG = load_sibling("mochi_telegram", "mochi-telegram")
 
 
 def now():
@@ -389,6 +414,189 @@ class Sessions:
                 for s in self.s.values()]
 
 
+# ---- your phone: the Telegram bot ----------------------------------------------------------------
+
+LATER = "Later"
+SHOW = "Show me"
+TG_HELP = """I'm Mochi. While you're away from the computer my questions come here with buttons; tap one and I act on it.
+Write me anything and I'll treat it as a task (reply to one of my questions to answer it in your own words).
+/asks  what's waiting   /brief  the latest report   /seen  today's journal   /status   /round"""
+
+
+class Telegram:
+    """The relay's line to your phone. Only the owner's id is listened to or written to. Sends are best effort:
+    if the bot can't reach you (you haven't opened it yet), the pig still has everything."""
+
+    def __init__(self, relay):
+        self.relay = relay
+        self.bot = TG.Bot() if TG else None
+        self.on = bool(self.bot and self.bot.enabled)
+        self.inbox = queue.Queue()
+        self.offset = int(relay.state.get("tg_offset") or 0)
+        self.trouble = ""  # the last reason a send failed, logged once per reason
+        self.ignored = set()
+        if self.on:
+            threading.Thread(target=self.poller, daemon=True).start()
+            log("telegram: bot connected (asks reach your phone while you're away)")
+        else:
+            log(f"telegram: off ({self.bot.why if self.bot else 'mochi-telegram not installed'})")
+
+    def poller(self):
+        while True:
+            try:
+                for u in self.bot.poll(self.offset, 50):
+                    self.offset = u["update_id"] + 1
+                    self.inbox.put(u)
+            except Exception as e:  # network blip, Telegram hiccup: wait and retry
+                if "timed out" not in str(e).lower():
+                    log(f"telegram: poll failed: {str(e)[:120]}")
+                time.sleep(15)
+
+    def quiet_now(self):
+        a, b = TG_QUIET_HOURS
+        h = dt.datetime.now().hour
+        return (h >= a or h < b) if a > b else (a <= h < b)
+
+    def may_buzz(self, urgent, critical=False):
+        """Whether an unsolicited message may make the phone ring: urgent, within the daily cap, outside quiet
+        hours (an urgent say is critical and ignores quiet hours)."""
+        if not urgent or not self.on:
+            return False
+        if self.quiet_now() and not critical:
+            return False
+        if self.relay.count("tg_buzz") >= TG_AUDIBLE_PER_DAY:
+            return False
+        self.relay.bump("tg_buzz")
+        return True
+
+    def send(self, text, buttons=None, buzz=False, reply_to=None):
+        if not self.on:
+            return None
+        try:
+            mid = self.bot.send(text, buttons=buttons, buzz=buzz, reply_to=reply_to)
+            if self.trouble:
+                log("telegram: reaching you again")
+                self.trouble = ""
+            return mid
+        except Exception as e:
+            why = f"open the bot in Telegram and press Start ({e})" if getattr(e, "unreachable", False) else str(e)
+            if why != self.trouble:
+                log(f"telegram: can't send: {why[:160]}")
+                self.trouble = why
+            return None
+
+    def edit(self, mid, text, buttons=None):
+        if self.on and mid:
+            try:
+                self.bot.edit(mid, text, buttons)
+            except Exception as e:
+                log(f"telegram: edit failed: {str(e)[:120]}")
+
+    def ask(self, aid, a, buzz=False):
+        """An ask as a message with its options as buttons (no chat button: there's no terminal on a phone)."""
+        opts = [o for o in a.get("options") or [] if o.lower() != CHAT.lower()]
+        if not a.get("path"):
+            opts = [o for o in opts if o.lower() != SHOW.lower()]
+        buttons = [(o, f"a:{aid}:{a['options'].index(o)}") for o in opts] + [(LATER, f"l:{aid}")]
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        text = ("❗ " if a.get("urgent") else "") + a["text"]
+        return self.send(text, buttons=rows, buzz=buzz)
+
+    def close(self, a, label):
+        """The ask is settled (answered anywhere, withdrawn, expired): take the buttons off its message."""
+        if a.get("tg"):
+            self.edit(a["tg"], f"{a['text']}\n\n✓ {label}")
+
+    def report_body(self, path, limit=2 * 4000):
+        try:
+            body = Path(path).read_text().strip()
+        except OSError as e:
+            return f"(can't read the report: {e})"
+        return body if len(body) <= limit else body[:limit] + "\n\n(… the rest is on the pig)"
+
+    # -- what arrives from the phone (called from the relay's loop thread)
+
+    def handle(self, u):
+        cq = u.get("callback_query")
+        if cq:
+            self.bot.answer_callback(cq["id"])
+            if not self.bot.is_owner(cq):
+                return
+            self.on_button(cq.get("data") or "", (cq.get("message") or {}).get("message_id"))
+            return
+        m = u.get("message")
+        if not m or not m.get("from"):
+            return
+        if not self.bot.is_owner(m):
+            uid = m["from"].get("id")
+            if uid not in self.ignored:
+                self.ignored.add(uid)
+                log(f"telegram: ignored a message from {TG.who(m)} (not the owner)")
+            return
+        self.on_text((m.get("text") or "").strip(), m)
+
+    def on_button(self, data, mid):
+        r = self.relay
+        kind, _, rest = data.partition(":")
+        aid, _, idx = rest.rpartition(":") if kind == "a" else (rest, "", "")
+        a = r.state["asks"].get(aid)
+        if not a:
+            self.edit(mid, "(already handled)")
+            return
+        a["tg"] = a.get("tg") or mid
+        if kind == "l":
+            self.edit(mid, f"{a['text']}\n\n⏳ later (it stays in the pig's menu)")
+            r.event(f"you tapped Later (on your phone) to: {a['text']}")
+            return
+        try:
+            label = (a.get("options") or [])[int(idx)]
+        except (ValueError, IndexError):
+            return
+        r.on_answer(aid, label, via="telegram")
+
+    def on_text(self, text, m):
+        r = self.relay
+        if not text:
+            return
+        cmd = text.split()[0].lower() if text.startswith("/") else ""
+        if cmd in ("/start", "/help"):
+            self.send(TG_HELP)
+        elif cmd == "/status":
+            age = human_age(now() - r.state["last_round"]) if r.state["last_round"] else "never"
+            self.send(f"{len(r.state['asks'])} things waiting, {r.count('rounds')} rounds today, last one {age} ago, "
+                      f"{'busy: ' + r.busy if r.busy else 'idle'}, you've been {'away' if r.away() else 'at the computer'}")
+        elif cmd == "/round":
+            busy = r.busy == "round" or any(t["kind"] == "round" for t in list(r.tasks.queue))
+            r.start_round("you asked for a round from your phone")
+            self.send("already on a round" if busy else "ok, looking around")
+        elif cmd == "/asks":
+            pending = list(r.state["asks"].items())
+            if not pending:
+                self.send("nothing waiting")
+            for aid, a in pending:
+                mid = self.ask(aid, a)
+                if mid:
+                    a["tg"] = mid
+        elif cmd in ("/brief", "/report"):
+            reports = sorted((a for a in r.state["asks"].values() if a.get("path")), key=lambda a: a["at"])
+            latest = next((p for p in sorted(REPORTS.glob("brief-*.md"), reverse=True)), None)
+            path = reports[-1]["path"] if reports else latest
+            self.send(self.report_body(path) if path else "no report yet")
+        elif cmd == "/seen":
+            p = JOURNAL / f"{today()}.md"
+            self.send(self.report_body(p) if p.exists() else "no journal yet today")
+        elif cmd:
+            self.send(TG_HELP)
+        else:
+            reply = (m.get("reply_to_message") or {}).get("message_id")
+            target = next((aid for aid, a in r.state["asks"].items() if reply and a.get("tg") == reply), None)
+            if target:  # a typed answer to one of the asks: their words become the label
+                r.on_answer(target, text[:160], via="telegram")
+            else:
+                r.ask(text, via="telegram")
+                self.send("on it", reply_to=m.get("message_id"))
+
+
 # ---- the relay -----------------------------------------------------------------------------------
 
 class Relay:
@@ -403,6 +611,7 @@ class Relay:
         self.results = queue.Queue()
         self.busy = None  # kind of the run in progress
         self.was_away = False
+        self.tg = Telegram(self)
         threading.Thread(target=self.worker, daemon=True).start()
 
     def load(self):
@@ -420,6 +629,7 @@ class Relay:
         return s
 
     def save(self):
+        self.state["tg_offset"] = self.tg.offset
         tmp = STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.state, indent=1))
         tmp.replace(STATE_FILE)
@@ -472,6 +682,11 @@ class Relay:
             try:
                 while not self.results.empty():
                     self.on_result(*self.results.get_nowait())
+                while not self.tg.inbox.empty():
+                    try:
+                        self.tg.handle(self.tg.inbox.get_nowait())
+                    except Exception:
+                        log("telegram message error:\n" + traceback.format_exc())
                 if due("sample", SAMPLE_EVERY):
                     self.activity.sample()
                 if due("presence", 60):
@@ -517,30 +732,42 @@ class Relay:
             if reports and Path(reports[-1]["path"]).exists():
                 open_text(reports[-1]["path"], reports[-1]["text"])
 
-    def on_answer(self, aid, label):
-        """The user picked one of the options Claude put on an ask. The label is Claude's own wording."""
+    def on_answer(self, aid, label, via="pig"):
+        """The user picked one of the options Claude put on an ask (on the pig, or on their phone). The label is
+        Claude's own wording, or, from the phone, their typed words."""
         a = self.state["asks"].pop(aid, None)
         if not a or not label:
             return
         low = label.lower()
         options = ", ".join(a.get("options") or [])
+        phone = via == "telegram"
+        if phone:
+            self.pet.withdraw(aid)
+        where = " (on your phone)" if phone else ""
         if low == "show me" and a.get("path"):
-            if Path(a["path"]).exists():
+            if phone:
+                self.tg.send(self.tg.report_body(a["path"]), reply_to=a.get("tg"))
+            elif Path(a["path"]).exists():
                 open_text(a["path"], a["text"])
-            self.event(f"user opened: {a['text']}")
+            self.tg.close(a, label)
+            self.event(f"user opened{where}: {a['text']}")
         elif low == CHAT.lower():
             self.event(f"user wanted to chat about: {a['text']} (see your notes from that chat)")
             if not open_chat(a.get("session") or None, CHAT_ASK_PROMPT.format(text=a["text"], options=options,
                                                                                 do=a.get("do") or "-")):
                 self.state["asks"][aid] = a
         elif low in CLOSERS:
-            self.pet.say("ok, never again" if low == "never" else "ok", 2)
-            self.event(f"user answered '{label}' to: {a['text']}")
+            if not phone:
+                self.pet.say("ok, never again" if low == "never" else "ok", 2)
+            self.tg.close(a, label)
+            self.event(f"user answered '{label}'{where} to: {a['text']}")
         else:  # anything else Claude put on the menu, "Yes, do it" included: a run to act on it
-            self.pet.say("on it!", 3)
-            self.event(f"user answered '{label}' to: {a['text']}")
+            if not phone:
+                self.pet.say("on it!", 3)
+            self.tg.close(a, f"{label} — on it")
+            self.event(f"user answered '{label}'{where} to: {a['text']}")
             self.tasks.put({"kind": "approved", "title": f"{label}: {a['text']}"[:160], "level": "approved",
-                            "model": TASK_MODEL, "timeout": 1200, "urgent": a.get("urgent", False),
+                            "model": TASK_MODEL, "timeout": 1200, "urgent": a.get("urgent", False), "via": via,
                             "prompt": ANSWER_PROMPT.format(label=label, text=a["text"], options=options,
                                                            do=a.get("do") or "-", block=BLOCK)})
         self.save()
@@ -550,25 +777,38 @@ class Relay:
         if text:
             send_brain(event="ask", text=text)
 
-    def ask(self, text):
-        self.event(f"user asked: {text[:200]}")
-        self.pet.say("on it!", 3)
-        self.tasks.put({"kind": "ask", "title": text[:60], "level": "approved", "model": TASK_MODEL,
+    def ask(self, text, via="pig"):
+        self.event(f"user asked{' (from their phone)' if via == 'telegram' else ''}: {text[:200]}")
+        if via != "telegram":
+            self.pet.say("on it!", 3)
+        self.tasks.put({"kind": "ask", "title": text[:60], "level": "approved", "model": TASK_MODEL, "via": via,
                         "timeout": 1200, "prompt": ASK_PROMPT.format(text=text, block=BLOCK)})
 
     # -- when to run a round (the only decision made here)
 
+    def away(self):
+        return self.activity.idle.seconds() > AWAY_AFTER
+
     def maybe_round(self):
-        away = self.activity.idle.seconds() > AWAY_AFTER
+        away = self.away()
         if away != self.was_away:
             self.was_away = away
             if away:
                 self.state["away_since"] = now()
+                for aid, a in self.state["asks"].items():  # what's waiting follows you to your phone, silently
+                    if not a.get("tg"):
+                        a["tg"] = self.tg.ask(aid, a)
             log("you're away" if away else "you're back")
+        first_today = self.state["counts"].get("day") != today() or self.count("rounds") == 0
         if away:
+            # With the bot set up, a light round now and then so what can't wait can still reach you.
+            if self.tg.on and not self.tg.quiet_now() and now() - self.state["last_round"] >= AWAY_ROUND_EVERY:
+                self.start_round(("first round of the day: include the morning brief; " if first_today else "")
+                                 + f"you're away from the computer ({human_age(now() - self.state['away_since'])}); "
+                                 "a light round: only what can't wait until they're back deserves an ask, and asks "
+                                 "reach their phone")
             return
         back_from_break = self.state["away_since"] and now() - self.state["away_since"] > LONG_BREAK
-        first_today = self.state["counts"].get("day") != today() or self.count("rounds") == 0
         if first_today:
             self.start_round("first round of the day: include the morning brief")
         elif back_from_break:
@@ -582,7 +822,11 @@ class Relay:
         digest = SENSES / "digest.md"
         return {
             "hostname": socket.gethostname(),
-            "you": self.activity.summary(60),
+            "you": dict(self.activity.summary(60), away=self.away(),
+                        away_for=human_age(now() - self.state["away_since"]) if self.away() and self.state["away_since"] else ""),
+            "telegram": ("connected: while they're away your asks and reports go to their phone as messages with buttons, "
+                         "and they can message you back; keep what crosses the wire short and vague (it passes through "
+                         "Telegram's servers)" if self.tg.on else "not set up"),
             "claude_sessions": self.sessions.summary(),
             "since_last_round": self.state["events"],
             "pending_asks": [{"id": aid, "text": a["text"], "options": a.get("options"),
@@ -656,15 +900,21 @@ class Relay:
                 self.event(f"your previous {kind} run failed: {res['error'][:200]}")
             else:
                 path = self.write_report(task["title"], f"**This run failed.** {res['error']}\n\n{res['text']}")
+                if task.get("via") == "telegram":
+                    self.tg.send(f"hm, that didn't work: {res['error'][:300]}")
                 self.add_ask(f"hm, that didn't work ({task['title'][:30]})", REPORT_OPTIONS, path=path,
-                             session=session, urgent=True)
+                             session=session, urgent=True, mirror=task.get("via") != "telegram")
             self.save()
             return
         if kind not in ("round", "discover"):  # something you asked for or approved: its answer is the report
             body, _ = strip_block(res["text"])
             path = self.write_report(task["title"], body)
             text = (data.get("say") or f"done: {task['title'][:40]}")[:160]
-            self.add_ask(text, REPORT_OPTIONS, path=path, session=session, urgent=bool(task.get("urgent")))
+            phone = task.get("via") == "telegram"
+            if phone:  # they asked from their phone and are waiting there: the answer goes back whole
+                self.tg.send(f"{text}\n\n{self.tg.report_body(path)}", buzz=True)
+            self.add_ask(text, REPORT_OPTIONS, path=path, session=session, urgent=bool(task.get("urgent")),
+                         mirror=not phone)
             self.pet.say(text, 6)
             self.event(f"finished '{task['title'][:80]}' (report filed)")
         self.apply(data, kind, session)
@@ -673,8 +923,10 @@ class Relay:
     def apply(self, data, kind, session=""):
         """The mochi block: the only way a run reaches you. Everything else it did is in its files."""
         for aid in data.get("withdraw") or []:
-            if self.state["asks"].pop(str(aid), None):
+            gone = self.state["asks"].pop(str(aid), None)
+            if gone:
                 self.pet.withdraw(str(aid))
+                self.tg.close(gone, "withdrawn")
         for a in (data.get("asks") or []) + (data.get("offers") or []):
             if not isinstance(a, dict) or not str(a.get("text", "")).strip():
                 continue
@@ -692,19 +944,26 @@ class Relay:
             if data.get("urgent"):
                 self.pet.say(say[:160], 10)
                 log(f"URGENT: {say}")
+                self.tg.send("❗ " + say[:1000], buzz=self.tg.may_buzz(True, critical=True))
             else:
                 log(f"quiet (not shown): {say}")
 
-    def add_ask(self, text, options, do="", path=None, aid=None, session="", urgent=False):
-        """Put something in the menu behind the dot. "Chat about it" is always one of the options."""
+    def add_ask(self, text, options, do="", path=None, aid=None, session="", urgent=False, mirror=True):
+        """Put something in the menu behind the dot. "Chat about it" is always one of the options. While you're
+        away (or when it's urgent) it also goes to your phone; urgent ones may buzz, within the daily cap."""
         aid = re.sub(r"[^a-zA-Z0-9_-]", "-", str(aid or uuid.uuid4().hex[:8]))[:40]
         options = [o for o in options if o.lower() != CHAT.lower()][:5] + [CHAT]
-        if aid in self.state["asks"]:  # same id again: refresh, keep its place
+        old = self.state["asks"].get(aid)
+        if old:  # same id again: refresh, keep its place
             self.pet.withdraw(aid)
-        self.state["asks"][aid] = {"text": text[:160], "options": options, "do": do[:2000], "path": str(path or ""),
-                                   "session": session, "urgent": urgent, "at": now()}
+            self.tg.close(old, "updated")
+        a = {"text": text[:160], "options": options, "do": do[:2000], "path": str(path or ""),
+             "session": session, "urgent": urgent, "at": now(), "tg": None}
+        self.state["asks"][aid] = a
         self.pet.ask(aid, text[:160], options, urgent)
-        log(f"ask{' (urgent)' if urgent else ''}: {text[:160]}  [{' | '.join(options)}]")
+        if mirror and (urgent or self.away()):
+            a["tg"] = self.tg.ask(aid, a, buzz=self.tg.may_buzz(urgent))
+        log(f"ask{' (urgent)' if urgent else ''}{' → phone' if a['tg'] else ''}: {text[:160]}  [{' | '.join(options)}]")
 
     def write_report(self, title, body):
         stamp = dt.datetime.now()
@@ -719,6 +978,7 @@ class Relay:
             if t - a["at"] > (2 * 3600 if a.get("urgent") else 3 * 86400):
                 self.pet.withdraw(aid)
                 self.state["asks"].pop(aid)
+                self.tg.close(a, "expired")
                 self.event(f"expired unanswered: {a['text']}")
         for aid, a in self.state["asks"].items():  # re-send, in case the pig restarted
             self.pet.ask(aid, a["text"], a.get("options") or REPORT_OPTIONS, a.get("urgent", False))
@@ -824,6 +1084,7 @@ def main(argv):
               "       mochi-brain --seen          Mochi's journal for the last two days\n"
               "       mochi-brain --report        open the latest report\n"
               "       mochi-brain --log           the relay's recent log\n"
+              "       mochi-telegram status       the Telegram bot: token, owner, reachable? (asks go to your phone when away)\n"
               f"      Mochi's workspace: {WORK}  (CLAUDE.md = its brief, memory/ = what it knows)")
         return 0 if a in ("-h", "--help") else 1
     try:

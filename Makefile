@@ -13,6 +13,7 @@ install: xpet
 	install -Dm755 brain/mochi_brain.py $(PREFIX)/bin/mochi-brain
 	install -Dm755 brain/mochi_sense.py $(PREFIX)/bin/mochi-sense
 	install -Dm755 brain/mochi_mail.py $(PREFIX)/bin/mochi-mail
+	install -Dm755 brain/mochi_telegram.py $(PREFIX)/bin/mochi-telegram
 	install -Dm644 brain/CLAUDE.md $(MOCHI_HOME)/CLAUDE.md
 
 # Start at login and keep running (see README).
@@ -26,7 +27,12 @@ test: tests/render_test.cpp src/art3d.hpp src/art.hpp
 	$(CXX) -std=c++17 -O2 -Wall -Wno-missing-field-initializers $(shell pkg-config --cflags cairo) tests/render_test.cpp -o tests/render_test $(shell pkg-config --libs cairo)
 	./tests/render_test
 
-clean:
-	rm -f xpet tests/render_test
+# Mochi's portrait, the Telegram bot's profile picture (dist/mochi-avatar.png).
+avatar: tests/portrait.cpp src/art3d.hpp src/art.hpp
+	$(CXX) -std=c++17 -O2 -Wno-missing-field-initializers $(shell pkg-config --cflags cairo) tests/portrait.cpp -o tests/portrait $(shell pkg-config --libs cairo)
+	./tests/portrait dist/mochi-avatar.png 8.5 650 70 h
 
-.PHONY: install install-autostart clean test
+clean:
+	rm -f xpet tests/render_test tests/portrait
+
+.PHONY: install install-autostart clean test avatar
