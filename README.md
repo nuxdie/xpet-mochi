@@ -149,6 +149,8 @@ mochi-sense nas ls Documents
 mochi-brain --senses                    # the digest the last round saw
 mochi-brain --discover                  # a long run that only works on the dossier
 mochi-brain --dream                     # sleep on it: fold journals into memory/patterns.md (nightly when away)
+mochi-brain --study                     # a night study session: read the archives for who you are (memory/portrait.md)
+mochi-brain --portrait                  # what Mochi has understood about you so far
 ```
 
 ### Your phone (Telegram)

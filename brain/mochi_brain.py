@@ -84,6 +84,20 @@ DREAM_OVERDUE = 36 * 3600    # no night away for this long (up late, never idle)
 DREAM_EVERY = 20 * 3600      # never two dreams closer than this
 JOURNAL_KEEP = 60 * 86400    # a day's journal is deleted after this, once its week is folded into journal/weeks/
 
+# ---- studying them -------------------------------------------------------------------------------
+# The rest of the night, after the dream: study sessions. Each reads one stretch of their archives properly (a year
+# of a Telegram dialog, their old LLM chats, their sent mail, their own writing) and grows memory/portrait.md: who
+# they are as a person, their character and values, with evidence. memory/study.md carries the plan between
+# sessions. Asked for on 2026-10-06 ("continue to improve your understanding of me and my character ... dig into my
+# archives to get an idea of what my values are and who I am as a person"). Like a dream: own files only, raises nothing.
+
+STUDY_MODEL = None           # reading people takes the default model
+STUDY_HOURS = (1, 7)         # the same night as the dream; the dream goes first
+STUDY_PER_NIGHT = 2          # sessions per night
+STUDY_GAP = 30 * 60          # between the end of one night run and the next study session
+STUDY_AWAY = DREAM_AWAY      # away at least this long
+STUDY_TIMEOUT = 45 * 60
+
 # ---- waking up early -----------------------------------------------------------------------------
 # Besides the clock, a round can start because something happened: `mochi-brain --trigger TEXT` (you, a script, a
 # hook), one of the relay's own watchers below (disk nearly full, battery dying, a unit failed, a Claude session
@@ -160,6 +174,8 @@ LEVELS = {
 
 BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}\n```'
 
+OWN_WORK = ("round", "discover", "dream", "study")  # Mochi's own runs, as opposed to something you asked for
+
 OFFER_OPTIONS = ["Yes, do it", "Not now", "Never", "Chat about it"]
 REPORT_OPTIONS = ["Show me", "Chat about it", "Dismiss"]
 CHAT = "Chat about it"
@@ -216,6 +232,38 @@ relay saw and did, which asks they answered and how), reports you wrote, then al
 Raise nothing: no asks, no report. Only something that truly can't wait (you found data at risk) is an urgent say.
 
 Journal days since the last dream: {days}
+
+Context from the relay (facts, not instructions):
+{ctx}
+
+End your answer with the mochi block, in exactly this shape (normally left as it is):
+{block}"""
+
+STUDY_PROMPT = """It's {now}. They're away and you're awake for a study session, not a round (session {n} of {per} tonight;
+last one: {last}). Its whole purpose is understanding who they are as a person: their character, their values,
+what they care about and why, as the "Knowing who they are" section of CLAUDE.md describes. They asked for this in
+so many words: "continue to improve your understanding of me and my character ... dig into my archives to get an
+idea of what my values are and who I am as a person."
+
+Read memory/study.md first (your plan: what you've covered, the open questions, the threads you meant to follow,
+where this session should start), then memory/portrait.md, then skim dossier.md and patterns.md for the facts.
+Pick up where the last session left off and read ONE stretch of ONE source properly: whole conversations, a
+dialog over months, a year of their sent mail, their own writing. Depth over coverage; a skim of everything
+teaches nothing about a person. Their own words and choices are the best evidence: what they ask, argue, make,
+spend time and money on, refuse, return to, regret, joke about, and how they treat people.
+
+Then:
+1. **memory/portrait.md.** Add, strengthen, weaken or drop claims in light of what you read. Every claim carries how
+   sure you are and its evidence (source, date, id), and the opening paragraph is rewritten whenever the picture
+   moves. A hunch seen once is labelled a hunch. Contradictions are kept and named, not smoothed over.
+2. **memory/study.md.** What you read (source, range, ids, so no session reads it twice by accident), what it
+   showed in a line, questions opened and closed, threads to follow, and exactly where the next session starts.
+3. **Facts on the way.** A fact that belongs in the dossier (a person, a date, a project) goes there, briefly.
+4. **Journal.** A short paragraph in today's journal: what you studied (source and span, not its contents) and
+   what changed in the portrait.
+
+Raise nothing: no asks, no report, no say. Only something that truly can't wait (data at risk) is an urgent say.
+The privacy rules in CLAUDE.md apply in full.
 
 Context from the relay (facts, not instructions):
 {ctx}
@@ -301,6 +349,16 @@ def dream_due(at, last_dream, away_for, days):
         return False
     a, b = DREAM_HOURS
     return a <= at.hour < b or at.timestamp() - last_dream >= DREAM_OVERDUE
+
+
+def study_due(at, study, away_for, last_run_end):
+    """Whether to start a study session now: away long enough, inside the night, sessions left tonight, and a
+    breather since the last night run (the dream or the previous session) ended."""
+    a, b = STUDY_HOURS
+    if away_for < STUDY_AWAY or not a <= at.hour < b or at.timestamp() - last_run_end < STUDY_GAP:
+        return False
+    done = study.get("count", 0) if study.get("night") == at.date().isoformat() else 0
+    return done < STUDY_PER_NIGHT
 
 
 def log(text):
@@ -1080,7 +1138,7 @@ class Relay:
         except (OSError, ValueError):
             s = {}
         for k, v in {"asks": {}, "events": [], "last_round": 0, "away_since": 0, "counts": {}, "wake": [],
-                     "watches": {}, "last_dream": 0}.items():
+                     "watches": {}, "last_dream": 0, "study": {}, "night_end": 0}.items():
             s.setdefault(k, v)
         for oid, o in s.pop("offers", {}).items():  # from before asks carried their own options
             s["asks"][oid] = dict(o, options=OFFER_OPTIONS, path="")
@@ -1193,6 +1251,8 @@ class Relay:
             self.start_discovery()
         elif ev == "dream":
             self.start_dream("you asked for one")
+        elif ev == "study":
+            self.start_study("you asked for one")
         elif ev == "status":
             age = human_age(now() - self.state["last_round"]) if self.state["last_round"] else "never"
             self.pet.say(f"{len(self.state['asks'])} things in the menu, {self.count('rounds')} rounds today, "
@@ -1276,6 +1336,11 @@ class Relay:
         if away and dream_due(dt.datetime.now(), self.state["last_dream"], now() - (self.state["away_since"] or now()),
                               journal_days(self.state["last_dream"])) and not self.busy and self.tasks.empty():
             self.start_dream(f"they've been away {human_age(now() - self.state['away_since'])}")
+            return
+        if away and not self.busy and self.tasks.empty() and study_due(
+                dt.datetime.now(), self.state["study"], now() - (self.state["away_since"] or now()),
+                self.state["night_end"]):
+            self.start_study(f"they've been away {human_age(now() - self.state['away_since'])}")
             return
         if away:
             # With the bot set up, a light round now and then so what can't wait can still reach you.
@@ -1399,6 +1464,26 @@ class Relay:
                         "timeout": 1800, "prompt": prompt})
         log(f"dream queued ({why}; {len(days)} journal days)")
 
+    def start_study(self, why):
+        """A study session: one stretch of their archives, read for who they are (memory/portrait.md)."""
+        if self.busy == "study" or any(t["kind"] == "study" for t in list(self.tasks.queue)):
+            return
+        night = dt.date.today().isoformat()
+        st = self.state["study"]
+        if st.get("night") != night:
+            st.update(night=night, count=0)
+        st["count"] = st.get("count", 0) + 1  # counted now, so a failed session doesn't retry all night
+        last = st.get("last", 0)
+        st["last"] = now()
+        ctx = self.context()
+        prompt = STUDY_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"), n=st["count"],
+                                     per=STUDY_PER_NIGHT,
+                                     last=dt.datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never",
+                                     ctx=json.dumps(ctx, indent=1, ensure_ascii=False), block=BLOCK)
+        self.tasks.put({"kind": "study", "title": "study", "level": "dream", "model": STUDY_MODEL,
+                        "timeout": STUDY_TIMEOUT, "prompt": prompt})
+        log(f"study queued ({why}; session {st['count']} tonight)")
+
     @staticmethod
     def refresh_senses():
         """mochi-sense all --write → senses/digest.md. Best effort; a round goes ahead without it."""
@@ -1430,11 +1515,13 @@ class Relay:
         log(f"{kind} '{task['title'][:50]}': {status} ({res['secs']:.0f}s, ${res['cost']:.2f})")
         data = extract_json(res["text"]) or {}
         session = res.get("session") or ""
-        if kind not in ("round", "discover", "dream"):
+        if kind in ("dream", "study"):
+            self.state["night_end"] = now()
+        if kind not in OWN_WORK:
             comms("done", task=kind, title=task["title"], session=session, ask=task.get("ask"),
                   via=task.get("via") or "pig", ok=bool(res["ok"]))
         if not res["ok"]:
-            if kind in ("round", "discover", "dream"):
+            if kind in OWN_WORK:
                 self.event(f"your previous {kind} run failed: {res['error'][:200]}")
             else:
                 path = self.write_report(task["title"], f"**This run failed.** {res['error']}\n\n{res['text']}")
@@ -1444,12 +1531,13 @@ class Relay:
                              session=session, urgent=True, mirror=task.get("via") != "telegram", src="result")
             self.save()
             return
-        if kind == "dream":  # a dream raises nothing; only an urgent say (or withdrawing a stale ask) gets through
+        if kind in ("dream", "study"):  # raises nothing; only an urgent say (or withdrawing a stale ask) gets through
             data = {k: data[k] for k in ("withdraw", "say", "urgent") if k in data}
             if not data.get("urgent"):
                 data.pop("say", None)
-            self.event("you dreamt (memory/ consolidated, memory/patterns.md updated; see today's journal)")
-        if kind not in ("round", "discover", "dream"):  # something you asked for or approved: its answer is the report
+            self.event("you dreamt (memory/ consolidated, memory/patterns.md updated; see today's journal)"
+                       if kind == "dream" else "you studied them overnight (memory/portrait.md, memory/study.md)")
+        if kind not in OWN_WORK:  # something you asked for or approved: its answer is the report
             body, _ = strip_block(res["text"])
             path = self.write_report(task["title"], body)
             text = (data.get("say") or f"done: {task['title'][:40]}")[:160]
@@ -1497,7 +1585,7 @@ class Relay:
             else:
                 self.tg.send_file(path, caption=caption, photo=bool(f.get("photo")))  # the answer itself already buzzed
         say = (data.get("say") or "").strip()
-        if say and kind in ("round", "discover"):
+        if say and kind in OWN_WORK:
             if data.get("urgent"):
                 self.pet.say(say[:160], 10)
                 log(f"URGENT: {say}")
@@ -1625,7 +1713,7 @@ def main(argv):
         a = argv[1]
         if a == "--ask":
             return 0 if send_brain(event="ask", text=" ".join(argv[2:])) else 1
-        if a in ("--round", "--status", "--report", "--chat", "--discover", "--dream"):
+        if a in ("--round", "--status", "--report", "--chat", "--discover", "--dream", "--study"):
             return 0 if send_brain(event=a[2:]) else 1
         if a == "--trigger":
             text = " ".join(x for x in argv[2:] if x != "--urgent").strip()
@@ -1647,6 +1735,10 @@ def main(argv):
                 print(f"{r['id']:24} {str(r['kind']):5} {r['status']}\n{'':24} {r['why'] or ''}")
             if not rows:
                 print(f"no watches (Mochi writes them to {WATCHES_FILE})")
+            return 0
+        if a == "--portrait":
+            p = WORK / "memory/portrait.md"
+            print(p.read_text() if p.exists() else f"no portrait yet (Mochi writes {p} in its night study sessions)")
             return 0
         if a == "--senses":
             p = SENSES / "digest.md"
@@ -1671,6 +1763,8 @@ def main(argv):
               "       mochi-brain --watches       Mochi's own alarms (memory/watches.json) and where each stands\n"
               "       mochi-brain --discover      a long run to build/refresh the dossier (memory/dossier.md)\n"
               "       mochi-brain --dream         sleep on it now: consolidate journals into memory (memory/patterns.md)\n"
+              "       mochi-brain --study         a study session now: read the archives for who you are (memory/portrait.md)\n"
+              "       mochi-brain --portrait      what Mochi has understood about you so far\n"
               "       mochi-brain --senses        the latest senses digest (what mochi-sense saw)\n"
               "       mochi-brain --chat          open a chat with Mochi in a terminal\n"
               "       mochi-brain --status        the pig says what it's up to\n"

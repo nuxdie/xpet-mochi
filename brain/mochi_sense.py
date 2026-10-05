@@ -175,7 +175,7 @@ def md_table(rows, head):
     return "\n".join(out)
 
 
-VALUE_OPTS = {"--days", "-d", "--limit", "--lines", "--grep"}
+VALUE_OPTS = {"--days", "-d", "--limit", "--lines", "--grep", "--page", "--date", "--chars", "--provider"}
 
 
 def split_args(args):
@@ -374,6 +374,19 @@ def tg_who(m):
     return s.get("name") or s.get("id") or "?"
 
 
+def tg_self_id(tg):
+    """Their own Telegram user id: the Saved Messages dialog, or the owner id the bot was paired with."""
+    owner = str((CFG.get("telegram") or {}).get("owner_id") or "")
+    if owner:
+        return owner
+    try:
+        ds = tg.get("/api/dialogs")
+        ds = ds if isinstance(ds, list) else ds.get("dialogs") or []
+        return next((str(d.get("tgDialogId")) for d in ds if (d.get("entity") or {}).get("self")), "")
+    except (urllib.error.URLError, OSError, ValueError):
+        return ""
+
+
 def dialog_name(d):
     e = d.get("entity") or {}
     if e.get("self"):
@@ -390,18 +403,43 @@ def sense_telegram(args):
     pos = positional(args)
     sub = pos[0] if pos else "recent"
     try:
+        chars = int(opt(args, "--chars") or 0)  # set: one message per line, text up to this long (deep reading)
         if sub == "search":
             q = " ".join(pos[1:])
-            d = tg.get("/api/messages/search", q=q, limit=int(opt(args, "--limit") or 25))
+            page = int(opt(args, "--page") or 1)
+            d = tg.get("/api/messages/search", q=q, limit=int(opt(args, "--limit") or 25), page=page)
+            pg = d.get("pagination", {})
+            title = f"{head}\n**Search `{q}`**: {pg.get('totalCount', '?')} hits, page {page} of {pg.get('total', '?')}\n"
+            if chars:
+                return title + "\n".join(f"- {m.get('metadata', {}).get('originalDate', '')[:16]} [{m.get('chatName', '')[:30]}] "
+                                          f"{tg_who(m)[:20]}: {tg_text(m)[:chars]}" for m in d.get("messages", []))
             rows = [(m.get("metadata", {}).get("originalDate", "")[:16], m.get("chatName", "")[:30], tg_who(m)[:20], tg_text(m)[:90])
                     for m in d.get("messages", [])]
-            return f"{head}\n**Search `{q}`**: {d.get('pagination', {}).get('totalCount', len(rows))} hits\n" + \
-                md_table(rows, ["when", "chat", "from", "text"])
+            return title + md_table(rows, ["when", "chat", "from", "text"])
+        if sub == "range":
+            d = tg.get(f"/api/dialog/{pos[1]}/date-range")
+            return f"{head}\n**Dialog {pos[1]}** spans: {json.dumps(d)[:300]}"
         if sub == "dialog":
             did = pos[1]
-            d = tg.get(f"/api/dialog/{did}/messages", limit=int(opt(args, "--limit") or 40))
-            rows = [(m.get("metadata", {}).get("originalDate", "")[:16], tg_who(m)[:20], tg_text(m)[:100]) for m in d.get("messages", [])]
-            return f"{head}\n**Dialog {did}** (newest first):\n" + md_table(rows, ["when", "from", "text"])
+            limit = min(int(opt(args, "--limit") or 40), 100)
+            date = opt(args, "--date")
+            me = tg_self_id(tg)
+            if date:  # history: the messages around the first one on or after this date, oldest first
+                d = tg.get(f"/api/dialog/{did}/messages/cursor", date=date, limit=limit)
+                msgs = d.get("messages", [])
+                order = f"around {date}, oldest first" + ("; older exist" if d.get("hasOlder") else "") + \
+                        ("; newer exist" if d.get("hasNewer") else "")
+            else:
+                page = int(opt(args, "--page") or 1)
+                d = tg.get(f"/api/dialog/{did}/messages", limit=limit, page=page)
+                msgs = d.get("messages", [])
+                order = f"newest first, page {page} of {d.get('pagination', {}).get('total', '?')}"
+            who = lambda m: "me" if me and str((m.get("sender") or {}).get("id")) == me else tg_who(m)[:20]
+            if chars:
+                return f"{head}\n**Dialog {did}** ({order}):\n" + "\n".join(
+                    f"- {m.get('metadata', {}).get('originalDate', '')[:16]} {who(m)}: {tg_text(m)[:chars]}" for m in msgs)
+            rows = [(m.get("metadata", {}).get("originalDate", "")[:16], who(m), tg_text(m)[:100]) for m in msgs]
+            return f"{head}\n**Dialog {did}** ({order}):\n" + md_table(rows, ["when", "from", "text"])
         # recent / dialogs
         status = tg.get("/api/agent/status")
         dialogs = tg.get("/api/dialogs")
@@ -492,8 +530,24 @@ def sense_llm(args):
     sub = pos[0] if pos else "recent"
     q = " ".join(pos[1:]) if sub == "search" else ""
     limit = int(opt(args, "--limit") or 25)
+    chars = int(opt(args, "--chars") or 600)
+    page = max(1, int(opt(args, "--page") or 1))
+    provider = opt(args, "--provider")
     if a.cookie:
         try:
+            if sub == "list":
+                params = {"limit": min(limit, 100), "offset": (page - 1) * min(limit, 100)}
+                if provider:
+                    params["provider"] = provider
+                d = a.get("/api/conversations", **params)
+                return f"{head} (live)\n**Conversations, newest first, page {page}**:\n" + llm_list_rows(
+                    [(c["id"], c.get("provider", ""), c.get("title") or "", (c.get("created_at") or "")[:10],
+                      c.get("message_count", "")) for c in d.get("items", [])])
+            if sub == "show":
+                c = a.get(f"/api/conversations/{int(pos[1])}")
+                return f"{head} (live)\n" + llm_show(c.get("provider", ""), c.get("title") or "", c.get("created_at") or "",
+                                                       [(m.get("role"), m.get("created_at"), m.get("text") or "") for m in c.get("messages", [])],
+                                                       chars)
             if sub == "search":
                 d = a.get("/api/search", q=q, limit=min(limit, 50))
                 rows = [(r.get("provider", ""), (r.get("title") or "")[:50], (r.get("created_at") or "")[:10], (r.get("snippet") or r.get("text") or "")[:90])
@@ -511,6 +565,21 @@ def sense_llm(args):
     con = snapshot_sqlite(a.local)
     snap = dt.date.fromtimestamp(Path(a.local).stat().st_mtime).isoformat()
     out = [f"{head}\n_{a.why}; local copy last updated {snap}_"]
+    if sub == "list":
+        rows = con.execute("select c.id, c.provider, c.title, substr(c.created_at,1,10), count(m.id) from conversations c "
+                           "left join messages m on m.conversation_id=c.id where (? is null or c.provider=?) group by c.id "
+                           "order by coalesce(c.updated_at, c.created_at) desc limit ? offset ?",
+                           (provider, provider, min(limit, 100), (page - 1) * min(limit, 100))).fetchall()
+        out.append(f"**Conversations, newest first, page {page}**:\n" + llm_list_rows(rows))
+        return "\n".join(out)
+    if sub == "show":
+        c = con.execute("select provider, title, created_at from conversations where id=?", (int(pos[1]),)).fetchone()
+        if not c:
+            return "\n".join(out + [f"_no conversation {pos[1]}_"])
+        msgs = con.execute("select role, created_at, text from messages where conversation_id=? order by sequence, id",
+                           (int(pos[1]),)).fetchall()
+        out.append(llm_show(c[0], c[1], c[2] or "", msgs, chars))
+        return "\n".join(out)
     if sub == "search":
         rows = con.execute("select f.provider, f.title, substr(f.text,1,120) t, c.created_at from messages_fts f "
                            "join conversations c on c.id=f.conversation_id where messages_fts match ? "
@@ -530,6 +599,22 @@ def sense_llm(args):
                 if w.lower() not in STOP:
                     topics[w.lower()] += 1
         out.append("**Frequent words in titles (last year of the copy)**: " + ", ".join(f"{w} ({n})" for w, n in topics.most_common(30)))
+    return "\n".join(out)
+
+
+def llm_list_rows(rows):
+    return md_table([(i, p, (t or "")[:60], d, n) for i, p, t, d, n in rows], ["id", "provider", "title", "created", "msgs"])
+
+
+def llm_show(provider, title, created, msgs, chars):
+    """A whole conversation for reading: their messages in full (up to 4x chars), the model's cut to chars."""
+    out = [f"**{title}** ({provider}, {created[:10]}, {len(msgs)} messages)"]
+    for role, at, text in msgs:
+        text = (text or "").strip()
+        if not text:
+            continue
+        cap = chars * 4 if role == "user" else chars
+        out.append(f"\n[{role} {(at or '')[:16]}]\n{text[:cap]}" + (" […]" if len(text) > cap else ""))
     return "\n".join(out)
 
 
@@ -563,11 +648,43 @@ def parse_smb_ls(out):
     return rows
 
 
+def nas_read(path, chars):
+    """The text of one document on the NAS (txt/md/csv/html/pdf/docx/odt), fetched into a temp file and deleted."""
+    path = path.strip().strip("/")
+    ext = Path(path).suffix.lower()
+    if not path or ext not in {".txt", ".md", ".csv", ".html", ".htm", ".json", ".pdf", ".docx", ".odt", ".rtf"}:
+        return f"_can't read `{path}`: only text, pdf, docx and odt documents_"
+    TMP.mkdir(parents=True, exist_ok=True)
+    local = TMP / ("nas-read" + ext)
+    try:
+        d, name = (path.rsplit("/", 1) if "/" in path else ("", path))
+        code, out, err = smb((f'cd "{d}"; ' if d else "") + f'get "{name}" "{local}"', timeout=90)
+        if code != 0 or not local.exists():
+            return f"_error: {(err or out).strip()[:200]}_"
+        if ext == ".pdf":
+            code, text, err = run(["pdftotext", "-layout", str(local), "-"], timeout=60)
+        elif ext in (".docx", ".odt"):
+            import zipfile
+            with zipfile.ZipFile(local) as z:
+                xml = z.read("word/document.xml" if ext == ".docx" else "content.xml").decode("utf-8", "replace")
+            text = re.sub(r"<[^>]+>", "", re.sub(r"</(w:p|text:p|text:h)>", "\n", xml))
+        else:
+            text = local.read_text(errors="replace")
+        text = text.strip()
+        return f"**{path}** ({len(text)} chars{', cut' if len(text) > chars else ''}):\n\n{text[:chars]}"
+    except (OSError, ValueError, KeyError) as e:
+        return f"_error reading `{path}`: {e}_"
+    finally:
+        local.unlink(missing_ok=True)
+
+
 def sense_nas(args):
     c = CFG["nas"]
     head = f"## NAS ({c['share']})"
     pos = positional(args)
     sub = pos[0] if pos else "recent"
+    if sub == "read":
+        return f"{head}\n" + nas_read(" ".join(pos[1:]), int(opt(args, "--chars") or 20000))
     if sub == "ls":
         path = pos[1] if len(pos) > 1 else ""
         code, out, err = smb(f'ls "{path}/*"' if path else "ls")
@@ -1080,9 +1197,9 @@ def sense_sources(args):
 SENSORS = {
     "browser": (sense_browser, "browser history: sites, searches, pages  [--days N] [--grep REGEX]"),
     "shell": (sense_shell, "shell history: commands, hosts, dirs  [--lines N]"),
-    "telegram": (sense_telegram, "telegram archive: recent | dialogs | search WORDS | dialog ID  [--days N] [--limit N]"),
-    "llm": (sense_llm, "llm chat archive: recent | search WORDS  [--limit N]"),
-    "nas": (sense_nas, "nas: recent [--days N] | ls PATH"),
+    "telegram": (sense_telegram, "telegram archive: recent | dialogs | search WORDS [--page N] | dialog ID [--date YYYY-MM-DD | --page N] | range ID  [--days N] [--limit N] [--chars N]"),
+    "llm": (sense_llm, "llm chat archive: recent | search WORDS | list [--page N] [--provider P] | show ID [--chars N]  [--limit N]"),
+    "nas": (sense_nas, "nas: recent [--days N] | ls PATH | read PATH [--chars N]"),
     "photos": (sense_photos, "immich: counts and newest uploads"),
     "home": (sense_home, "home assistant: people, what's on, vacuums, climate, recent changes  [--grep REGEX | WORD]"),
     "hosts": (sense_hosts, "ssh hosts: uptime, disk, failed units, containers  [HOST] | HOST COMMAND..."),

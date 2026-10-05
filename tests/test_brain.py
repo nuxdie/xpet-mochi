@@ -282,6 +282,18 @@ class Dreams(unittest.TestCase):
         self.assertTrue(mb.dream_due(t, t.timestamp() - mb.DREAM_OVERDUE, mb.DREAM_AWAY, ["d"]))
         self.assertTrue(mb.dream_due(t, 0, mb.DREAM_AWAY, ["d"]))                  # never dreamt
 
+    def test_study_at_night_after_a_breather(self):
+        t = self.at(3)
+        night = t.date().isoformat()
+        long_ago = t.timestamp() - mb.STUDY_GAP - 60
+        self.assertTrue(mb.study_due(t, {}, mb.STUDY_AWAY, 0))                            # never studied
+        self.assertTrue(mb.study_due(t, {"night": night, "count": 1}, mb.STUDY_AWAY, long_ago))
+        self.assertFalse(mb.study_due(t, {"night": night, "count": mb.STUDY_PER_NIGHT}, mb.STUDY_AWAY, long_ago))
+        self.assertTrue(mb.study_due(t, {"night": "2000-01-01", "count": 9}, mb.STUDY_AWAY, long_ago))  # a new night
+        self.assertFalse(mb.study_due(t, {}, mb.STUDY_AWAY - 1, 0))                       # not away long enough
+        self.assertFalse(mb.study_due(t, {}, mb.STUDY_AWAY, t.timestamp() - 60))          # the dream just ended
+        self.assertFalse(mb.study_due(self.at(15), {}, mb.STUDY_AWAY, 0))                 # daytime
+
     def test_dream_level_writes_only_own_files(self):
         lv = mb.LEVELS["dream"]
         self.assertIn("Write(memory/**)", lv)
