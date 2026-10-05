@@ -1,0 +1,11 @@
+[Unit]
+Description=Pull mail for Mochi every 10 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+RandomizedDelaySec=45s
+Unit=mochi-mail.service
+
+[Install]
+WantedBy=timers.target

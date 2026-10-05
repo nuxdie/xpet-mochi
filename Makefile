@@ -19,7 +19,7 @@ install: xpet
 
 # Start at login and keep running (see README).
 install-autostart: install
-	install -Dm644 dist/xpet.service dist/mochi-brain.service -t $(HOME)/.config/systemd/user
+	install -Dm644 dist/xpet.service dist/mochi-brain.service dist/mochi-mail.service dist/mochi-mail.timer -t $(HOME)/.config/systemd/user
 	install -Dm644 dist/xpet.desktop -t $(HOME)/.config/autostart
 	systemctl --user daemon-reload
 
@@ -27,6 +27,7 @@ install-autostart: install
 test: tests/render_test.cpp src/art3d.hpp src/art.hpp
 	$(CXX) -std=c++17 -O2 -Wall -Wno-missing-field-initializers $(shell pkg-config --cflags cairo) tests/render_test.cpp -o tests/render_test $(shell pkg-config --libs cairo)
 	./tests/render_test
+	python3 -m unittest discover -s tests -p 'test_*.py'
 
 # Mochi's portrait, the Telegram bot's profile picture (dist/mochi-avatar.png).
 avatar: tests/portrait.cpp src/art3d.hpp src/art.hpp

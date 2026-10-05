@@ -1,0 +1,9 @@
+[Unit]
+Description=Mochi mail sync: mbsync pull from Gmail, then notmuch index (read-only on the server)
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=12h
+ExecStart=/bin/sh -c 'mbsync -a; rc=$$?; notmuch new --quiet; date +%%s > %h/Mail/.last-sync; exit $$rc'

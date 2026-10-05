@@ -9,17 +9,21 @@ block: offers for you (yes / not now / never), a report to put behind the dot, a
 urgent to say out loud.
 
 What this file does, on purpose, and nothing more:
-  - decides WHEN to run (presence, cadence, daily cap), never WHAT to think
+  - decides WHEN to run (presence, cadence, daily cap, and triggers: a watcher of its own, Mochi's watches in
+    memory/watches.json, or `mochi-brain --trigger`), never WHAT to think
   - enforces WHICH TOOLS a run may use: read-only + Gmail drafts + its own files for a round, broader for
     things you said yes to or asked for, and a deny list no level can override
   - carries messages between the pig and the runs (offers, clicks, asks, Claude Code hook events)
   - keeps the quiet rule: only something marked urgent reaches you as a bubble
   - while you're away, mirrors asks to your phone through the Telegram bot (mochi-telegram) and carries your
     taps and typed messages back; an urgent say may buzz the phone, within a daily cap and quiet hours
+  - carries files both ways: what you send the bot lands in inbox/ and becomes a task; a run's `files` and any
+    report that is a document or picture reach your phone through the bot
 """
 
 import ctypes
 import datetime as dt
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -42,7 +46,11 @@ from pathlib import Path
 HOME = Path.home()
 WORK = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share") / "mochi"  # Claude's workspace
 MEMORY, JOURNAL, REPORTS, SENSES = WORK / "memory", WORK / "journal", WORK / "reports", WORK / "senses"
+INBOX = WORK / "inbox"  # files you send the bot from your phone
+TEXT_TYPES = {".md", ".txt", ".log", ".json", ".csv", ".eml", ".yaml", ".yml", ".html", ""}  # shown as text, not sent as files
 STATE_FILE = WORK / "relay.json"
+WATCHES_FILE = MEMORY / "watches.json"  # Mochi's own alarms (see Watches)
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "mochi" / "sources.json"
 LOG_FILE = WORK / "actions.log"
 RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 PET_SOCK = RUNTIME / "xpet.sock"
@@ -62,6 +70,31 @@ TG_AUDIBLE_PER_DAY = 3       # Telegram messages that may buzz your phone per da
 TG_QUIET_HOURS = (23, 8)     # nothing buzzes between these hours, except an urgent say
 ROUND_MODEL = "sonnet"
 TASK_MODEL = None            # things you asked for or approved: the default model
+
+# ---- sleeping on it --------------------------------------------------------------------------------
+# Once a day, while they're away (at night, or after a day without one), a dream: a run that reads back over the
+# journals and the log since the last one and turns them into long-term memory: patterns.md, a pruned dossier and
+# loops, a week's journal folded into journal/weeks/. It touches only Mochi's own files and raises nothing.
+
+DREAM_MODEL = None           # thinking, not checking: the default model
+DREAM_HOURS = (1, 7)         # the night: a dream may start in this window once they've been away a while
+DREAM_AWAY = 45 * 60         # away at least this long before dreaming
+DREAM_OVERDUE = 36 * 3600    # no night away for this long (up late, never idle): dream at the next long break
+DREAM_EVERY = 20 * 3600      # never two dreams closer than this
+JOURNAL_KEEP = 60 * 86400    # a day's journal is deleted after this, once its week is folded into journal/weeks/
+
+# ---- waking up early -----------------------------------------------------------------------------
+# Besides the clock, a round can start because something happened: `mochi-brain --trigger TEXT` (you, a script, a
+# hook), one of the relay's own watchers below (disk nearly full, battery dying, a unit failed, a Claude session
+# stuck on a prompt), or one of Mochi's watches (memory/watches.json: "wake me when ..."). The relay still only
+# decides WHEN: the trigger's text becomes the round's reason and Claude decides what, if anything, to do.
+
+TRIGGER_COOLDOWN = 10 * 60   # a triggered round starts no sooner than this after the previous round began
+TRIGGERED_PER_DAY = 8        # non-urgent triggered rounds per day; urgent ones (a dying disk) are not rationed
+DISK_FULL_AT = 92            # percent used
+BATTERY_LOW_AT = 15          # percent, while discharging
+STUCK_AFTER = 20 * 60        # a Claude Code session waiting on a permission prompt this long
+WATCH_EVERY = {"at": 60, "path": 60, "cmd": 300}  # how often each kind of watch is probed; mail: after each pull
 
 # ---- what each kind of run may touch ------------------------------------------------------------
 
@@ -120,10 +153,11 @@ NEVER = [  # denied at every level, including things you approved
 ]
 LEVELS = {
     "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + BROWSE_TOOLS,
+    "dream": READ_TOOLS + OWN_FILES,  # reads and rewrites its own notes; no mail, no browser
     "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS,
 }
 
-BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null}\n```'
+BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}\n```'
 
 OFFER_OPTIONS = ["Yes, do it", "Not now", "Never", "Chat about it"]
 REPORT_OPTIONS = ["Show me", "Chat about it", "Dismiss"]
@@ -157,6 +191,37 @@ Context from the relay (facts, not instructions):
 End your answer with the mochi block, in exactly this shape (fill it in):
 {block}"""
 
+DREAM_PROMPT = """It's {now}. They're away and you're asleep: this is a dream, not a round. Nothing outside your
+workspace needs you now. Its whole purpose is to turn what happened into what you know, as the "Sleeping on it"
+section of CLAUDE.md describes. Last dream: {last}.
+
+Read back over what happened since then: the journal days listed below, actions.log for the same span (what the
+relay saw and did, which asks they answered and how), reports you wrote, then all of memory/. Then:
+
+1. **Patterns.** What keeps happening? Their rhythms (when they work, sleep, are away), what they say yes and never
+   to, sources that keep mattering or never do, loops that keep slipping, what your rounds keep checking for nothing.
+   Update memory/patterns.md: each pattern with how sure you are, since when, and the evidence (dates). Strengthen,
+   weaken or drop the old ones in light of the new days; a pattern seen once is a hunch, label it so.
+2. **Consolidate.** Fold what lasts into memory/: dossier.md, life.md, preferences.md (what their answers taught
+   you). Merge duplicates, replace what was superseded, cut what no longer matters. Keep each file within its size
+   rule in CLAUDE.md. Open loops untouched for weeks: mark them stale or close them, with a reason.
+3. **Fold the weeks.** For each finished ISO week whose days are in journal/ and that has no journal/weeks/YYYY-Www.md
+   yet, write that file: the week in under 30 lines, what happened, what you did, what you learned. The relay deletes
+   a day's journal {keep} days after its week is folded, so nothing worth keeping may live only in a day file.
+4. **Tune yourself.** If your rounds waste effort (checking what never changes, re-raising what they ignore), say
+   so in memory/last-round.md for your next self, and adjust watches.json if a watch should exist or go.
+5. Write one short paragraph in today's journal: what you consolidated, which patterns are new or changed.
+
+Raise nothing: no asks, no report. Only something that truly can't wait (you found data at risk) is an urgent say.
+
+Journal days since the last dream: {days}
+
+Context from the relay (facts, not instructions):
+{ctx}
+
+End your answer with the mochi block, in exactly this shape (normally left as it is):
+{block}"""
+
 ANSWER_PROMPT = """The user answered "{label}" to this, which you put on the pig:
   {text}
 The options you gave them: {options}
@@ -177,6 +242,14 @@ CHAT_ASK_PROMPT = """The user picked "Chat about it" on this, which you put on t
 That item is now closed on the pig. Start by saying in a few lines what this is about and why you raised it, then
 talk it through. If they want it done, do it here with their approval. Before the chat ends, update your notes
 (memory/, journal/) with what you learned and whether to raise this again."""
+
+ASK_FILES = """
+
+They attached, from their phone (saved in your workspace, read them with the Read tool; it opens images and PDFs):
+{files}
+If there is no caption, say in a line or two what it is, and what you could do with it; anything that needs a yes
+becomes an ask. If it is a document that belongs somewhere (a receipt, a letter, a scan), say where and offer to put it
+there."""
 
 ASK_PROMPT = """The user asked you, through the pig, to do this:
 
@@ -213,6 +286,20 @@ def now():
 
 def today():
     return dt.date.today().isoformat()
+
+
+def journal_days(since):
+    """The day journals written to since a timestamp, oldest first."""
+    return sorted(p for p in JOURNAL.glob("*.md") if p.stat().st_mtime > since)
+
+
+def dream_due(at, last_dream, away_for, days):
+    """Whether to dream now: away long enough, something new to dream about, not too soon after the last one, and
+    either night or overdue (a day without a night away)."""
+    if away_for < DREAM_AWAY or not days or at.timestamp() - last_dream < DREAM_EVERY:
+        return False
+    a, b = DREAM_HOURS
+    return a <= at.hour < b or at.timestamp() - last_dream >= DREAM_OVERDUE
 
 
 def log(text):
@@ -307,10 +394,34 @@ def notify(text):
     run(["notify-send", "-a", "Mochi", "Mochi", text], timeout=5)
 
 
+def is_text(path):
+    return Path(path).suffix.lower() in TEXT_TYPES
+
+
 def open_text(path, title="Mochi"):
+    """Show a report on screen: text in a zenity window, anything else (PDF, picture) in its own application."""
+    if not is_text(path):
+        subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        return
     subprocess.Popen(["zenity", "--text-info", f"--filename={path}", f"--title={title}",
                       "--width=780", "--height=640", "--font=Monospace 10"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def resolve_file(value):
+    """A path from the mochi block: relative to the workspace, or absolute; it must be an existing file in their
+    home (or Mochi's workspace). None otherwise."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        path = (WORK / os.path.expanduser(raw)).resolve()  # absolute paths win in the join
+        if not path.is_file() or not (WORK in path.parents or HOME in path.parents):
+            return None
+        return path
+    except OSError:
+        return None
 
 
 def ask_box():
@@ -438,12 +549,268 @@ class Sessions:
                 for s in self.s.values()]
 
 
+# ---- waking up early: Mochi's watches and the relay's watchers -----------------------------------
+
+def allowed_cmd(cmd):
+    """Whether a command line stays within the read-only Bash allow-list of a round (the same prefixes Claude Code
+    enforces there), so a watch can't run anything a round couldn't. No shell operators: it runs without a shell."""
+    if not cmd or re.search(r"[|;&<>`$\n]", cmd):
+        return False
+    for t in READ_TOOLS:
+        m = re.fullmatch(r"Bash\((.+?)(:\*)?\)", t)
+        if m and (cmd == m.group(1) or (m.group(2) and cmd.startswith(m.group(1) + " "))):
+            return True
+    return False
+
+
+def parse_when(value):
+    """'2026-10-16' or '2026-10-16 10:00' (local time) → datetime, else None."""
+    try:
+        return dt.datetime.fromisoformat(str(value).strip()) if value else None
+    except ValueError:
+        return None
+
+
+class Watches:
+    """Mochi's own alarms: memory/watches.json, a JSON list of {"id", "kind", "why", ...} that Claude writes in a
+    round ("wake me when the reply lands", "wake me on the 16th if nothing came"). The spec is Claude's; the relay
+    owns only the runtime side (baselines, fired and expired marks, kept in relay.json), so a fired watch stays
+    fired until Claude removes or edits it. Kinds:
+      at    {"when": "2026-10-16 10:00"}                       fires once that time has passed
+      mail  {"query": "from:we-id.nl and date:2026-10-05.."}   fires when new mail matches (notmuch count grows)
+      path  {"path": "~/Scans/inbox"}                          fires when the path appears or its mtime changes
+      cmd   {"run": "ping -c1 -W2 sff.local", "fires_when": "succeeds|fails|changes"}   read-only allow-list only
+    Common: "why" (what to do when it fires), "until" (expiry; expiring unfired also wakes Claude, once), "urgent"
+    (skip the cooldown and quiet hours), "repeat" (fire on every new hit), "every" (seconds between probes).
+    Every kind but `at` takes its baseline at the first look and fires on a change from it."""
+
+    def __init__(self, path, state, fire, maildir=None):
+        self.path, self.state, self.fire, self.maildir = path, state, fire, maildir
+        self.error = ""
+        self.synced = None  # mtime of maildir/.last-sync at the last look
+
+    def load(self):
+        if not self.path.exists():
+            self.error = ""
+            return []
+        try:
+            specs = json.loads(self.path.read_text())
+        except (OSError, ValueError) as e:
+            self.error = f"can't parse {self.path.name}: {e}"
+            return []
+        if isinstance(specs, dict):
+            specs = specs.get("watches", [])
+        if not isinstance(specs, list):
+            self.error = f"{self.path.name} must be a JSON list of watches"
+            return []
+        self.error = ""
+        return [w for w in specs if isinstance(w, dict)]
+
+    @staticmethod
+    def wid(w):
+        return re.sub(r"[^a-zA-Z0-9_-]", "-", str(w.get("id") or ""))[:40]
+
+    def mail_synced(self):
+        """True once per completed mail pull (mochi-mail.timer writes maildir/.last-sync), and on the first look."""
+        try:
+            m = (self.maildir / ".last-sync").stat().st_mtime if self.maildir else None
+        except OSError:
+            m = None
+        changed = m != self.synced or self.synced is None
+        self.synced = m
+        return changed
+
+    def check(self):
+        t, mail, seen = now(), self.mail_synced(), set()
+        for w in self.load():
+            wid = self.wid(w)
+            if not wid or wid in seen:
+                continue
+            seen.add(wid)
+            sig = json.dumps(w, sort_keys=True)
+            st = self.state.get(wid)
+            if not st or st.get("sig") != sig:  # new, or Claude edited it: start over with a fresh baseline
+                st = self.state[wid] = {"sig": sig, "since": t}
+            if st.get("invalid") or st.get("expired") or (st.get("fired") and not w.get("repeat")):
+                continue
+            kind, why, urgent = str(w.get("kind") or ""), str(w.get("why") or "")[:200], bool(w.get("urgent"))
+            until = parse_when(w.get("until"))
+            if until and t > until.timestamp():
+                st["expired"] = t
+                if not st.get("fired"):
+                    self.fire(f"watch '{wid}' expired without firing ({why or kind})", urgent)
+                continue
+            every = w.get("every") or WATCH_EVERY.get(kind, 60)
+            if kind == "mail":
+                if "seen" in st and not mail:
+                    continue
+            elif "checked" in st and t - st["checked"] < every:
+                continue
+            st["checked"] = t
+            try:
+                hit, detail = self.probe(kind, w, st)
+            except ValueError as e:
+                st["invalid"] = str(e)
+                log(f"watch '{wid}' is invalid: {e}")
+                continue
+            if hit:
+                st["fired"], st["hits"] = t, st.get("hits", 0) + 1
+                self.fire(f"watch '{wid}' fired" + (f", {detail}" if detail else "") + (f": {why}" if why else ""), urgent)
+        for wid in [k for k in self.state if k not in seen]:  # gone from the file: forget it
+            del self.state[wid]
+
+    def probe(self, kind, w, st):
+        """(hit, detail). Baselines go into st at the first look; ValueError marks the watch invalid."""
+        if kind == "at":
+            when = parse_when(w.get("when"))
+            if not when:
+                raise ValueError("at: 'when' must be like 2026-10-16 or 2026-10-16 10:00")
+            return now() >= when.timestamp(), f"it's past {when:%a %d %b %H:%M}"
+        if kind == "mail":
+            q = str(w.get("query") or "").strip()
+            if not q:
+                raise ValueError("mail: 'query' (notmuch syntax) is required")
+            code, out, _ = run(["notmuch", "count", q], timeout=30)
+            if code != 0 or not out.strip().isdigit():
+                return False, ""  # notmuch busy or not installed: try again after the next pull
+            n, old = int(out.strip()), st.get("seen")
+            st["seen"] = n
+            return old is not None and n > old, f"{n - old} new message(s) match" if old is not None else ""
+        if kind == "path":
+            raw = str(w.get("path") or "").strip()
+            if not raw:
+                raise ValueError("path: 'path' is required")
+            try:
+                m = Path(os.path.expanduser(raw)).stat().st_mtime
+            except OSError:
+                m = None
+            first, old = "mtime" not in st, st.get("mtime")
+            st["mtime"] = m
+            if first or m is None:
+                return False, ""
+            return m != old, "it appeared" if old is None else "it changed"
+        if kind == "cmd":
+            cmd = str(w.get("run") or "").strip()
+            if not allowed_cmd(cmd):
+                raise ValueError("cmd: not within the read-only Bash allow-list of a round")
+            mode = str(w.get("fires_when") or "succeeds")
+            if mode not in ("succeeds", "fails", "changes"):
+                raise ValueError("cmd: fires_when must be succeeds, fails or changes")
+            code, out, err = run(shlex.split(cmd), timeout=30)
+            if mode == "changes":
+                cur = hashlib.sha1((out + err).encode()).hexdigest()
+            else:
+                cur = (code == 0) if mode == "succeeds" else (code != 0)
+            first, old = "was" not in st, st.get("was")
+            st["was"] = cur
+            if first:
+                return False, ""
+            hit = cur != old if mode == "changes" else (cur and not old)
+            return hit, "its output changed" if mode == "changes" else f"exit {code}"
+        raise ValueError(f"unknown kind '{kind}' (at, mail, path, cmd)")
+
+    def status(self):
+        """For the round's context: each watch and where it stands."""
+        rows = []
+        for w in self.load():
+            wid = self.wid(w)
+            st = self.state.get(wid, {})
+            if st.get("invalid"):
+                s = "INVALID: " + st["invalid"] + " (fix or remove it)"
+            elif st.get("expired"):
+                s = f"expired {dt.datetime.fromtimestamp(st['expired']):%d %b %H:%M} unfired (remove it)"
+            elif st.get("fired"):
+                s = f"fired {dt.datetime.fromtimestamp(st['fired']):%d %b %H:%M} (remove it once handled)"
+            else:
+                s = "waiting" + (f" until {w['until']}" if w.get("until") else "")
+            rows.append({"id": wid, "kind": w.get("kind"), "why": w.get("why"), "status": s})
+        if self.error:
+            return {"error": self.error, "watches": rows}
+        return rows
+
+
+class Watchers:
+    """The relay's own cheap checks between rounds, for the things that shouldn't wait for the clock. Each condition
+    fires once when it appears and not again until it has cleared. The first look after a start reports its findings
+    as events only (an old failed unit must not wake Claude on every restart), except urgent ones."""
+
+    def __init__(self, fire, sessions):
+        self.fire, self.sessions = fire, sessions
+        self.groups, self.on, self.n = {}, set(), 0
+
+    def check(self):
+        self.n += 1
+        self.groups["disk"], self.groups["battery"], self.groups["stuck"] = self.disks(), self.battery(), self.stuck()
+        if self.n % 5 == 1:
+            self.groups["failed"] = self.failed()
+        cur = {k: v for g in self.groups.values() for k, v in g.items()}
+        for k, (text, urgent) in cur.items():
+            if k not in self.on:
+                self.fire(text, urgent, wake=urgent or self.n > 1)
+        self.on = set(cur)
+
+    @staticmethod
+    def disks():
+        out, seen = {}, set()
+        try:
+            lines = Path("/proc/mounts").read_text().splitlines()
+        except OSError:
+            return out
+        for line in lines:
+            dev, mnt, fs = line.split()[:3]
+            if not dev.startswith("/dev/") or fs in ("squashfs", "iso9660") or dev in seen:
+                continue
+            seen.add(dev)
+            try:
+                u = shutil.disk_usage(mnt.replace("\\040", " "))
+            except OSError:
+                continue
+            pct = u.used * 100 // u.total if u.total else 0
+            if pct >= DISK_FULL_AT:
+                out[f"disk:{mnt}"] = (f"disk nearly full: {mnt} is at {pct}% ({u.free // 2**30} GB free)", pct >= 97)
+        return out
+
+    @staticmethod
+    def battery():
+        out = {}
+        for d in Path("/sys/class/power_supply").glob("*"):
+            try:
+                if (d / "type").read_text().strip() != "Battery":
+                    continue
+                cap, status = int((d / "capacity").read_text()), (d / "status").read_text().strip()
+            except (OSError, ValueError):
+                continue
+            if status == "Discharging" and cap <= BATTERY_LOW_AT:
+                out[f"battery:{d.name}"] = (f"battery low: {d.name} at {cap}% and discharging", cap <= 7)
+        return out
+
+    def stuck(self):
+        out = {}
+        for sid, s in self.sessions.s.items():
+            if s["state"].startswith("needs the user") and now() - s["since"] >= STUCK_AFTER:
+                out[f"stuck:{sid}:{int(s['since'])}"] = (f"their Claude Code session in {s['cwd'] or '?'} has been "
+                                                        f"waiting on a prompt for {human_age(now() - s['since'])}", False)
+        return out
+
+    @staticmethod
+    def failed():
+        out = {}
+        for scope in ((), ("--user",)):
+            code, o, _ = run(["systemctl", *scope, "--failed", "--no-legend", "--plain", "--no-pager"], timeout=10)
+            for line in o.splitlines() if code == 0 else []:
+                unit = line.split()[0] if line.split() else ""
+                if unit:
+                    out[f"failed:{scope}:{unit}"] = (f"{'user ' if scope else ''}unit {unit} has failed", False)
+        return out
+
+
 # ---- your phone: the Telegram bot ----------------------------------------------------------------
 
 LATER = "Later"
 SHOW = "Show me"
 TG_HELP = """I'm Mochi. While you're away from the computer my questions come here with buttons; tap one and I act on it.
 Write me anything and I'll treat it as a task (reply to one of my questions to answer it in your own words).
+Send me a photo or a document (a caption says what to do with it) and I'll take it from there.
 /asks  what's waiting   /brief  the latest report   /seen  today's journal   /status   /round"""
 
 
@@ -509,6 +876,25 @@ class Telegram:
                 self.trouble = why
             return None
 
+    def send_file(self, path, caption="", buzz=False, reply_to=None, photo=False):
+        """A file to the phone, silently unless buzz. Returns the message id, or None if it couldn't go."""
+        if not self.on:
+            return None
+        try:
+            mid = self.bot.send_file(path, caption=caption[:1024], buzz=buzz, reply_to=reply_to, photo=photo)
+            log(f"telegram: sent {Path(path).name}")
+            return mid
+        except (TG.TgError, OSError) as e:
+            log(f"telegram: can't send {Path(path).name}: {str(e)[:160]}")
+            self.send(f"(couldn't send {Path(path).name}: {str(e)[:200]})", reply_to=reply_to)
+            return None
+
+    def show(self, path, caption="", reply_to=None):
+        """'Show me' on the phone: a text report as a message, anything else (PDF, picture) as the file itself."""
+        if is_text(path):
+            return self.send(self.report_body(path), reply_to=reply_to)
+        return self.send_file(path, caption=caption, reply_to=reply_to)
+
     def edit(self, mid, text, buttons=None):
         if self.on and mid:
             try:
@@ -557,7 +943,31 @@ class Telegram:
                 self.ignored.add(uid)
                 log(f"telegram: ignored a message from {TG.who(m)} (not the owner)")
             return
-        self.on_text((m.get("text") or "").strip(), m)
+        att = TG.attachment(m)
+        if att:
+            self.on_file(att, (m.get("caption") or "").strip(), m)
+        else:
+            self.on_text((m.get("text") or "").strip(), m)
+
+    def on_file(self, att, caption, m):
+        """A photo or document from the phone: fetch it into inbox/ and hand it to a run (as the answer to the ask it
+        replies to, else as a task with the caption as the instruction)."""
+        r = self.relay
+        try:
+            path = self.bot.download(att, INBOX)
+        except (TG.TgError, OSError) as e:
+            log(f"telegram: can't fetch {att['name']}: {str(e)[:160]}")
+            self.send(f"couldn't fetch that: {str(e)[:200]}", reply_to=m.get("message_id"))
+            return
+        log(f"telegram: received {att['kind']} → {path.relative_to(WORK)} ({(att['size'] or 0) // 1024} KB)"
+            + (f", caption: {caption[:80]}" if caption else ""))
+        reply = (m.get("reply_to_message") or {}).get("message_id")
+        target = next((aid for aid, a in r.state["asks"].items() if reply and a.get("tg") == reply), None)
+        if target:
+            r.on_answer(target, f"{caption or 'see the attached file'} [file: {path}]"[:300], via="telegram")
+        else:
+            r.ask(caption or f"(a {att['kind']} from your phone, no caption)", via="telegram", files=[path])
+            self.send("got it, looking", reply_to=m.get("message_id"))
 
     def on_button(self, data, mid):
         r = self.relay
@@ -605,7 +1015,10 @@ class Telegram:
             reports = sorted((a for a in r.state["asks"].values() if a.get("path")), key=lambda a: a["at"])
             latest = next((p for p in sorted(REPORTS.glob("brief-*.md"), reverse=True)), None)
             path = reports[-1]["path"] if reports else latest
-            self.send(self.report_body(path) if path else "no report yet")
+            if path:
+                self.show(path, caption=reports[-1]["text"] if reports else "")
+            else:
+                self.send("no report yet")
         elif cmd == "/seen":
             p = JOURNAL / f"{today()}.md"
             self.send(self.report_body(p) if p.exists() else "no journal yet today")
@@ -621,11 +1034,19 @@ class Telegram:
                 self.send("on it", reply_to=m.get("message_id"))
 
 
+def maildir():
+    """Where mochi-mail.timer pulls mail to (sources.json, mail.maildir), so watches can tell a fresh pull."""
+    try:
+        return Path(os.path.expanduser(json.loads(CONFIG.read_text()).get("mail", {}).get("maildir") or "~/Mail"))
+    except (OSError, ValueError):
+        return HOME / "Mail"
+
+
 # ---- the relay -----------------------------------------------------------------------------------
 
 class Relay:
     def __init__(self):
-        for d in (MEMORY, JOURNAL, REPORTS, SENSES):
+        for d in (MEMORY, JOURNAL, REPORTS, SENSES, INBOX):
             d.mkdir(parents=True, exist_ok=True)
         self.state = self.load()
         self.pet = Pet()
@@ -636,6 +1057,10 @@ class Relay:
         self.busy = None  # kind of the run in progress
         self.was_away = False
         self.tg = Telegram(self)
+        self.watches = Watches(WATCHES_FILE, self.state["watches"], lambda text, urgent: self.trigger(text, urgent, "watch"),
+                               maildir=maildir())
+        self.watchers = Watchers(lambda text, urgent, wake: self.trigger(text, urgent, "watcher", wake), self.sessions)
+        self.capped = ""
         threading.Thread(target=self.worker, daemon=True).start()
 
     def load(self):
@@ -643,7 +1068,8 @@ class Relay:
             s = json.loads(STATE_FILE.read_text())
         except (OSError, ValueError):
             s = {}
-        for k, v in {"asks": {}, "events": [], "last_round": 0, "away_since": 0, "counts": {}}.items():
+        for k, v in {"asks": {}, "events": [], "last_round": 0, "away_since": 0, "counts": {}, "wake": [],
+                     "watches": {}, "last_dream": 0}.items():
             s.setdefault(k, v)
         for oid, o in s.pop("offers", {}).items():  # from before asks carried their own options
             s["asks"][oid] = dict(o, options=OFFER_OPTIONS, path="")
@@ -715,6 +1141,10 @@ class Relay:
                     self.activity.sample()
                 if due("presence", 60):
                     self.maybe_round()
+                if due("watch", 60):
+                    self.watchers.check()
+                    self.watches.check()
+                self.maybe_wake()
                 if due("housekeeping", 600):
                     self.housekeeping()
                 if due("save", 60):
@@ -745,8 +1175,13 @@ class Relay:
             log(f"pig said hello, re-sent {len(self.state['asks'])} asks")
         elif ev == "round":
             self.start_round("you asked for a round now")
+        elif ev == "trigger":
+            self.trigger((m.get("text") or "").strip()[:500] or "an unnamed trigger", bool(m.get("urgent")),
+                         str(m.get("source") or "trigger")[:20])
         elif ev == "discover":
             self.start_discovery()
+        elif ev == "dream":
+            self.start_dream("you asked for one")
         elif ev == "status":
             age = human_age(now() - self.state["last_round"]) if self.state["last_round"] else "never"
             self.pet.say(f"{len(self.state['asks'])} things in the menu, {self.count('rounds')} rounds today, "
@@ -770,7 +1205,7 @@ class Relay:
         where = " (on your phone)" if phone else ""
         if low == "show me" and a.get("path"):
             if phone:
-                self.tg.send(self.tg.report_body(a["path"]), reply_to=a.get("tg"))
+                self.tg.show(a["path"], caption=a["text"], reply_to=a.get("tg"))
             elif Path(a["path"]).exists():
                 open_text(a["path"], a["text"])
             self.tg.close(a, label)
@@ -801,12 +1236,14 @@ class Relay:
         if text:
             send_brain(event="ask", text=text)
 
-    def ask(self, text, via="pig"):
-        self.event(f"user asked{' (from their phone)' if via == 'telegram' else ''}: {text[:200]}")
+    def ask(self, text, via="pig", files=None):
+        self.event(f"user asked{' (from their phone)' if via == 'telegram' else ''}: {text[:200]}"
+                   + (f" [files: {', '.join(Path(f).name for f in files)}]" if files else ""))
         if via != "telegram":
             self.pet.say("on it!", 3)
+        prompt = text + (ASK_FILES.format(files="\n".join(f"- {f}" for f in files)) if files else "")
         self.tasks.put({"kind": "ask", "title": text[:60], "level": "approved", "model": TASK_MODEL, "via": via,
-                        "timeout": 1200, "prompt": ASK_PROMPT.format(text=text, block=BLOCK)})
+                        "timeout": 1200, "prompt": ASK_PROMPT.format(text=prompt, block=BLOCK)})
 
     # -- when to run a round (the only decision made here)
 
@@ -824,6 +1261,10 @@ class Relay:
                         a["tg"] = self.tg.ask(aid, a)
             log("you're away" if away else "you're back")
         first_today = self.state["counts"].get("day") != today() or self.count("rounds") == 0
+        if away and dream_due(dt.datetime.now(), self.state["last_dream"], now() - (self.state["away_since"] or now()),
+                              journal_days(self.state["last_dream"])) and not self.busy and self.tasks.empty():
+            self.start_dream(f"they've been away {human_age(now() - self.state['away_since'])}")
+            return
         if away:
             # With the bot set up, a light round now and then so what can't wait can still reach you.
             if self.tg.on and not self.tg.quiet_now() and now() - self.state["last_round"] >= AWAY_ROUND_EVERY:
@@ -841,6 +1282,37 @@ class Relay:
             self.start_round("regular round")
         self.state["away_since"] = 0
 
+    def trigger(self, text, urgent=False, source="trigger", wake=True):
+        """Something happened that may deserve a round before the clock says so. The relay notes it for Claude and,
+        if the rationing allows (maybe_wake), starts a round with it as the reason; what to do about it is Claude's."""
+        self.event(f"[{source}] {text}")
+        if wake:
+            self.state["wake"] = (self.state["wake"] + [{"text": text[:500], "urgent": bool(urgent), "at": now()}])[-10:]
+            self.maybe_wake()
+
+    def maybe_wake(self):
+        """Start the round a trigger asked for, once nothing is running and the rationing allows: a cooldown after
+        the last round, a daily cap, and nothing while they're away at night. Urgent triggers skip all three."""
+        pend = self.state["wake"]
+        if not pend or self.busy or not self.tasks.empty():
+            return
+        urgent = any(w["urgent"] for w in pend)
+        if not urgent:
+            if now() - self.state["last_round"] < TRIGGER_COOLDOWN:
+                return
+            if self.count("triggered") >= TRIGGERED_PER_DAY:
+                if self.capped != today():
+                    self.capped = today()
+                    log(f"triggered rounds capped for today ({TRIGGERED_PER_DAY}); triggers wait for the clock")
+                return
+            if self.away() and self.tg.quiet_now():
+                return
+        reasons = "; ".join(w["text"] for w in pend)
+        self.state["wake"] = []
+        self.bump("triggered")
+        self.start_round(f"woken early by {'an URGENT trigger' if urgent else 'a trigger'}, not the clock: {reasons}",
+                         force=urgent)
+
     def context(self):
         """What the relay knows and Claude doesn't: presence, screen, sessions, events, pending asks, senses."""
         digest = SENSES / "digest.md"
@@ -854,21 +1326,26 @@ class Relay:
                         else "not available (mochi-browser needs chrome-devtools-mcp)"),
             "telegram": ("connected: while they're away your asks and reports go to their phone as messages with buttons, "
                          "and they can message you back; keep what crosses the wire short and vague (it passes through "
-                         "Telegram's servers)" if self.tg.on else "not set up"),
+                         "Telegram's servers). Files: what they send you lands in inbox/; `files` in your block, or a "
+                         "report whose path is a PDF or picture, reaches their phone" if self.tg.on else "not set up"),
             "claude_sessions": self.sessions.summary(),
             "since_last_round": self.state["events"],
             "pending_asks": [{"id": aid, "text": a["text"], "options": a.get("options"),
                               "waiting_for": human_age(now() - a["at"])} for aid, a in self.state["asks"].items()],
             "rounds_today": self.count("rounds"), "rounds_per_day_max": MAX_ROUNDS_PER_DAY,
+            "watches": self.watches.status(),
+            "waking": "a round can start before the clock: `mochi-brain --trigger TEXT`, the relay's own watchers "
+                      "(disk, battery, failed units, stuck sessions), or your watches in memory/watches.json "
+                      "(see CLAUDE.md, 'Waking up early')",
             "senses": f"{digest.relative_to(WORK)} is refreshed by the relay right before this run "
                       f"(`mochi-sense all`); for more, run `mochi-sense <sense> ...` (see `mochi-sense --help`)",
         }
 
-    def start_round(self, reason):
+    def start_round(self, reason, force=False):
         if self.busy == "round" or any(t["kind"] == "round" for t in list(self.tasks.queue)):
-            return
-        if self.count("rounds") >= MAX_ROUNDS_PER_DAY:
-            return
+            return False
+        if self.count("rounds") >= MAX_ROUNDS_PER_DAY and not force:
+            return False
         self.bump("rounds")
         self.state["last_round"] = now()
         ctx = self.context()
@@ -878,6 +1355,7 @@ class Relay:
         self.tasks.put({"kind": "round", "title": "round", "level": "round", "model": ROUND_MODEL,
                         "timeout": 900, "prompt": prompt, "senses": True})
         log(f"round queued ({reason})")
+        return True
 
     def start_discovery(self):
         """A long, read-only run whose only job is the dossier (mochi-brain --discover)."""
@@ -891,6 +1369,23 @@ class Relay:
                         "timeout": 2400, "prompt": prompt, "senses": True})
         self.pet.say("looking around...", 3)
         log("discovery queued")
+
+    def start_dream(self, why):
+        """Sleeping on it: a run that reads back over the journals since the last dream and consolidates memory/."""
+        if self.busy == "dream" or any(t["kind"] == "dream" for t in list(self.tasks.queue)):
+            return
+        last = self.state["last_dream"]
+        self.state["last_dream"] = now()  # set now, so a failed dream doesn't retry all night
+        days = journal_days(last)
+        ctx = self.context()
+        prompt = DREAM_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"),
+                                     last=dt.datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never",
+                                     days=", ".join(f"journal/{p.name}" for p in days) or "none",
+                                     keep=JOURNAL_KEEP // 86400, ctx=json.dumps(ctx, indent=1, ensure_ascii=False),
+                                     block=BLOCK)
+        self.tasks.put({"kind": "dream", "title": "dream", "level": "dream", "model": DREAM_MODEL,
+                        "timeout": 1800, "prompt": prompt})
+        log(f"dream queued ({why}; {len(days)} journal days)")
 
     @staticmethod
     def refresh_senses():
@@ -924,7 +1419,7 @@ class Relay:
         data = extract_json(res["text"]) or {}
         session = res.get("session") or ""
         if not res["ok"]:
-            if kind in ("round", "discover"):
+            if kind in ("round", "discover", "dream"):
                 self.event(f"your previous {kind} run failed: {res['error'][:200]}")
             else:
                 path = self.write_report(task["title"], f"**This run failed.** {res['error']}\n\n{res['text']}")
@@ -934,7 +1429,12 @@ class Relay:
                              session=session, urgent=True, mirror=task.get("via") != "telegram")
             self.save()
             return
-        if kind not in ("round", "discover"):  # something you asked for or approved: its answer is the report
+        if kind == "dream":  # a dream raises nothing; only an urgent say (or withdrawing a stale ask) gets through
+            data = {k: data[k] for k in ("withdraw", "say", "urgent") if k in data}
+            if not data.get("urgent"):
+                data.pop("say", None)
+            self.event("you dreamt (memory/ consolidated, memory/patterns.md updated; see today's journal)")
+        if kind not in ("round", "discover", "dream"):  # something you asked for or approved: its answer is the report
             body, _ = strip_block(res["text"])
             path = self.write_report(task["title"], body)
             text = (data.get("say") or f"done: {task['title'][:40]}")[:160]
@@ -963,10 +1463,23 @@ class Relay:
                          session=session, urgent=bool(a.get("urgent")))
         rep = data.get("report")
         if isinstance(rep, dict) and rep.get("path"):
-            path = (WORK / str(rep["path"])).resolve()
-            if path.exists() and WORK in path.parents:
+            path = resolve_file(rep["path"])
+            if path:
                 self.add_ask(str(rep.get("title") or path.stem), REPORT_OPTIONS, path=path, session=session,
                              urgent=bool(data.get("urgent")))
+        # Files for their phone. In a run they asked for, they go now (with the answer, if they asked from the phone).
+        # A round may not push files out: its files wait behind the dot as reports, "Show me" delivers them.
+        for f in data.get("files") or []:
+            f = f if isinstance(f, dict) else {"path": f}
+            path = resolve_file(f.get("path"))
+            if not path:
+                log(f"file not sent (not a readable file in their home): {str(f.get('path'))[:120]}")
+                continue
+            caption = str(f.get("caption") or "")[:1024]
+            if kind in ("round", "discover"):
+                self.add_ask(caption[:160] or path.name, REPORT_OPTIONS, path=path, session=session)
+            else:
+                self.tg.send_file(path, caption=caption, photo=bool(f.get("photo")))  # the answer itself already buzzed
         say = (data.get("say") or "").strip()
         if say and kind in ("round", "discover"):
             if data.get("urgent"):
@@ -1012,6 +1525,16 @@ class Relay:
             self.pet.ask(aid, a["text"], a.get("options") or REPORT_OPTIONS, a.get("urgent", False))
         for old in REPORTS.glob("*.md"):
             if t - old.stat().st_mtime > 60 * 86400:
+                old.unlink(missing_ok=True)
+        for old in JOURNAL.glob("*.md"):  # a day's journal goes once a dream has folded its week into journal/weeks/
+            try:
+                y, w, _ = dt.date.fromisoformat(old.stem).isocalendar()
+            except ValueError:
+                continue
+            if t - old.stat().st_mtime > JOURNAL_KEEP and (JOURNAL / "weeks" / f"{y}-W{w:02d}.md").exists():
+                old.unlink(missing_ok=True)
+        for old in INBOX.glob("*"):  # what they sent from the phone; Mochi files what matters elsewhere
+            if old.is_file() and t - old.stat().st_mtime > 90 * 86400:
                 old.unlink(missing_ok=True)
 
 
@@ -1084,8 +1607,29 @@ def main(argv):
         a = argv[1]
         if a == "--ask":
             return 0 if send_brain(event="ask", text=" ".join(argv[2:])) else 1
-        if a in ("--round", "--status", "--report", "--chat", "--discover"):
+        if a in ("--round", "--status", "--report", "--chat", "--discover", "--dream"):
             return 0 if send_brain(event=a[2:]) else 1
+        if a == "--trigger":
+            text = " ".join(x for x in argv[2:] if x != "--urgent").strip()
+            if not text:
+                print("usage: mochi-brain --trigger [--urgent] TEXT", file=sys.stderr)
+                return 1
+            return 0 if send_brain(event="trigger", text=text, urgent="--urgent" in argv[2:], source="cli") else 1
+        if a == "--watches":
+            try:
+                st = json.loads(STATE_FILE.read_text()).get("watches", {})
+            except (OSError, ValueError):
+                st = {}
+            ws = Watches(WATCHES_FILE, st, lambda *_: None)
+            rows = ws.status()
+            if isinstance(rows, dict):
+                print(rows["error"])
+                rows = rows["watches"]
+            for r in rows:
+                print(f"{r['id']:24} {str(r['kind']):5} {r['status']}\n{'':24} {r['why'] or ''}")
+            if not rows:
+                print(f"no watches (Mochi writes them to {WATCHES_FILE})")
+            return 0
         if a == "--senses":
             p = SENSES / "digest.md"
             print(p.read_text() if p.exists() else f"no digest yet (the relay writes {p} before each round; "
@@ -1105,7 +1649,10 @@ def main(argv):
         print("usage: mochi-brain                 run the relay (foreground)\n"
               "       mochi-brain --ask [TEXT]    ask Mochi to do something (no text = a dialog)\n"
               "       mochi-brain --round         do a round now\n"
+              "       mochi-brain --trigger [--urgent] TEXT   wake Mochi for an event (a round, once the cooldown allows)\n"
+              "       mochi-brain --watches       Mochi's own alarms (memory/watches.json) and where each stands\n"
               "       mochi-brain --discover      a long run to build/refresh the dossier (memory/dossier.md)\n"
+              "       mochi-brain --dream         sleep on it now: consolidate journals into memory (memory/patterns.md)\n"
               "       mochi-brain --senses        the latest senses digest (what mochi-sense saw)\n"
               "       mochi-brain --chat          open a chat with Mochi in a terminal\n"
               "       mochi-brain --status        the pig says what it's up to\n"
@@ -1113,6 +1660,7 @@ def main(argv):
               "       mochi-brain --report        open the latest report\n"
               "       mochi-brain --log           the relay's recent log\n"
               "       mochi-telegram status       the Telegram bot: token, owner, reachable? (asks go to your phone when away)\n"
+              "       mochi-telegram file PATH...  send files to your phone (what you send the bot lands in inbox/)\n"
               f"      Mochi's workspace: {WORK}  (CLAUDE.md = its brief, memory/ = what it knows)")
         return 0 if a in ("-h", "--help") else 1
     try:

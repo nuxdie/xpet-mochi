@@ -32,6 +32,8 @@ Options: `--name NAME`, `--reset`, `--sheet out.png` (render every pose to an im
 `make install-autostart` puts `dist/xpet.service` and `dist/mochi-brain.service` in `~/.config/systemd/user/` and
 `dist/xpet.desktop` in `~/.config/autostart/`. At login the autostart entry hands the X display to systemd and starts
 both services; systemd restarts them if they crash. Menu → Quit stops the pig for real (until next login).
+It also installs `dist/mochi-mail.timer` (pull mail every ten minutes for `mochi-sense mail` and the mail watches);
+enable it with `systemctl --user enable --now mochi-mail.timer` once isync and notmuch are set up.
 `systemctl --user start xpet` brings it back, and deleting the autostart file turns autostart off.
 
 ## The brain
@@ -85,6 +87,8 @@ You can also just ask it: menu → **Give me a task...**, or
 ```sh
 xpet --ask 'find the biggest files in ~/Downloads'    # same thing from a shell
 mochi-brain --round       # do a round now
+mochi-brain --trigger 'the backup finished'   # wake Mochi for an event (a round, once the cooldown allows)
+mochi-brain --watches     # Mochi's own alarms and where each stands
 mochi-brain --chat        # open a chat with Mochi in a terminal
 mochi-brain --status      # the pig says what it's up to
 mochi-brain --seen        # Mochi's journal for the last two days
@@ -94,6 +98,25 @@ mochi-brain --log         # the relay's recent log
 
 Everything the relay does is appended to `~/.local/share/mochi/actions.log`; everything Mochi thought is in its
 journal and in the Claude Code transcripts for that directory.
+
+### Waking up early: triggers and watches
+
+The clock is not the only thing that starts a round. The relay also listens for **triggers**, each a reason string
+that becomes the round's reason: `mochi-brain --trigger [--urgent] TEXT` from you, a script or a hook; the relay's
+own watchers (a disk past 92%, a battery under 15% and discharging, a systemd unit that newly failed, a Claude Code
+session stuck on a permission prompt for twenty minutes); and **Mochi's own watches**. A triggered round is rationed:
+no sooner than ten minutes after the previous round began, at most eight a day, none while you're away at night.
+Urgent triggers skip all three. The quiet rule is unchanged: an early round still ends silent unless something is
+worth an ask.
+
+Watches are Mochi's alarms, written by Mochi itself in a round to `memory/watches.json`: "wake me when a mail from
+We-ID arrives", "wake me on the 16th at 10:00", "wake me when this path changes", "wake me when `ping sff.local`
+succeeds again" (`cmd` watches are limited to the same read-only commands a round may run). Each has a `why` for the
+round that gets woken, an optional `until` (expiring unfired also wakes Mochi once: "no reply by Friday" is news), and
+the relay keeps the baselines and fired marks so a watch fires on what changes after it was written, not on what was
+already true. `mochi-brain --watches` lists them; the details are in `brain/CLAUDE.md` under "Waking up early".
+Constants in `brain/mochi_brain.py`: `TRIGGER_COOLDOWN`, `TRIGGERED_PER_DAY`, `DISK_FULL_AT`, `BATTERY_LOW_AT`,
+`STUCK_AFTER`.
 
 ### Senses and the dossier
 
@@ -120,6 +143,7 @@ mochi-sense browser --days 7 --grep onshape
 mochi-sense nas ls Documents
 mochi-brain --senses                    # the digest the last round saw
 mochi-brain --discover                  # a long run that only works on the dossier
+mochi-brain --dream                     # sleep on it: fold journals into memory/patterns.md (nightly when away)
 ```
 
 ### Your phone (Telegram)
@@ -147,6 +171,13 @@ Telegram and press Start, then `mochi-telegram pair --write` (it waits for your 
 the whole chain; `mochi-telegram send hi` is a test. Restart the relay after changing the config. The bot's name, bio
 and command menu are set through the API; `make avatar` renders its profile picture (`dist/mochi-avatar.png`) with the
 pig's own renderer.
+
+**Files, both ways.** Send the bot a photo or a document (with a caption saying what to do with it, or none) and it
+lands in `~/.local/share/mochi/inbox/` and becomes a task for Mochi, which reads pictures and PDFs itself. Sent as a
+reply to one of Mochi's questions, it arrives as that answer. The other way, a run that you asked for can attach
+`files` to its answer and they reach your phone at once; a round cannot push files, its files wait behind the dot and
+"Show me" delivers them, on screen or to the phone. A report can be a PDF or a picture too. From a shell or a chat:
+`mochi-telegram file PATH... [--caption TEXT] [--photo]`. Limits are Telegram's: 50 MB out, 20 MB in.
 
 ### Its own browser
 

@@ -4,11 +4,13 @@
     mochi-telegram status            is the token there, who is the owner, can the bot reach them
     mochi-telegram pair [--write]    wait for you to message the bot, print your id (--write saves it as owner_id)
     mochi-telegram send TEXT [--buzz]   a test message (silent unless --buzz)
+    mochi-telegram file PATH... [--caption TEXT] [--photo] [--buzz]   send files (documents; --photo = as pictures)
     mochi-telegram updates           pending updates, for debugging
 
 The relay (mochi-brain) imports this file and does the real work: while you're away from the computer it mirrors
 Mochi's asks to the phone as messages with buttons, carries your taps and typed messages back, and lets an urgent
-`say` buzz your pocket. This file only knows how to talk to the Bot API.
+`say` buzz your pocket. Files go both ways: what you send the bot (photos, documents) lands in Mochi's workspace
+inbox/ and becomes a task; Mochi's reports and files reach you with `file`. This file only knows the Bot API.
 
 Config: the token lives in ~/.config/mochi/telegram.token (or `telegram.token_file` / `telegram.token` in
 ~/.config/mochi/sources.json); your own Telegram user id is `telegram.owner_id` there. Messages from anyone else
@@ -18,8 +20,10 @@ are ignored. Nothing here prints the token.
 import argparse
 import datetime as dt
 import json
+import mimetypes
 import os
 import sys
+import uuid
 import time
 import urllib.error
 import urllib.request
@@ -30,6 +34,9 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "moch
 CONFIG = CONFIG_DIR / "sources.json"
 TOKEN_FILE = CONFIG_DIR / "telegram.token"
 MAX_TEXT = 4000  # Telegram's limit is 4096; leave room for the answer line an edit appends
+MAX_UPLOAD = 50 * 2**20    # Bot API: 50 MB per sent file
+MAX_DOWNLOAD = 20 * 2**20  # Bot API: 20 MB per received file
+PHOTO_TYPES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 class TgError(Exception):
@@ -104,6 +111,52 @@ class Bot:
             mid = self.api("sendMessage", **params)["message_id"]
         return mid
 
+    def send_file(self, path, caption="", buzz=False, reply_to=None, photo=False):
+        """Send one file to the owner: as a document (unchanged bytes, the default) or as a photo (Telegram
+        recompresses it; only for pictures). Returns the message id."""
+        path = Path(path)
+        size = path.stat().st_size
+        if size > MAX_UPLOAD:
+            raise TgError(413, f"{path.name} is {size // 2**20} MB; the Bot API takes up to 50 MB")
+        photo = photo and path.suffix.lower() in PHOTO_TYPES and size <= 10 * 2**20
+        fields = {"chat_id": str(self.owner), "disable_notification": "false" if buzz else "true"}
+        if caption:
+            fields["caption"] = caption[:1024]
+        if reply_to:
+            fields["reply_parameters"] = json.dumps({"message_id": reply_to, "allow_sending_without_reply": True})
+        body, ctype = multipart(fields, "photo" if photo else "document", path.name, path.read_bytes())
+        req = urllib.request.Request(f"https://api.telegram.org/bot{self.token}/{'sendPhoto' if photo else 'sendDocument'}",
+                                     data=body, headers={"Content-Type": ctype})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                j = json.load(r)
+        except urllib.error.HTTPError as e:
+            try:
+                j = json.load(e)
+            except ValueError:
+                j = {"ok": False, "error_code": e.code, "description": str(e)}
+        if not j.get("ok"):
+            raise TgError(j.get("error_code", 0), j.get("description", "unknown error"))
+        return j["result"]["message_id"]
+
+    def download(self, att, dest_dir):
+        """Fetch a received attachment (see `attachment`) into dest_dir. Returns the saved path."""
+        if att["size"] and att["size"] > MAX_DOWNLOAD:
+            raise TgError(413, f"{att['name']} is {att['size'] // 2**20} MB; the Bot API lets me fetch up to 20 MB")
+        info = self.api("getFile", file_id=att["file_id"])
+        url = f"https://api.telegram.org/file/bot{self.token}/{info['file_path']}"
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        name = safe_name(att["name"]) or f"file{Path(info['file_path']).suffix}"
+        dest = dest_dir / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{name}"
+        with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as f:
+            while True:
+                chunk = r.read(1 << 16)
+                if not chunk:
+                    break
+                f.write(chunk)
+        return dest
+
     def edit(self, message_id, text, buttons=None):
         params = {"chat_id": self.owner, "message_id": message_id, "text": text[:4096]}
         if buttons:
@@ -130,6 +183,43 @@ class Bot:
 
     def is_owner(self, update_part):
         return int(((update_part or {}).get("from") or {}).get("id") or 0) == self.owner
+
+
+def multipart(fields, file_field, filename, data):
+    """A multipart/form-data body: text fields plus one file. Returns (body, content_type)."""
+    boundary = "mochi" + uuid.uuid4().hex
+    out = bytearray()
+    for k, v in fields.items():
+        out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").encode()
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"{safe_name(filename)}\"\r\n"
+            f"Content-Type: {mime}\r\n\r\n").encode()
+    out += data + f"\r\n--{boundary}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+
+def safe_name(name):
+    """A file name with nothing that could escape a directory or confuse a shell."""
+    name = os.path.basename(str(name or "")).replace('"', "")
+    return "".join(c if c.isalnum() or c in "._- ()" else "_" for c in name).strip(" .")[:120]
+
+
+def attachment(m):
+    """What a message carries besides text: {"kind", "file_id", "name", "size", "mime"} or None. A photo comes
+    as several sizes; the largest is taken."""
+    m = m or {}
+    if m.get("photo"):
+        best = max(m["photo"], key=lambda p: p.get("file_size") or 0)
+        return {"kind": "photo", "file_id": best["file_id"], "name": f"photo.jpg", "size": best.get("file_size") or 0,
+                "mime": "image/jpeg"}
+    for kind in ("document", "video", "audio", "voice", "video_note", "animation"):
+        d = m.get(kind)
+        if d:
+            ext = {"voice": ".ogg", "video_note": ".mp4", "audio": ".mp3", "video": ".mp4", "animation": ".mp4"}.get(kind, "")
+            name = d.get("file_name") or (kind + ext)
+            return {"kind": kind, "file_id": d["file_id"], "name": name, "size": d.get("file_size") or 0,
+                    "mime": d.get("mime_type") or mimetypes.guess_type(name)[0] or ""}
+    return None
 
 
 def keyboard(rows):
@@ -221,6 +311,11 @@ def main():
     s = sub.add_parser("send")
     s.add_argument("text", nargs="+")
     s.add_argument("--buzz", action="store_true", help="with a notification (default: silent)")
+    f = sub.add_parser("file")
+    f.add_argument("paths", nargs="+")
+    f.add_argument("--caption", default="", help="text under the (first) file")
+    f.add_argument("--photo", action="store_true", help="send pictures as photos (Telegram recompresses them) instead of files")
+    f.add_argument("--buzz", action="store_true", help="with a notification (default: silent)")
     sub.add_parser("updates")
     a = ap.parse_args()
     bot = Bot()
@@ -234,6 +329,13 @@ def main():
         if a.cmd == "send":
             mid = bot.send(" ".join(a.text), buzz=a.buzz)
             print(f"sent (message {mid}, {'buzz' if a.buzz else 'silent'}) at {dt.datetime.now():%H:%M}")
+            return 0
+        if a.cmd == "file":
+            for i, path in enumerate(a.paths):
+                if not Path(path).is_file():
+                    sys.exit(f"mochi-telegram: not a file: {path}")
+                mid = bot.send_file(path, caption=a.caption if i == 0 else "", buzz=a.buzz and i == 0, photo=a.photo)
+                print(f"sent {path} (message {mid}) at {dt.datetime.now():%H:%M}")
             return 0
         if a.cmd == "updates":
             for u in bot.poll(0, 0):
