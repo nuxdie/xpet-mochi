@@ -175,7 +175,7 @@ def md_table(rows, head):
     return "\n".join(out)
 
 
-VALUE_OPTS = {"--days", "-d", "--limit", "--lines", "--grep", "--page", "--date", "--chars", "--provider"}
+VALUE_OPTS = {"--days", "-d", "--limit", "--lines", "--grep", "--page", "--date", "--chars", "--provider", "--part"}
 
 
 def split_args(args):
@@ -720,6 +720,130 @@ def sense_nas(args):
     return "\n".join(out_lines)
 
 
+# ---- recorded calls (NAS Videos/Zoom: recordings with AssemblyAI transcripts) --------------------------
+
+CALL_EXTS = {".dialog", ".summary", ".json", ".txt"}
+MEDIA_EXTS = {".mkv", ".mp4", ".mp3", ".webm", ".m4a", ".wav"}
+
+
+def calls_root():
+    return (CFG["nas"].get("calls") or "Videos/Zoom").strip("/")
+
+
+def call_index():
+    """{"folder/stem": {"exts": set, "size": transcript bytes, "when": ts}} for every recording under the calls root."""
+    root = calls_root()
+    code, out, err = smb(f'cd "{root}"; recurse ON; ls', timeout=120)
+    if code != 0:
+        raise OSError((err or out).strip()[:200])
+    calls, cur = {}, None
+    for line in out.splitlines():
+        if line.startswith("\\"):
+            cur = line.strip().replace("\\", "/").strip("/")
+            cur = cur[len(root):].strip("/") if cur.startswith(root) else cur
+            continue
+        for name, is_dir, size, ts in parse_smb_ls(line + "\n") if cur is not None else []:
+            ext = Path(name).suffix.lower()
+            if is_dir or ext not in CALL_EXTS | MEDIA_EXTS:
+                continue
+            stem = Path(name).stem.replace("_trimmed_audio", "")
+            c = calls.setdefault(f"{cur}/{stem}".strip("/"), {"exts": set(), "size": 0, "when": ts, "files": {}})
+            c["exts"].add(ext)
+            c["files"][ext] = name
+            if ext in (".txt", ".dialog"):
+                c["size"] = max(c["size"], size)
+    return calls
+
+
+def call_text(key, c):
+    """The call as who-said-what: the .dialog file if there is one, else the transcript JSON's utterances, else
+    the flat .txt (no speakers). Speakers are A/B as the transcriber labelled them; which one is them is for the
+    reader to work out (and note in study.md)."""
+    folder, _, _ = key.rpartition("/")
+    TMP.mkdir(parents=True, exist_ok=True)
+    for ext in (".dialog", ".json", ".txt"):
+        if ext not in c["files"]:
+            continue
+        local = TMP / ("call" + ext)
+        try:
+            code, out, err = smb(f'cd "{calls_root()}/{folder}"; get "{c["files"][ext]}" "{local}"', timeout=120)
+            if code != 0 or not local.exists():
+                continue
+            if ext == ".json":
+                u = json.loads(local.read_text(errors="replace")).get("utterances") or []
+                if not u:
+                    continue
+                return "\n".join(f"[{x.get('start', 0) // 60000}:{x.get('start', 0) // 1000 % 60:02d}] "
+                                 f"{x.get('speaker', '?')}: {x.get('text', '')}" for x in u), "speakers from the transcript"
+            return local.read_text(errors="replace"), ("speakers" if ext == ".dialog" else "no speaker labels")
+        finally:
+            local.unlink(missing_ok=True)
+    return "", "no transcript"
+
+
+def tidy_transcript(text):
+    """Transcriber noise out: a character stuck on repeat, the same short phrase over and over."""
+    text = re.sub(r"(\S)\1{5,}", r"\1\1\1…", text)
+    return re.sub(r"((?:[^.!?\n]{1,40}[.!?]\s*))(?:\1){2,}", r"\1(×) ", text)
+
+
+def sense_calls(args):
+    head = f"## Recorded calls (NAS {calls_root()})"
+    pos = positional(args)
+    sub = pos[0] if pos else "list"
+    try:
+        calls = call_index()
+    except OSError as e:
+        return f"{head}\n_unreachable: {e}_"
+    if sub in ("read", "summary"):
+        key = " ".join(pos[1:]).strip().strip("/")
+        for e in CALL_EXTS | MEDIA_EXTS:
+            key = key[:-len(e)] if key.lower().endswith(e) else key
+        c = calls.get(key)
+        if not c:
+            near = [k for k in calls if key.lower() in k.lower()][:10]
+            return f"{head}\n_no call `{key}`_" + (". Did you mean: " + "; ".join(near) if near else "")
+        if sub == "summary":
+            if ".summary" not in c["exts"]:
+                return f"{head}\n_no summary for `{key}`; read it instead_"
+            local = TMP / "call.summary"
+            folder = key.rpartition("/")[0]
+            smb(f'cd "{calls_root()}/{folder}"; get "{c["files"][".summary"]}" "{local}"')
+            try:
+                return f"{head}\n**{key}** (summary):\n\n" + local.read_text(errors="replace")
+            finally:
+                local.unlink(missing_ok=True)
+        text, how = call_text(key, c)
+        text = tidy_transcript(text)
+        if not text:
+            return f"{head}\n_`{key}` has no transcript (recording only)_"
+        size = int(opt(args, "--chars") or 40000)
+        parts = max(1, -(-len(text) // size))
+        part = min(max(1, int(opt(args, "--part") or 1)), parts)
+        return (f"{head}\n**{key}** ({how}; {len(text)} chars; part {part} of {parts}"
+                f"{f', next: --part {part + 1}' if part < parts else ''}):\n\n" + text[(part - 1) * size:part * size])
+    # list: every folder, its calls with dates and what each has
+    folder = " ".join(pos[1:]).strip("/") if sub == "list" and len(pos) > 1 else ""
+    rows, by = [], Counter()
+    for k, c in sorted(calls.items()):
+        f = k.rpartition("/")[0] or "/"
+        has = c["exts"] & CALL_EXTS
+        by[(f, "transcribed" if has else "recording only")] += 1
+        if folder and not k.startswith(folder + "/"):
+            continue
+        if folder:
+            rows.append((k.rpartition("/")[2], f"{c['size'] / 1000:.0f}k" if c["size"] else "",
+                         ", ".join(sorted(e[1:] for e in has)) or "recording only"))
+    if folder:
+        return f"{head}\n**{folder}** ({len(rows)} calls):\n" + md_table(rows, ["call", "transcript", "has"])
+    folders = sorted({f for f, _ in by})
+    out = [head, f"{len(calls)} recordings, {sum(1 for c in calls.values() if c['exts'] & CALL_EXTS)} with transcripts. "
+                 "`calls list FOLDER` for its calls, `calls read FOLDER/CALL [--part N]`, `calls summary FOLDER/CALL`."]
+    out.append(md_table([(f, by[(f, "transcribed")], by[(f, "recording only")]) for f in folders],
+                        ["folder", "transcribed", "recording only"]))
+    return "\n".join(out)
+
+
 # ---- Immich (photos) ----------------------------------------------------------------------------------
 
 def sense_photos(args):
@@ -1200,6 +1324,7 @@ SENSORS = {
     "telegram": (sense_telegram, "telegram archive: recent | dialogs | search WORDS [--page N] | dialog ID [--date YYYY-MM-DD | --page N] | range ID  [--days N] [--limit N] [--chars N]"),
     "llm": (sense_llm, "llm chat archive: recent | search WORDS | list [--page N] [--provider P] | show ID [--chars N]  [--limit N]"),
     "nas": (sense_nas, "nas: recent [--days N] | ls PATH | read PATH [--chars N]"),
+    "calls": (sense_calls, "recorded calls on the NAS (Videos/Zoom): list [FOLDER] | read FOLDER/CALL [--part N] [--chars N] | summary FOLDER/CALL"),
     "photos": (sense_photos, "immich: counts and newest uploads"),
     "home": (sense_home, "home assistant: people, what's on, vacuums, climate, recent changes  [--grep REGEX | WORD]"),
     "hosts": (sense_hosts, "ssh hosts: uptime, disk, failed units, containers  [HOST] | HOST COMMAND..."),
