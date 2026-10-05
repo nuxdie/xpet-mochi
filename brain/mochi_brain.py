@@ -271,8 +271,9 @@ def open_chat(session, prompt):
     """A terminal with Mochi in it: resumed from the run that raised the question, if we know it."""
     # Chats run in bypassPermissions (no prompts, the way the user runs Claude Code), but the NEVER list still
     # applies: deny rules hold even when prompts are bypassed.
-    cmd = ([CLAUDE, "--permission-mode", "bypassPermissions", "--disallowedTools", ",".join(NEVER)]
-           + browser_args(headed=True) + (["--resume", session] if session else []) + [prompt])
+    # --mcp-config takes a list of files, so it must be followed by another option, never by the prompt.
+    cmd = ([CLAUDE] + browser_args(headed=True) + ["--permission-mode", "bypassPermissions", "--disallowedTools", ",".join(NEVER)]
+           + (["--resume", session] if session else []) + [prompt])
     term = next((t for t in ("x-terminal-emulator", "xfce4-terminal", "gnome-terminal", "konsole", "kitty",
                              "alacritty", "xterm") if shutil.which(t)), None)
     if not term:
@@ -1016,8 +1017,8 @@ class Relay:
 # ---- Claude ----------------------------------------------------------------------------------------
 
 def claude_run(prompt, level, model=None, timeout=900):
-    cmd = [CLAUDE, "-p", "--output-format", "json", "--permission-mode", "dontAsk",
-           "--allowedTools", ",".join(LEVELS[level]), "--disallowedTools", ",".join(NEVER)] + browser_args(headed=False)
+    cmd = [CLAUDE] + browser_args(headed=False) + ["-p", "--output-format", "json", "--permission-mode", "dontAsk",
+                                                     "--allowedTools", ",".join(LEVELS[level]), "--disallowedTools", ",".join(NEVER)]
     if model:
         cmd += ["--model", model]
     env = dict(os.environ, MOCHI_BRAIN="1")  # the pig's hook relay marks these as Mochi's own runs
