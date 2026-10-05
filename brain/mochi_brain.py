@@ -1252,7 +1252,7 @@ class Relay:
         elif ev == "dream":
             self.start_dream("you asked for one")
         elif ev == "study":
-            self.start_study("you asked for one")
+            self.start_study("you asked for one", asked=True)
         elif ev == "status":
             age = human_age(now() - self.state["last_round"]) if self.state["last_round"] else "never"
             self.pet.say(f"{len(self.state['asks'])} things in the menu, {self.count('rounds')} rounds today, "
@@ -1464,7 +1464,7 @@ class Relay:
                         "timeout": 1800, "prompt": prompt})
         log(f"dream queued ({why}; {len(days)} journal days)")
 
-    def start_study(self, why):
+    def start_study(self, why, asked=False):
         """A study session: one stretch of their archives, read for who they are (memory/portrait.md)."""
         if self.busy == "study" or any(t["kind"] == "study" for t in list(self.tasks.queue)):
             return
@@ -1472,17 +1472,18 @@ class Relay:
         st = self.state["study"]
         if st.get("night") != night:
             st.update(night=night, count=0)
-        st["count"] = st.get("count", 0) + 1  # counted now, so a failed session doesn't retry all night
+        if not asked:  # counted now, so a failed session doesn't retry all night; one you asked for is extra
+            st["count"] = st.get("count", 0) + 1
         last = st.get("last", 0)
         st["last"] = now()
         ctx = self.context()
-        prompt = STUDY_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"), n=st["count"],
+        prompt = STUDY_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"), n=st["count"] + asked,
                                      per=STUDY_PER_NIGHT,
                                      last=dt.datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never",
                                      ctx=json.dumps(ctx, indent=1, ensure_ascii=False), block=BLOCK)
         self.tasks.put({"kind": "study", "title": "study", "level": "dream", "model": STUDY_MODEL,
                         "timeout": STUDY_TIMEOUT, "prompt": prompt})
-        log(f"study queued ({why}; session {st['count']} tonight)")
+        log(f"study queued ({why}; {'extra' if asked else 'session ' + str(st['count'])} tonight)")
 
     @staticmethod
     def refresh_senses():
