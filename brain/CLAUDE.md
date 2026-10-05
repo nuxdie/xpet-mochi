@@ -228,7 +228,14 @@ add one line under "Seen in passing" in `memory/study.md` for the next session t
   Long dialogs with close people show how they treat people, but read for *them*, not the other person.
 - `mochi-sense mail search 'from:artem@tsatsin.com date:2015..2016' --limit 50` / `mail show QUERY` — what they wrote,
   and to whom, back to ~2010 in nuxdie@.
-- `mochi-sense nas ls PATH` / `nas read PATH` — documents they made: CVs, letters, projects, plans.
+- **The whole NAS**, every folder (they asked for all of it on 2026-10-06, "so Mochi can learn what I watch and play
+  and such"). `mochi-sense nas tree [PATH] --depth N` maps it from a nightly index (files, size, newest change, file
+  types per folder), `nas find REGEX` searches every path, `nas ls PATH` is live, `nas read PATH` opens a document.
+  Taste lives in the names and dates: Movies, Serial, Anime, Music, Audiobooks, Books (what they collect, finish,
+  return to); Game, Savefiles, RetroArch-Saves, RetroPie (what they play, and for how long: save dates are a diary
+  of play); 3D, Software, Sales, Podcast, Photos (what they make and do). Documents and Backup (old machines' homes)
+  hold what they wrote and kept. Give every top-level folder at least one session's look over time and record each
+  in the coverage map; a title list is evidence of taste only with dates and patterns (what kept coming back).
 - `mochi-sense youtube` / `youtube read ID [--part N]` — their channel (@artemops, since 2023; they pointed you to it
   on 2026-10-06): ~100 uploads with title, date, description and auto-captions. The 2023 talks (why he programs,
   "if you want it done well, do it yourself", AI in 2023, podcast notes) are him explaining himself on purpose; the

@@ -178,7 +178,7 @@ def md_table(rows, head):
     return "\n".join(out)
 
 
-VALUE_OPTS = {"--days", "-d", "--limit", "--lines", "--grep", "--page", "--date", "--chars", "--provider", "--part"}
+VALUE_OPTS = {"--days", "-d", "--limit", "--lines", "--grep", "--page", "--date", "--chars", "--provider", "--part", "--depth"}
 
 
 def split_args(args):
@@ -681,11 +681,98 @@ def nas_read(path, chars):
         local.unlink(missing_ok=True)
 
 
+NAS_INDEX = Path.home() / ".cache/mochi-sense/nas-index.tsv.gz"  # every file and folder on the share, crawled nightly
+
+
+def nas_index_build():
+    """Crawl the whole share (one recursive smbclient ls, many minutes) into NAS_INDEX: kind, size, mtime, path."""
+    import gzip
+    t0 = time.time()
+    code, out, err = smb("recurse ON; ls", timeout=3 * 3600)
+    if code != 0 and not out:
+        return f"_crawl failed: {(err or out).strip()[:200]}_"
+    rows, cur = [], ""
+    for line in out.splitlines():
+        if line.startswith("\\"):
+            cur = line.strip().replace("\\", "/").strip("/")
+            continue
+        for name, is_dir, size, ts in parse_smb_ls(line + "\n"):
+            rows.append(f"{'d' if is_dir else 'f'}\t{size}\t{int(ts)}\t{cur + '/' if cur else ''}{name}")
+    NAS_INDEX.parent.mkdir(parents=True, exist_ok=True)
+    tmp = NAS_INDEX.with_suffix(".tmp")
+    with gzip.open(tmp, "wt", encoding="utf-8") as f:
+        f.write("\n".join(rows) + "\n")
+    tmp.replace(NAS_INDEX)
+    return f"indexed {len(rows)} entries in {time.time() - t0:.0f}s → {NAS_INDEX}" + \
+           (f" (smbclient exit {code}: {err.strip()[-150:]})" if code else "")
+
+
+def nas_index_rows():
+    import gzip
+    with gzip.open(NAS_INDEX, "rt", encoding="utf-8") as f:
+        for line in f:
+            k, size, ts, path = line.rstrip("\n").split("\t", 3)
+            yield k, int(size), int(ts), path
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1000
+
+
+def nas_tree(root, depth, limit):
+    """Folders under root down to depth, each with files, size, newest change and its commonest file types."""
+    root = root.strip("/")
+    pre = root + "/" if root else ""
+    agg = {}
+    for k, size, ts, path in nas_index_rows():
+        if not path.startswith(pre) or k == "d":
+            continue
+        parts = path[len(pre):].split("/")
+        ext = Path(parts[-1]).suffix.lower()[:6]
+        for d in range(1, min(depth, len(parts) - 1) + 1):
+            a = agg.setdefault("/".join(parts[:d]), [0, 0, 0, Counter()])
+            a[0] += 1
+            a[1] += size
+            a[2] = max(a[2], ts)
+            a[3][ext] += 1
+        if len(parts) == 1:
+            a = agg.setdefault(".", [0, 0, 0, Counter()])
+            a[0] += 1
+            a[1] += size
+            a[2] = max(a[2], ts)
+            a[3][ext] += 1
+    rows = [(f"{pre}{k}/" if k != "." else f"{pre or '/'} (files here)", a[0], human_size(a[1]),
+             dt.date.fromtimestamp(a[2]).isoformat() if a[2] else "", " ".join(e or "-" for e, _ in a[3].most_common(4)))
+            for k, a in sorted(agg.items())]
+    return md_table(rows[:limit], ["folder", "files", "size", "newest", "types"]) + \
+        (f"\n_{len(rows) - limit} more folders; narrow the PATH or lower --depth_" if len(rows) > limit else "")
+
+
 def sense_nas(args):
     c = CFG["nas"]
     head = f"## NAS ({c['share']})"
     pos = positional(args)
     sub = pos[0] if pos else "recent"
+    if sub == "index":
+        return f"{head}\n" + nas_index_build()
+    if sub in ("tree", "find"):
+        if not NAS_INDEX.exists():
+            return f"{head}\n_no index yet: `mochi-sense nas index` (the mochi-nas-index timer runs it nightly)_"
+        age = dt.date.fromtimestamp(NAS_INDEX.stat().st_mtime).isoformat()
+        limit = int(opt(args, "--limit") or (150 if sub == "tree" else 60))
+        if sub == "tree":
+            root = " ".join(pos[1:])
+            return f"{head}\n**{root or '/'}** (index of {age}; `nas ls` for live):\n" + \
+                nas_tree(root, int(opt(args, "--depth") or 2), limit)
+        rx = re.compile(" ".join(pos[1:]), re.I)
+        hits = [(p + ("/" if k == "d" else ""), human_size(n) if k == "f" else "", dt.date.fromtimestamp(t).isoformat())
+                for k, n, t, p in nas_index_rows() if rx.search(p)]
+        hits.sort(key=lambda h: h[2], reverse=True)
+        return f"{head}\n**find `{rx.pattern}`** (index of {age}): {len(hits)} hits, newest first\n" + \
+            md_table(hits[:limit], ["path", "size", "modified"])
     if sub == "read":
         return f"{head}\n" + nas_read(" ".join(pos[1:]), int(opt(args, "--chars") or 20000))
     if sub == "ls":
@@ -1433,7 +1520,7 @@ SENSORS = {
     "shell": (sense_shell, "shell history: commands, hosts, dirs  [--lines N]"),
     "telegram": (sense_telegram, "telegram archive: recent | dialogs | search WORDS [--page N] | dialog ID [--date YYYY-MM-DD | --page N] | range ID  [--days N] [--limit N] [--chars N]"),
     "llm": (sense_llm, "llm chat archive: recent | search WORDS | list [--page N] [--provider P] | show ID [--chars N]  [--limit N]"),
-    "nas": (sense_nas, "nas: recent [--days N] | ls PATH | read PATH [--chars N]"),
+    "nas": (sense_nas, "nas: recent [--days N] | ls PATH | read PATH [--chars N] | tree [PATH] [--depth N] | find REGEX | index  (tree/find use the nightly index)"),
     "youtube": (sense_youtube, "their YouTube channel: list | read ID [--part N] [--chars N]  (title, date, description, auto-captions)"),
     "calls": (sense_calls, "recorded calls on the NAS (Videos/Zoom): list [FOLDER] | read FOLDER/CALL [--part N] [--chars N] | summary FOLDER/CALL"),
     "photos": (sense_photos, "immich: counts and newest uploads"),

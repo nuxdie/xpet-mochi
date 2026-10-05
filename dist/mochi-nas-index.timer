@@ -1,0 +1,11 @@
+[Unit]
+Description=Re-crawl the NAS for Mochi every night, before the study sessions
+
+[Timer]
+OnCalendar=*-*-* 00:15
+Persistent=true
+RandomizedDelaySec=5min
+Unit=mochi-nas-index.service
+
+[Install]
+WantedBy=timers.target

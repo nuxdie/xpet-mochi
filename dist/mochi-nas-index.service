@@ -1,0 +1,9 @@
+[Unit]
+Description=Mochi NAS index: crawl the whole NAS home share so mochi-sense nas tree/find can answer at once
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=3h
+ExecStart=%h/.local/bin/mochi-sense nas index
