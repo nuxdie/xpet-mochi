@@ -15,6 +15,7 @@
  "ssh": {"hosts": {"server": "me@server.local"}},
  "nas": {"share": "//nas.local/home", "credentials": "~/.config/mochi/samba_credentials"},
  "telegram": {"token_file": "~/.config/mochi/telegram.token", "owner_id": 0},
+ "browser": {"chrome": "google-chrome", "port": 9333},
  "mail": {
   "maildir": "~/Mail",
   "name": "Your Name",

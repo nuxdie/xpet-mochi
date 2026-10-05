@@ -96,6 +96,15 @@ DRAFT_TOOLS = ["mcp__claude_ai_Gmail__create_draft", "mcp__claude_ai_Gmail__upda
 # request; CLAUDE.md says when a round may send on its own and when it must ask first. The Gmail connector's
 # own send/reply/forward stay in NEVER so the only way out is the one that logs.
 SEND_TOOLS = ["Bash(mochi-mail:*)", "Bash(msmtp:*)"]
+# Mochi's own Chrome (brain/mochi_browser.py → chrome-devtools-mcp, server name "chrome"). A round may look: open
+# pages, read them (snapshot), screenshot, click around. Typing into forms, uploads and running scripts on a page
+# change things in the world, so they wait for a YES or a chat.
+BROWSE_TOOLS = ["mcp__chrome__" + t for t in (
+    "navigate_page", "new_page", "list_pages", "select_page", "close_page", "take_snapshot", "take_screenshot",
+    "wait_for", "click", "hover", "press_key", "list_console_messages", "get_console_message")]
+BROWSE_ACT_TOOLS = ["mcp__chrome__" + t for t in (
+    "fill", "fill_form", "type_text", "upload_file", "drag", "handle_dialog", "evaluate_script", "get_css_styles",
+    "lighthouse_audit")]
 CHANGE_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash", "mcp__claude_ai_Google_Calendar__create_event",
                 "mcp__claude_ai_Google_Calendar__update_event", "mcp__claude_ai_Google_Drive__create_file",
                 "mcp__claude_ai_Google_Drive__update_file", "mcp__claude_ai_Google_Drive__copy_file"]
@@ -110,8 +119,8 @@ NEVER = [  # denied at every level, including things you approved
     "mcp__claude_ai_Google_Drive__share_file", "mcp__claude_ai_Google_Calendar__delete_event",
 ]
 LEVELS = {
-    "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS,
-    "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + CHANGE_TOOLS,
+    "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + BROWSE_TOOLS,
+    "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS,
 }
 
 BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null}\n```'
@@ -195,6 +204,7 @@ def load_sibling(name, exe):
 
 
 TG = load_sibling("mochi_telegram", "mochi-telegram")
+BROWSER = load_sibling("mochi_browser", "mochi-browser")  # Mochi's own Chrome, as an MCP server per run
 
 
 def now():
@@ -262,7 +272,7 @@ def open_chat(session, prompt):
     # Chats run in bypassPermissions (no prompts, the way the user runs Claude Code), but the NEVER list still
     # applies: deny rules hold even when prompts are bypassed.
     cmd = ([CLAUDE, "--permission-mode", "bypassPermissions", "--disallowedTools", ",".join(NEVER)]
-           + (["--resume", session] if session else []) + [prompt])
+           + browser_args(headed=True) + (["--resume", session] if session else []) + [prompt])
     term = next((t for t in ("x-terminal-emulator", "xfce4-terminal", "gnome-terminal", "konsole", "kitty",
                              "alacritty", "xterm") if shutil.which(t)), None)
     if not term:
@@ -277,6 +287,18 @@ def open_chat(session, prompt):
     subprocess.Popen(full, cwd=str(WORK), env=env, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True
+
+
+def browser_args(headed):
+    """--mcp-config for Mochi's own Chrome, if mochi-browser and chrome-devtools-mcp are installed."""
+    if not BROWSER:
+        return []
+    try:
+        path = BROWSER.write_config(headed=headed)
+    except Exception as e:
+        log(f"browser: no config ({e})")
+        return []
+    return ["--mcp-config", str(path)] if path else []
 
 
 def notify(text):
@@ -824,6 +846,10 @@ class Relay:
             "hostname": socket.gethostname(),
             "you": dict(self.activity.summary(60), away=self.away(),
                         away_for=human_age(now() - self.state["away_since"]) if self.away() and self.state["away_since"] else ""),
+            "browser": (("your own Chrome is available as the mcp__chrome__* tools" +
+                         (" and is open on their screen right now (runs attach to that window)" if BROWSER.running()
+                          else " (headless, yours alone, logins persist in your profile)")) if BROWSER and BROWSER.server()
+                        else "not available (mochi-browser needs chrome-devtools-mcp)"),
             "telegram": ("connected: while they're away your asks and reports go to their phone as messages with buttons, "
                          "and they can message you back; keep what crosses the wire short and vague (it passes through "
                          "Telegram's servers)" if self.tg.on else "not set up"),
@@ -991,7 +1017,7 @@ class Relay:
 
 def claude_run(prompt, level, model=None, timeout=900):
     cmd = [CLAUDE, "-p", "--output-format", "json", "--permission-mode", "dontAsk",
-           "--allowedTools", ",".join(LEVELS[level]), "--disallowedTools", ",".join(NEVER)]
+           "--allowedTools", ",".join(LEVELS[level]), "--disallowedTools", ",".join(NEVER)] + browser_args(headed=False)
     if model:
         cmd += ["--model", model]
     env = dict(os.environ, MOCHI_BRAIN="1")  # the pig's hook relay marks these as Mochi's own runs

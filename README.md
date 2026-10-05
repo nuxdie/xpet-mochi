@@ -148,6 +148,22 @@ the whole chain; `mochi-telegram send hi` is a test. Restart the relay after cha
 and command menu are set through the API; `make avatar` renders its profile picture (`dist/mochi-avatar.png`) with the
 pig's own renderer.
 
+### Its own browser
+
+`brain/mochi_browser.py` (installed as `mochi-browser`) gives Mochi a Chrome of its own: a separate profile in
+`~/.local/share/mochi/chrome` with its own cookies, logins and history, driven through Google's
+[chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) (`npm install -g chrome-devtools-mcp`;
+the relay finds it on PATH or in an fnm/nvm install). The relay writes the MCP server config before every run and
+passes it with `--mcp-config`, so the `mcp__chrome__*` tools (navigate, snapshot, screenshot, click, fill, ...) are
+there in every round, task and chat:
+
+- background runs get a headless Chrome that lives only as long as the run; a chat gets a visible window;
+- `mochi-browser open [URL]` opens Mochi's Chrome on your screen with a localhost-only debugging port, and every run
+  attaches to that window while it's open: you can watch it work, and it's how you log Mochi into something (Mochi
+  never types your passwords);
+- a round may look and click; typing into forms, uploads and `evaluate_script` are only in runs you approved or chats;
+- screenshots can only be written under `reports/` in its workspace. `mochi-browser status` shows the whole chain.
+
 ## Talking to it
 
 The pig listens on a user-only Unix datagram socket (`$XDG_RUNTIME_DIR/xpet.sock`), one flat JSON object per message:
