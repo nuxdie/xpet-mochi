@@ -229,6 +229,11 @@ add one line under "Seen in passing" in `memory/study.md` for the next session t
 - `mochi-sense mail search 'from:artem@tsatsin.com date:2015..2016' --limit 50` / `mail show QUERY` — what they wrote,
   and to whom, back to ~2010 in nuxdie@.
 - `mochi-sense nas ls PATH` / `nas read PATH` — documents they made: CVs, letters, projects, plans.
+- `mochi-sense youtube` / `youtube read ID [--part N]` — their channel (@artemops, since 2023; they pointed you to it
+  on 2026-10-06): ~100 uploads with title, date, description and auto-captions. The 2023 talks (why he programs,
+  "if you want it done well, do it yourself", AI in 2023, podcast notes) are him explaining himself on purpose; the
+  let's plays and vibe-coding devlogs show what he enjoys and how he works, so a few of each, not all of them.
+  Captions are machine-made: no punctuation, names garbled; quote nothing from them without checking it reads right.
 - Their public writing and making: the blog, the podcast, their repos (READMEs, commit messages, what they build
   for fun), things they signed or backed. WebFetch reaches public pages.
 - Browser searches and history over long spans (`mochi-sense browser --days 365 --grep ...`) for what holds their

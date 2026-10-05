@@ -69,6 +69,9 @@ DEFAULT_CONFIG = {
         "name": "",       # display name on outgoing mail
         "password_dir": str(HOME / ".config/mochi/mail"),  # read by mbsync only; never by this script
     },
+    # Their YouTube channel: listed and read (auto-captions) with yt-dlp. The distro's yt-dlp goes stale fast;
+    # `make tools` puts a current one in ~/.local/share/mochi-tools.
+    "youtube": {"channel": "", "ytdlp": "~/.local/share/mochi-tools/bin/yt-dlp"},
 }
 
 
@@ -844,6 +847,113 @@ def sense_calls(args):
     return "\n".join(out)
 
 
+# ---- YouTube (their channel: what they publish, in their own voice) ------------------------------------
+
+YT_CACHE = Path.home() / ".cache/mochi-sense/youtube"  # public captions, cached: YouTube rate-limits subtitle fetches
+
+
+def ytdlp():
+    p = Path(os.path.expanduser(CFG["youtube"].get("ytdlp") or ""))
+    return str(p) if p.is_file() else (shutil.which("yt-dlp") or "yt-dlp")
+
+
+def vtt_text(vtt):
+    """Auto-captions roll: each line appears two or three times. Keep each spoken line once, with a minute mark."""
+    out, last, minute = [], "", -1
+    for block in vtt.split("\n\n"):
+        lines = block.strip().splitlines()
+        if not lines or "-->" not in lines[0]:
+            continue
+        m = re.match(r"(\d+):(\d+):(\d+)", lines[0])
+        for line in lines[1:]:
+            line = re.sub(r"<[^>]+>", "", line).strip()
+            if not line or line == last:
+                continue
+            last = line
+            mins = int(m.group(1)) * 60 + int(m.group(2)) if m else minute
+            if mins != minute and mins % 5 == 0:
+                out.append(f"\n[{mins} min]")
+                minute = mins
+            out.append(line)
+    return re.sub(r"(?<!\])\n(?!\[)", " ", "\n".join(out)).strip()
+
+
+def yt_list():
+    """[(id, duration s, title, tab)] for the channel's videos and shorts; cached for a day."""
+    cache = YT_CACHE / "list.json"
+    if cache.exists() and time.time() - cache.stat().st_mtime < 86400:
+        return json.loads(cache.read_text())
+    ch = CFG["youtube"]["channel"]
+    base = f"https://www.youtube.com/channel/{ch}" if ch.startswith("UC") else f"https://www.youtube.com/{ch}"
+    rows = []
+    for tab in ("videos", "shorts", "streams"):
+        code, out, err = run([ytdlp(), "--flat-playlist", "--print", "%(id)s|%(duration)s|%(title)s", f"{base}/{tab}"],
+                             timeout=240)
+        for line in out.splitlines():
+            vid, dur, title = (line.split("|", 2) + ["", ""])[:3]
+            if re.fullmatch(r"[\w-]{11}", vid):
+                rows.append([vid, int(float(dur)) if dur not in ("NA", "None", "") else 0, title, tab])
+    if rows:
+        YT_CACHE.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(rows, ensure_ascii=False))
+    return rows
+
+
+def yt_read(vid):
+    """(header, text) for one video: title, date, description and the captions in its own language."""
+    cache = YT_CACHE / f"{vid}.json"
+    if cache.exists():
+        d = json.loads(cache.read_text())
+        return d["head"], d["text"]
+    YT_CACHE.mkdir(parents=True, exist_ok=True)
+    url = f"https://www.youtube.com/watch?v={vid}"
+    code, out, err = run([ytdlp(), "--skip-download", "--no-simulate", "--print",
+                          "%(title)s\u241f%(upload_date)s\u241f%(duration)s\u241f%(description)s", url], timeout=120)
+    title, date, dur, desc = (out.split("\u241f", 3) + ["", "", "", ""])[:4]
+    head = f"**{title.strip()}** ({date[:4]}-{date[4:6]}-{date[6:8]}, {int(float(dur or 0)) // 60} min, {url})" + \
+           (f"\n_Description:_ {desc.strip()[:1500]}" if desc.strip() else "")
+    text = ""
+    for lang in ("ru-orig", "en-orig", "ru", "en", "nl-orig"):  # one at a time: each fetch counts against a rate limit
+        stem = TMP / f"yt-{vid}"
+        run([ytdlp(), "--skip-download", "--write-auto-subs", "--write-subs", "--sub-langs", lang, "--sub-format", "vtt",
+             "-o", str(stem), url], timeout=120)
+        got = sorted(TMP.glob(f"yt-{vid}*.vtt"))
+        if got:
+            text = vtt_text(got[0].read_text(errors="replace"))
+            for g in got:
+                g.unlink()
+            break
+    if text:
+        cache.write_text(json.dumps({"head": head, "text": text}, ensure_ascii=False))
+    return head, text
+
+
+def sense_youtube(args):
+    head = "## YouTube channel"
+    if not CFG["youtube"].get("channel"):
+        return f"{head}\n_not set up: youtube.channel in {CONFIG_FILE}_"
+    pos = positional(args)
+    sub = pos[0] if pos else "list"
+    if sub == "read" and len(pos) > 1:
+        vid = re.sub(r".*(?:v=|youtu\.be/|shorts/)", "", pos[1])[:11]
+        h, text = yt_read(vid)
+        if not text:
+            return f"{head}\n{h}\n\n_no captions (or rate-limited; try later)_"
+        size = int(opt(args, "--chars") or 40000)
+        parts = max(1, -(-len(text) // size))
+        part = min(max(1, int(opt(args, "--part") or 1)), parts)
+        return (f"{head}\n{h}\n\n_Auto-captions, {len(text)} chars, part {part} of {parts}"
+                f"{f', next: --part {part + 1}' if part < parts else ''}:_\n\n" + text[(part - 1) * size:part * size])
+    rows = yt_list()
+    if not rows:
+        return f"{head}\n_couldn't list the channel (yt-dlp: {ytdlp()}; `make tools` installs a current one)_"
+    have = {p.stem for p in YT_CACHE.glob("*.json")}
+    return (f"{head} ({CFG['youtube']['channel']}): {len(rows)} uploads, newest first. "
+            "`youtube read ID [--part N]` for one with its captions (✓ = already fetched).\n" +
+            md_table([(v, f"{d // 60} min" if d else "", t[:70], tab, "✓" if v in have else "")
+                      for v, d, t, tab in rows], ["id", "length", "title", "tab", ""]))
+
+
 # ---- Immich (photos) ----------------------------------------------------------------------------------
 
 def sense_photos(args):
@@ -1324,6 +1434,7 @@ SENSORS = {
     "telegram": (sense_telegram, "telegram archive: recent | dialogs | search WORDS [--page N] | dialog ID [--date YYYY-MM-DD | --page N] | range ID  [--days N] [--limit N] [--chars N]"),
     "llm": (sense_llm, "llm chat archive: recent | search WORDS | list [--page N] [--provider P] | show ID [--chars N]  [--limit N]"),
     "nas": (sense_nas, "nas: recent [--days N] | ls PATH | read PATH [--chars N]"),
+    "youtube": (sense_youtube, "their YouTube channel: list | read ID [--part N] [--chars N]  (title, date, description, auto-captions)"),
     "calls": (sense_calls, "recorded calls on the NAS (Videos/Zoom): list [FOLDER] | read FOLDER/CALL [--part N] [--chars N] | summary FOLDER/CALL"),
     "photos": (sense_photos, "immich: counts and newest uploads"),
     "home": (sense_home, "home assistant: people, what's on, vacuums, climate, recent changes  [--grep REGEX | WORD]"),

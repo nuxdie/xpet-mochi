@@ -18,6 +18,12 @@ install: xpet
 	install -Dm755 brain/mochi_archive.py $(PREFIX)/bin/mochi-archive
 	install -Dm644 brain/CLAUDE.md $(MOCHI_HOME)/CLAUDE.md
 
+# Helpers mochi-sense uses that the distro ships too old: a current yt-dlp (the youtube sense).
+TOOLS ?= $(HOME)/.local/share/mochi-tools
+tools:
+	python3 -m venv $(TOOLS)
+	$(TOOLS)/bin/pip install -q -U yt-dlp
+
 # Start at login and keep running (see README).
 install-autostart: install
 	install -Dm644 dist/xpet.service dist/mochi-brain.service dist/mochi-mail.service dist/mochi-mail.timer \
@@ -39,4 +45,4 @@ avatar: tests/portrait.cpp src/art3d.hpp src/art.hpp
 clean:
 	rm -f xpet tests/render_test tests/portrait
 
-.PHONY: install install-autostart clean test avatar
+.PHONY: tools install install-autostart clean test avatar

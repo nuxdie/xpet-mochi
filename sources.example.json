@@ -14,6 +14,7 @@
  "home_assistant": {"url": "http://server.local:8123", "token": ""},
  "ssh": {"hosts": {"server": "me@server.local"}},
  "nas": {"share": "//nas.local/home", "credentials": "~/.config/mochi/samba_credentials"},
+ "youtube": {"channel": "@yourhandle or UC… channel id"},
  "telegram": {"token_file": "~/.config/mochi/telegram.token", "owner_id": 0},
  "browser": {"chrome": "google-chrome", "port": 9333},
  "mail": {
