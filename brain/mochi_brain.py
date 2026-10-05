@@ -271,9 +271,10 @@ def open_chat(session, prompt):
     """A terminal with Mochi in it: resumed from the run that raised the question, if we know it."""
     # Chats run in bypassPermissions (no prompts, the way the user runs Claude Code), but the NEVER list still
     # applies: deny rules hold even when prompts are bypassed.
-    # --mcp-config takes a list of files, so it must be followed by another option, never by the prompt.
-    cmd = ([CLAUDE] + browser_args(headed=True) + ["--permission-mode", "bypassPermissions", "--disallowedTools", ",".join(NEVER)]
-           + (["--resume", session] if session else []) + [prompt])
+    # --mcp-config and --disallowedTools take lists, so the prompt must follow a single-value option (--permission-mode)
+    # or it is swallowed as one more list item and the window closes at once / the chat opens without its prompt.
+    cmd = ([CLAUDE] + browser_args(headed=True) + ["--disallowedTools", ",".join(NEVER)]
+           + (["--resume", session] if session else []) + ["--permission-mode", "bypassPermissions", prompt])
     term = next((t for t in ("x-terminal-emulator", "xfce4-terminal", "gnome-terminal", "konsole", "kitty",
                              "alacritty", "xterm") if shutil.which(t)), None)
     if not term:
