@@ -52,6 +52,7 @@ STATE_FILE = WORK / "relay.json"
 WATCHES_FILE = MEMORY / "watches.json"  # Mochi's own alarms (see Watches)
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "mochi" / "sources.json"
 LOG_FILE = WORK / "actions.log"
+COMMS_FILE = WORK / "comms.jsonl"  # what passed between them and Mochi, for mochi-archive (one JSON line each)
 RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 PET_SOCK = RUNTIME / "xpet.sock"
 BRAIN_SOCK = RUNTIME / "mochi-brain.sock"
@@ -308,6 +309,16 @@ def log(text):
     with open(LOG_FILE, "a") as f:
         f.write(line + "\n")
     print(line, flush=True)
+
+
+def comms(kind, **fields):
+    """A line for mochi-archive: an ask raised, answered or closed, or a run they asked for finished."""
+    try:
+        WORK.mkdir(parents=True, exist_ok=True)
+        with open(COMMS_FILE, "a") as f:
+            f.write(json.dumps({"t": round(now()), "kind": kind, **fields}, ensure_ascii=False) + "\n")
+    except OSError as e:
+        log(f"comms.jsonl not written: {e}")
 
 
 def run(cmd, timeout=20):
@@ -1197,6 +1208,7 @@ class Relay:
         a = self.state["asks"].pop(aid, None)
         if not a or not label:
             return
+        comms("answer", id=aid, label=label, via=via)
         low = label.lower()
         options = ", ".join(a.get("options") or [])
         phone = via == "telegram"
@@ -1225,7 +1237,7 @@ class Relay:
                 self.pet.say("on it!", 3)
             self.tg.close(a, f"{label} — on it")
             self.event(f"user answered '{label}'{where} to: {a['text']}")
-            self.tasks.put({"kind": "approved", "title": f"{label}: {a['text']}"[:160], "level": "approved",
+            self.tasks.put({"kind": "approved", "title": f"{label}: {a['text']}"[:160], "level": "approved", "ask": aid,
                             "model": TASK_MODEL, "timeout": 1200, "urgent": a.get("urgent", False), "via": via,
                             "prompt": ANSWER_PROMPT.format(label=label, text=a["text"], options=options,
                                                            do=a.get("do") or "-", block=BLOCK)})
@@ -1418,6 +1430,9 @@ class Relay:
         log(f"{kind} '{task['title'][:50]}': {status} ({res['secs']:.0f}s, ${res['cost']:.2f})")
         data = extract_json(res["text"]) or {}
         session = res.get("session") or ""
+        if kind not in ("round", "discover", "dream"):
+            comms("done", task=kind, title=task["title"], session=session, ask=task.get("ask"),
+                  via=task.get("via") or "pig", ok=bool(res["ok"]))
         if not res["ok"]:
             if kind in ("round", "discover", "dream"):
                 self.event(f"your previous {kind} run failed: {res['error'][:200]}")
@@ -1426,7 +1441,7 @@ class Relay:
                 if task.get("via") == "telegram":
                     self.tg.send(f"hm, that didn't work: {res['error'][:300]}")
                 self.add_ask(f"hm, that didn't work ({task['title'][:30]})", REPORT_OPTIONS, path=path,
-                             session=session, urgent=True, mirror=task.get("via") != "telegram")
+                             session=session, urgent=True, mirror=task.get("via") != "telegram", src="result")
             self.save()
             return
         if kind == "dream":  # a dream raises nothing; only an urgent say (or withdrawing a stale ask) gets through
@@ -1442,7 +1457,7 @@ class Relay:
             if phone:  # they asked from their phone and are waiting there: the answer goes back whole
                 self.tg.send(f"{text}\n\n{self.tg.report_body(path)}", buzz=True)
             self.add_ask(text, REPORT_OPTIONS, path=path, session=session, urgent=bool(task.get("urgent")),
-                         mirror=not phone)
+                         mirror=not phone, src="result")
             self.pet.say(text, 6)
             self.event(f"finished '{task['title'][:80]}' (report filed)")
         self.apply(data, kind, session)
@@ -1453,6 +1468,7 @@ class Relay:
         for aid in data.get("withdraw") or []:
             gone = self.state["asks"].pop(str(aid), None)
             if gone:
+                comms("closed", id=str(aid), how="withdrawn")
                 self.pet.withdraw(str(aid))
                 self.tg.close(gone, "withdrawn")
         for a in (data.get("asks") or []) + (data.get("offers") or []):
@@ -1460,13 +1476,13 @@ class Relay:
                 continue
             options = [str(o).strip()[:40] for o in (a.get("options") or []) if str(o).strip()] or list(OFFER_OPTIONS)
             self.add_ask(str(a["text"]).strip(), options, do=str(a.get("do", "")), aid=a.get("id"),
-                         session=session, urgent=bool(a.get("urgent")))
+                         session=session, urgent=bool(a.get("urgent")), src=kind)
         rep = data.get("report")
         if isinstance(rep, dict) and rep.get("path"):
             path = resolve_file(rep["path"])
             if path:
                 self.add_ask(str(rep.get("title") or path.stem), REPORT_OPTIONS, path=path, session=session,
-                             urgent=bool(data.get("urgent")))
+                             urgent=bool(data.get("urgent")), src=kind)
         # Files for their phone. In a run they asked for, they go now (with the answer, if they asked from the phone).
         # A round may not push files out: its files wait behind the dot as reports, "Show me" delivers them.
         for f in data.get("files") or []:
@@ -1477,7 +1493,7 @@ class Relay:
                 continue
             caption = str(f.get("caption") or "")[:1024]
             if kind in ("round", "discover"):
-                self.add_ask(caption[:160] or path.name, REPORT_OPTIONS, path=path, session=session)
+                self.add_ask(caption[:160] or path.name, REPORT_OPTIONS, path=path, session=session, src=kind)
             else:
                 self.tg.send_file(path, caption=caption, photo=bool(f.get("photo")))  # the answer itself already buzzed
         say = (data.get("say") or "").strip()
@@ -1489,7 +1505,7 @@ class Relay:
             else:
                 log(f"quiet (not shown): {say}")
 
-    def add_ask(self, text, options, do="", path=None, aid=None, session="", urgent=False, mirror=True):
+    def add_ask(self, text, options, do="", path=None, aid=None, session="", urgent=False, mirror=True, src="round"):
         """Put something in the menu behind the dot. "Chat about it" is always one of the options. While you're
         away (or when it's urgent) it also goes to your phone; urgent ones may buzz, within the daily cap."""
         aid = re.sub(r"[^a-zA-Z0-9_-]", "-", str(aid or uuid.uuid4().hex[:8]))[:40]
@@ -1501,6 +1517,7 @@ class Relay:
         a = {"text": text[:160], "options": options, "do": do[:2000], "path": str(path or ""),
              "session": session, "urgent": urgent, "at": now(), "tg": None}
         self.state["asks"][aid] = a
+        comms("ask", id=aid, text=text[:160], options=options, path=str(path or ""), src=src, urgent=urgent)
         self.pet.ask(aid, text[:160], options, urgent)
         if mirror and (urgent or self.away()):
             a["tg"] = self.tg.ask(aid, a, buzz=self.tg.may_buzz(urgent))
@@ -1519,6 +1536,7 @@ class Relay:
             if t - a["at"] > (2 * 3600 if a.get("urgent") else 3 * 86400):
                 self.pet.withdraw(aid)
                 self.state["asks"].pop(aid)
+                comms("closed", id=aid, how="expired")
                 self.tg.close(a, "expired")
                 self.event(f"expired unanswered: {a['text']}")
         for aid, a in self.state["asks"].items():  # re-send, in case the pig restarted

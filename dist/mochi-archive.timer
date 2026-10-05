@@ -1,0 +1,11 @@
+[Unit]
+Description=Send new Claude Code and Mochi conversations to the LLM chat archive every hour
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+RandomizedDelaySec=2min
+Unit=mochi-archive.service
+
+[Install]
+WantedBy=timers.target

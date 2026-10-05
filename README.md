@@ -36,6 +36,11 @@ It also installs `dist/mochi-mail.timer` (pull mail every ten minutes for `mochi
 enable it with `systemctl --user enable --now mochi-mail.timer` once isync and notmuch are set up.
 `systemctl --user start xpet` brings it back, and deleting the autostart file turns autostart off.
 
+`dist/mochi-archive.timer` runs `mochi-archive sync` every hour: your interactive Claude Code sessions and your
+conversations with Mochi (chats, requests, its questions and your answers, from its transcripts plus the relay's
+`comms.jsonl`) go into the self-hosted LLM chat archive on sff as two providers, `claudecode` and `mochi`, over ssh
+with Mochi's key. Its rounds, dreams and `claude -p` runs stay out. `mochi-archive sync --dry-run` counts what would go.
+
 ## The brain
 
 Claude Code is the brain. `brain/mochi_brain.py` (installed as `mochi-brain`) is a thin relay with no judgement in

@@ -1,0 +1,9 @@
+[Unit]
+Description=Mochi archive sync: Claude Code sessions and Mochi conversations into the LLM chat archive on sff
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=30min
+ExecStart=%h/.local/bin/mochi-archive sync
