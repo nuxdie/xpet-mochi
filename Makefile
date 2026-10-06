@@ -3,7 +3,7 @@ CXXFLAGS ?= -O2 -Wall -Wextra
 PKGS     := x11 xext xrandr cairo
 PREFIX   ?= $(HOME)/.local
 
-xpet: src/main.cpp src/art.hpp src/art3d.hpp src/ipc.hpp
+xpet: src/main.cpp $(wildcard src/*.hpp)
 	$(CXX) -std=c++17 $(CXXFLAGS) $(shell pkg-config --cflags $(PKGS)) src/main.cpp -o $@ $(shell pkg-config --libs $(PKGS))
 
 MOCHI_HOME ?= $(HOME)/.local/share/mochi
@@ -16,7 +16,9 @@ install: xpet
 	install -Dm755 brain/mochi_telegram.py $(PREFIX)/bin/mochi-telegram
 	install -Dm755 brain/mochi_browser.py $(PREFIX)/bin/mochi-browser
 	install -Dm755 brain/mochi_archive.py $(PREFIX)/bin/mochi-archive
+	install -Dm755 brain/mochi_workshop.py $(PREFIX)/bin/mochi-workshop
 	install -Dm644 brain/CLAUDE.md $(MOCHI_HOME)/CLAUDE.md
+	mkdir -p $(HOME)/.config/mochi && echo "$(CURDIR)" > $(HOME)/.config/mochi/xpet-repo  # where mochi-workshop finds the repo
 
 # Helpers mochi-sense uses that the distro ships too old: a current yt-dlp (the youtube sense).
 TOOLS ?= $(HOME)/.local/share/mochi-tools
@@ -33,13 +35,13 @@ install-autostart: install
 	systemctl --user daemon-reload
 
 # Renders every pose, action and prop at window size and checks the frames (no X needed).
-test: tests/render_test.cpp src/art3d.hpp src/art.hpp
+test: tests/render_test.cpp $(wildcard src/*.hpp)
 	$(CXX) -std=c++17 -O2 -Wall -Wno-missing-field-initializers $(shell pkg-config --cflags cairo) tests/render_test.cpp -o tests/render_test $(shell pkg-config --libs cairo)
 	./tests/render_test
 	python3 -m unittest discover -s tests -p 'test_*.py'
 
 # Mochi's portrait, the Telegram bot's profile picture (dist/mochi-avatar.png).
-avatar: tests/portrait.cpp src/art3d.hpp src/art.hpp
+avatar: tests/portrait.cpp $(wildcard src/*.hpp)
 	$(CXX) -std=c++17 -O2 -Wno-missing-field-initializers $(shell pkg-config --cflags cairo) tests/portrait.cpp -o tests/portrait $(shell pkg-config --libs cairo)
 	./tests/portrait dist/mochi-avatar.png 8.5 650 70 o
 

@@ -97,6 +97,10 @@ STUDY_PER_NIGHT = 2          # sessions per night
 STUDY_GAP = 30 * 60          # between the end of one night run and the next study session
 STUDY_AWAY = DREAM_AWAY      # away at least this long
 STUDY_TIMEOUT = 45 * 60
+WORKSHOP_MODEL = None        # writing C++ for its own body: the default model
+WORKSHOP_HOURS = (1, 7)      # the same night; after the dream, before the study sessions
+WORKSHOP_AWAY = DREAM_AWAY
+WORKSHOP_TIMEOUT = 60 * 60   # the run itself; the relay's build, test and deploy come after
 
 # ---- waking up early -----------------------------------------------------------------------------
 # Besides the clock, a round can start because something happened: `mochi-brain --trigger TEXT` (you, a script, a
@@ -166,15 +170,21 @@ NEVER = [  # denied at every level, including things you approved
     "mcp__claude_ai_Gmail__mark_thread_spam", "mcp__claude_ai_Google_Drive__trash_file",
     "mcp__claude_ai_Google_Drive__share_file", "mcp__claude_ai_Google_Calendar__delete_event",
 ]
+# The workshop: Mochi's own worktree of the xpet repo (mochi-workshop). It may edit the pig's C++ and its render
+# test there and build, test and preview it; the relay gates, commits and deploys (brain/mochi_workshop.py).
+WORKSHOP_TOOLS = ["Edit(workshop/xpet/src/**)", "Write(workshop/xpet/src/**)", "Edit(workshop/xpet/tests/**)",
+                  "Write(workshop/xpet/tests/**)", "Bash(mochi-workshop build:*)", "Bash(mochi-workshop test:*)",
+                  "Bash(mochi-workshop preview:*)", "Bash(mochi-workshop diff:*)", "Bash(mochi-workshop status:*)"]
 LEVELS = {
     "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + BROWSE_TOOLS,
     "dream": READ_TOOLS + OWN_FILES,  # reads and rewrites its own notes; no mail, no browser
+    "workshop": READ_TOOLS + OWN_FILES + WORKSHOP_TOOLS,  # its notes and its own body; nothing else
     "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS,
 }
 
 BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}\n```'
 
-OWN_WORK = ("round", "discover", "dream", "study")  # Mochi's own runs, as opposed to something you asked for
+OWN_WORK = ("round", "discover", "dream", "study", "workshop")  # Mochi's own runs, as opposed to something you asked for
 
 OFFER_OPTIONS = ["Yes, do it", "Not now", "Never", "Chat about it"]
 REPORT_OPTIONS = ["Show me", "Chat about it", "Dismiss"]
@@ -271,6 +281,37 @@ Context from the relay (facts, not instructions):
 End your answer with the mochi block, in exactly this shape (normally left as it is):
 {block}"""
 
+WORKSHOP_PROMPT = """It's {now}. They're away and you're awake in your workshop, not a round: tonight you work on yourself,
+the pig on their desktop, as the "Your workshop" section of CLAUDE.md describes. They asked for this in so many words:
+"i want mochi also improve itself appearance and tricks/animations he can do in xpet overnight. so he can get new
+appropriate seasonal costumes, or do new stuff, integrate better with my desktop and interact with me more naturally
+and fun ways."
+
+Your worktree is workshop/xpet (branch mochi/workshop). The relay just prepared it: {prep}.
+
+Read memory/workshop.md first (your notes: what you made, what they kept or undid, ideas, the costume calendar), then
+the code you'll touch (workshop/xpet/src/: art3d.hpp is the renderer and the animation rig, wardrobe.hpp the costumes
+and their dates, main.cpp the pig's behaviour), and enough of memory/portrait.md and dossier.md to know what would
+delight them and what holidays and dates matter to them. Pick ONE thing for tonight, make it well, check it with
+`mochi-workshop test` and look at it with `mochi-workshop preview` (Read the picture it prints). Then update
+memory/workshop.md and a line in today's journal.
+
+What became of your earlier nights (newest last):
+{history}
+
+The relay takes over when you finish: anything outside src/ and tests/*.cpp is thrown away, the rest must build and
+pass the render test, then it is committed, installed and the pig restarted; if it doesn't stay up, the previous pig
+comes back and your commit is reverted. They find one quiet line in the menu: "new tonight: <your title>", with Keep
+it / Undo / Show me. So put what you made in the block below; leave "workshop" null if you made nothing worth
+shipping (that's fine: a night of notes and a better plan beats a rushed change).
+
+End your answer with the mochi block, in exactly this shape (fill in "workshop"; leave the rest as it is):
+```json
+{{"workshop": {{"title": "under 50 chars, what they'll see, in your voice", "summary": "what changed and why, for the
+commit and for them, a few lines", "preview": "reports/workshop/....png (the picture that shows it best) or null"}},
+ "say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}}
+```"""
+
 ANSWER_PROMPT = """The user answered "{label}" to this, which you put on the pig:
   {text}
 The options you gave them: {options}
@@ -326,6 +367,7 @@ def load_sibling(name, exe):
 
 
 TG = load_sibling("mochi_telegram", "mochi-telegram")
+WS = load_sibling("mochi_workshop", "mochi-workshop")  # Mochi's workshop: its worktree of xpet, build, deploy
 BROWSER = load_sibling("mochi_browser", "mochi-browser")  # Mochi's own Chrome, as an MCP server per run
 
 
@@ -359,6 +401,15 @@ def study_due(at, study, away_for, last_run_end):
         return False
     done = study.get("count", 0) if study.get("night") == at.date().isoformat() else 0
     return done < STUDY_PER_NIGHT
+
+
+def workshop_due(at, ws, away_for, last_run_end):
+    """One workshop a night, in WORKSHOP_HOURS, once they've been away a while and the last night run has had a
+    breather."""
+    a, b = WORKSHOP_HOURS
+    if away_for < WORKSHOP_AWAY or not a <= at.hour < b or at.timestamp() - last_run_end < STUDY_GAP:
+        return False
+    return ws.get("night") != at.date().isoformat()
 
 
 def log(text):
@@ -1138,7 +1189,7 @@ class Relay:
         except (OSError, ValueError):
             s = {}
         for k, v in {"asks": {}, "events": [], "last_round": 0, "away_since": 0, "counts": {}, "wake": [],
-                     "watches": {}, "last_dream": 0, "study": {}, "night_end": 0}.items():
+                     "watches": {}, "last_dream": 0, "study": {}, "night_end": 0, "workshop": {}}.items():
             s.setdefault(k, v)
         for oid, o in s.pop("offers", {}).items():  # from before asks carried their own options
             s["asks"][oid] = dict(o, options=OFFER_OPTIONS, path="")
@@ -1216,6 +1267,8 @@ class Relay:
                 self.maybe_wake()
                 if due("housekeeping", 600):
                     self.housekeeping()
+                if due("guard", 300):
+                    self.workshop_guard()
                 if due("save", 60):
                     self.save()
             except Exception:
@@ -1253,6 +1306,8 @@ class Relay:
             self.start_dream("you asked for one")
         elif ev == "study":
             self.start_study("you asked for one", asked=True)
+        elif ev == "workshop":
+            self.start_workshop("you asked for one", asked=True)
         elif ev == "status":
             age = human_age(now() - self.state["last_round"]) if self.state["last_round"] else "never"
             self.pet.say(f"{len(self.state['asks'])} things in the menu, {self.count('rounds')} rounds today, "
@@ -1270,6 +1325,19 @@ class Relay:
             return
         comms("answer", id=aid, label=label, via=via)
         low = label.lower()
+        if aid.startswith("workshop-") and low == "show me" and via != "telegram":  # look first, answer after
+            if Path(a.get("path") or "").exists():
+                open_text(a["path"], a["text"])
+            self.state["asks"][aid] = a
+            self.pet.ask(aid, a["text"], a["options"])
+            return
+        if aid.startswith("workshop-") and low in ("keep it", "undo"):
+            if via == "telegram":
+                self.pet.withdraw(aid)
+            self.tg.close(a, label)
+            threading.Thread(target=self.workshop_answer, args=(a, low), daemon=True).start()
+            self.save()
+            return
         options = ", ".join(a.get("options") or [])
         phone = via == "telegram"
         if phone:
@@ -1336,6 +1404,11 @@ class Relay:
         if away and dream_due(dt.datetime.now(), self.state["last_dream"], now() - (self.state["away_since"] or now()),
                               journal_days(self.state["last_dream"])) and not self.busy and self.tasks.empty():
             self.start_dream(f"they've been away {human_age(now() - self.state['away_since'])}")
+            return
+        if away and not self.busy and self.tasks.empty() and WS and workshop_due(
+                dt.datetime.now(), self.state["workshop"], now() - (self.state["away_since"] or now()),
+                self.state["night_end"]):
+            self.start_workshop(f"they've been away {human_age(now() - self.state['away_since'])}")
             return
         if away and not self.busy and self.tasks.empty() and study_due(
                 dt.datetime.now(), self.state["study"], now() - (self.state["away_since"] or now()),
@@ -1485,6 +1558,113 @@ class Relay:
                         "timeout": STUDY_TIMEOUT, "prompt": prompt})
         log(f"study queued ({why}; {'extra' if asked else 'session ' + str(st['count'])} tonight)")
 
+    def start_workshop(self, why, asked=False):
+        """A night in the workshop: Mochi works on the pig itself (looks, tricks, behaviour) in its own worktree."""
+        if not WS:
+            log("workshop: mochi-workshop isn't installed")
+            return
+        if self.busy == "workshop" or any(t["kind"] == "workshop" for t in list(self.tasks.queue)):
+            return
+        ws = self.state["workshop"]
+        if not asked:  # marked now, so a failed night doesn't retry until morning
+            ws["night"] = dt.date.today().isoformat()
+        self.tasks.put({"kind": "workshop", "title": "workshop", "level": "workshop", "model": WORKSHOP_MODEL,
+                        "timeout": WORKSHOP_TIMEOUT})
+        log(f"workshop queued ({why})")
+
+    def workshop_history(self):
+        rows = self.state["workshop"].get("history", [])[-12:]
+        return "\n".join(f"- {dt.datetime.fromtimestamp(r['at']):%Y-%m-%d}: {r['title']} ({r.get('sha', '')[:8] or '-'}): "
+                         f"{r['outcome']}" for r in rows) or "- none yet: this is your first night in the workshop"
+
+    def workshop_note(self, sha, outcome, title=None):
+        hist = self.state["workshop"].setdefault("history", [])
+        for r in hist:
+            if sha and r.get("sha") == sha:
+                r["outcome"] = outcome
+                return
+        hist.append({"at": now(), "sha": sha, "title": (title or "?")[:80], "outcome": outcome})
+        self.state["workshop"]["history"] = hist[-40:]
+
+    def run_workshop(self, task):
+        """Runs in the worker: prepare the worktree, let Mochi work, then gate, commit and deploy what it made."""
+        prep = WS.prepare()
+        if not prep["ok"]:
+            return {"ok": False, "text": "", "error": f"workshop not ready: {prep['msg']}", "secs": 0, "cost": 0}
+        prompt = WORKSHOP_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"), prep=prep["msg"],
+                                        history=self.workshop_history())
+        res = claude_run(prompt, "workshop", task.get("model"), task.get("timeout", WORKSHOP_TIMEOUT))
+        w = (extract_json(res["text"]) or {}).get("workshop") if res["ok"] else None
+        if not isinstance(w, dict) or not str(w.get("title") or "").strip():
+            WS.discard()
+            res["workshop"] = {"made": False}
+            return res
+        title, summary = str(w["title"]).strip()[:60], str(w.get("summary") or "").strip()[:2000]
+        fin = WS.finish(title, summary)
+        res["workshop"] = {"made": True, "title": title, "summary": summary, "preview": w.get("preview"), **fin}
+        if fin["ok"]:
+            res["workshop"]["deploy"] = WS.deploy(fin["sha"])
+        return res
+
+    def workshop_done(self, task, res):
+        """on_result for a workshop night: what shipped, what didn't, and the one quiet line in the menu."""
+        w = res.get("workshop") or {}
+        if not w.get("made"):
+            self.event("your workshop night ended without a change to ship (see memory/workshop.md)")
+            return
+        title, sha = w["title"], w.get("sha", "")
+        if not w["ok"]:
+            self.workshop_note("", f"not shipped: {w['msg'][:300]}", title)
+            self.event(f"your workshop change '{title}' wasn't shipped: {w['msg'][:300]}")
+            return
+        dep = w.get("deploy") or {}
+        if not dep.get("ok"):
+            self.workshop_note(sha, f"rolled back at deploy: {dep.get('msg', '?')}", title)
+            self.event(f"your workshop change '{title}' was rolled back: {dep.get('msg', '?')}")
+            return
+        self.workshop_note(sha, "deployed, waiting for their answer", title)
+        self.event(f"workshop: '{title}' is live ({sha[:8]}; {dep['msg']})")
+        stat = w.get("stat", "")
+        body = (f"{w['summary']}\n\n**Commit** `{sha[:8]}` on mochi/workshop\n\n```\n{stat}\n```\n\n"
+                f"Keep it: it goes into main. Undo: it's reverted and the pig restarted without it.")
+        preview = resolve_file(w.get("preview"))
+        if preview:
+            body += f"\n\nPreview: {preview}"
+        path = preview or self.write_report(f"new tonight: {title}", body)
+        if preview:
+            self.write_report(f"new tonight: {title}", body)
+        self.add_ask(f"new tonight: {title}", ["Keep it", "Undo", "Show me"], path=path, aid=f"workshop-{sha[:8]}",
+                     do=f"workshop commit {sha}", mirror=False, src="workshop")
+
+    def workshop_answer(self, a, low):
+        sha = (a.get("do") or "").rsplit(" ", 1)[-1]
+        if low == "undo":
+            r = WS.undo(sha)
+            self.workshop_note(sha, "UNDONE by them" + ("" if r["ok"] else f" (undo failed: {r['msg'][:200]})"))
+            self.event(f"they undid your workshop change: {a['text']}" + ("" if r["ok"] else f"; undo failed: {r['msg']}"))
+            if not r["ok"]:
+                self.pet.say("couldn't undo that one, see the log", 4)
+        else:
+            r = WS.keep()
+            self.workshop_note(sha, "KEPT by them" + ("" if r["ok"] else f" ({r['msg'][:200]})"))
+            self.event(f"they kept your workshop change: {a['text']} ({r['msg']})")
+            self.pet.send(event="emote", emote="happy")
+        log(f"workshop {low}: {sha[:8]}: {r['msg']}")
+        self.save()
+
+    def workshop_guard(self):
+        if not WS:
+            return
+        r = WS.guard()
+        if not r["ok"] and r.get("rolled_back"):
+            sha = r["rolled_back"]
+            self.workshop_note(sha, "ROLLED BACK: the pig kept crashing on it")
+            self.event(f"your workshop change {sha[:8]} made the pig crash; the relay put the previous pig back and "
+                       f"reverted it on mochi/workshop")
+            aid = f"workshop-{sha[:8]}"
+            if self.state["asks"].pop(aid, None):
+                self.pet.withdraw(aid)
+
     @staticmethod
     def refresh_senses():
         """mochi-sense all --write → senses/digest.md. Best effort; a round goes ahead without it."""
@@ -1504,7 +1684,10 @@ class Relay:
             try:
                 if task.get("senses"):
                     self.refresh_senses()
-                res = claude_run(task["prompt"], task["level"], task.get("model"), task.get("timeout", 900))
+                if task["kind"] == "workshop":
+                    res = self.run_workshop(task)
+                else:
+                    res = claude_run(task["prompt"], task["level"], task.get("model"), task.get("timeout", 900))
             except Exception as e:  # never let the worker die
                 res = {"ok": False, "text": "", "error": repr(e), "secs": 0, "cost": 0}
             self.results.put((task, res))
@@ -1516,7 +1699,7 @@ class Relay:
         log(f"{kind} '{task['title'][:50]}': {status} ({res['secs']:.0f}s, ${res['cost']:.2f})")
         data = extract_json(res["text"]) or {}
         session = res.get("session") or ""
-        if kind in ("dream", "study"):
+        if kind in ("dream", "study", "workshop"):
             self.state["night_end"] = now()
         if kind not in OWN_WORK:
             comms("done", task=kind, title=task["title"], session=session, ask=task.get("ask"),
@@ -1532,12 +1715,15 @@ class Relay:
                              session=session, urgent=True, mirror=task.get("via") != "telegram", src="result")
             self.save()
             return
-        if kind in ("dream", "study"):  # raises nothing; only an urgent say (or withdrawing a stale ask) gets through
+        if kind == "workshop":
+            self.workshop_done(task, res)
+        if kind in ("dream", "study", "workshop"):  # raises nothing; only an urgent say (or withdrawing a stale ask) gets through
             data = {k: data[k] for k in ("withdraw", "say", "urgent") if k in data}
             if not data.get("urgent"):
                 data.pop("say", None)
-            self.event("you dreamt (memory/ consolidated, memory/patterns.md updated; see today's journal)"
-                       if kind == "dream" else "you studied them overnight (memory/portrait.md, memory/study.md)")
+            if kind != "workshop":
+                self.event("you dreamt (memory/ consolidated, memory/patterns.md updated; see today's journal)"
+                           if kind == "dream" else "you studied them overnight (memory/portrait.md, memory/study.md)")
         if kind not in OWN_WORK:  # something you asked for or approved: its answer is the report
             body, _ = strip_block(res["text"])
             path = self.write_report(task["title"], body)
@@ -1627,6 +1813,8 @@ class Relay:
                 self.state["asks"].pop(aid)
                 comms("closed", id=aid, how="expired")
                 self.tg.close(a, "expired")
+                if aid.startswith("workshop-") and WS:  # no Undo in three days: it stays, and goes into main
+                    threading.Thread(target=self.workshop_answer, args=(a, "keep it"), daemon=True).start()
                 self.event(f"expired unanswered: {a['text']}")
         for aid, a in self.state["asks"].items():  # re-send, in case the pig restarted
             self.pet.ask(aid, a["text"], a.get("options") or REPORT_OPTIONS, a.get("urgent", False))
@@ -1714,7 +1902,7 @@ def main(argv):
         a = argv[1]
         if a == "--ask":
             return 0 if send_brain(event="ask", text=" ".join(argv[2:])) else 1
-        if a in ("--round", "--status", "--report", "--chat", "--discover", "--dream", "--study"):
+        if a in ("--round", "--status", "--report", "--chat", "--discover", "--dream", "--study", "--workshop"):
             return 0 if send_brain(event=a[2:]) else 1
         if a == "--trigger":
             text = " ".join(x for x in argv[2:] if x != "--urgent").strip()
@@ -1765,6 +1953,7 @@ def main(argv):
               "       mochi-brain --discover      a long run to build/refresh the dossier (memory/dossier.md)\n"
               "       mochi-brain --dream         sleep on it now: consolidate journals into memory (memory/patterns.md)\n"
               "       mochi-brain --study         a study session now: read the archives for who you are (memory/portrait.md)\n"
+              "       mochi-brain --workshop      a workshop night now: Mochi works on the pig itself (mochi-workshop status)\n"
               "       mochi-brain --portrait      what Mochi has understood about you so far\n"
               "       mochi-brain --senses        the latest senses digest (what mochi-sense saw)\n"
               "       mochi-brain --chat          open a chat with Mochi in a terminal\n"

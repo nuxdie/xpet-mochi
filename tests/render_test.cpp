@@ -1,6 +1,7 @@
 // Renders every pose, action and prop the pig has, at window size, and checks that each frame draws
 // something, stays inside the window, and puts the head somewhere sensible. `make test` builds and runs it.
 #include "../src/art3d.hpp"
+#include "../src/wardrobe.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -72,15 +73,30 @@ int main() {
             char name[64]; snprintf(name, sizeof name, "desk-%s@%.0f", propNames[i], yaw);
             frame(name, f);
         }
-    Action actions[] = {Action::Sniff, Action::Stretch, Action::Shake, Action::LookAround, Action::Hop, Action::Struggle,
-                        Action::Nuzzle, Action::HeadShake, Action::Land, Action::Jump, Action::Wiggle, Action::Scratch, Action::Sulk, Action::Cheer, Action::Snuffle};
-    const char* actionNames[] = {"sniff", "stretch", "shake", "lookaround", "hop", "struggle", "nuzzle", "headshake", "land", "jump", "wiggle", "scratch", "sulk", "cheer", "snuffle"};
-    for (int i = 0; i < 15; ++i)
+    for (const ActionInfo& a : ACTIONS)  // every action in the table, new ones included
         for (double p : {0.25, 0.5, 0.8}) {
             Frame f; f.yaw = 30; f.t = 1.1;
-            char name[64]; snprintf(name, sizeof name, "action-%s@%.2f", actionNames[i], p);
-            frame(name, f, actions[i], p);
+            char name[64]; snprintf(name, sizeof name, "action-%s@%.2f", a.name, p);
+            frame(name, f, a.action, p);
         }
+    for (const Costume& c : wardrobe::all())  // every costume, in the poses where it's most likely to poke out
+        for (int p : {0, 1, 2, 3, 4, 6})
+            for (double yaw : {30.0, 90.0, 225.0}) {
+                Frame f; f.pose = poses[p]; f.yaw = yaw; f.speed = p == 1 ? 3.8 : 0; f.t = 1.3; f.costume = &c;
+                char name[96]; snprintf(name, sizeof name, "costume-%s-%s@%.0f", c.name.c_str(), poseNames[p], yaw);
+                frame(name, f);
+            }
+    for (const char* act : {"cheer", "stretch", "hop"})
+        for (const Costume& c : wardrobe::all()) {
+            Frame f; f.yaw = 30; f.t = 1.1; f.costume = &c;
+            char name[96]; snprintf(name, sizeof name, "costume-%s-%s", c.name.c_str(), act);
+            frame(name, f, actionNamed(act)->action, 0.5);
+        }
+    check("every season names a costume that exists", [] {
+        for (const wardrobe::Season& s : wardrobe::SEASONS)
+            if (!wardrobe::named(s.costume)) { fprintf(stderr, "  no costume '%s'\n", s.costume); return false; }
+        return true;
+    }());
     for (double a : {0.5, 1.0}) {  // the close-up, at its biggest
         Frame f; f.yaw = 90; f.approach = a; f.lookKind = 2; f.lookW = 1; f.t = 1;
         char name[64]; snprintf(name, sizeof name, "closeup@%.1f", a);

@@ -4,6 +4,7 @@
 #include "art.hpp"
 #include "art3d.hpp"
 #include "ipc.hpp"
+#include "wardrobe.hpp"
 
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -734,6 +735,17 @@ public:
             if (!text.empty()) say(text, secs > 0 ? secs : 4);
             return;
         }
+        if (ev == "trick") {  // any action in art3d::ACTIONS, by name: for trying things out, and for the brain
+            if (const art3d::ActionInfo* a = art3d::actionNamed(get("name")); a && grounded() && st != St::Sleep)
+                anim.start(a->action, atof(get("secs").c_str()) > 0 ? clampd(atof(get("secs").c_str()), 0.2, 10) : a->secs);
+            return;
+        }
+        if (ev == "wear") {  // a costume by name, "none", or "auto" (back to the calendar in wardrobe.hpp)
+            std::string c = get("costume");
+            costumeForced = c != "auto" && !c.empty();
+            costume = costumeForced ? wardrobe::named(c) : wardrobe::today();
+            return;
+        }
         if (ev == "emote") {
             std::string e = get("emote");
             if (e == "happy") { happyLeft = 2; spawn(0); spawn(0); }
@@ -930,6 +942,7 @@ public:
         if (tick % 300 == 0)  // the brain normally withdraws these; this is in case it died
             asks.erase(std::remove_if(asks.begin(), asks.end(), [](const Ask& a) { return now() - a.at > 48 * 3600; }),
                        asks.end());
+        if (tick % 1800 == 0 && !costumeForced) costume = wardrobe::today();  // once a minute: the calendar turns
         if (blink > 0) blink -= dt;
         else if ((nextBlink -= dt) <= 0) { blink = 0.13; nextBlink = chance(0.2) ? 0.3 : frand(2.5, 7); }
         if ((chatLeft -= dt) <= 0) chatter();
@@ -1123,6 +1136,7 @@ public:
         fr.progress = st == St::Eat ? 1 - clampd(stLeft / 4, 0, 1) : 0;
         fr.lookX = lookX; fr.lookY = lookY; fr.lookW = lookW; fr.lookKind = lookKind;
         fr.propX = deskX; fr.propZ = deskZ; fr.propYaw = deskPropYaw;
+        fr.costume = costume;
         art3d::Rig rig = anim.update(fr);
         // In the air the pig spins about its middle: draw it a bit higher so nothing leaves the window.
         airLift += ((st == St::Air || st == St::Drag ? 30.0 : 0.0) - airLift) * 0.25;
@@ -1194,6 +1208,8 @@ private:
     int dir = 1;
     double yaw = 30;  // where the pig is facing, smoothed each frame
     art3d::Animator anim;  // the smoothed rig: poses ease into each other, actions layer on top
+    const art3d::Costume* costume = wardrobe::today();  // what it's wearing (wardrobe.hpp: by the calendar)
+    bool costumeForced = false;                         // set over the socket ("wear"); the calendar waits
     double lookX = 0, lookY = 0, lookW = 0, prevHappy = 0, idleActionIn = 4, airLift = 0;
     int lookKind = 0;  // 0 nothing, 1 a point on the screen, 2 you
     // attention: what it looks at
@@ -1914,11 +1930,43 @@ void writeSheet(const char* path) {
             f.frame = i;
             f.speed = i == 2 ? 3.8 : i == 1 ? 1.5 : 0;
             f.progress = 0.6;
+            f.costume = wardrobe::today();
             art3d::renderStill(cr, f, i * cellW + cellW / 2.0, e * cellH + cellH - 14 * zoom, zoom, e == 4 ? actions[i] : Action::Idle, 0.5);
         }
     cairo_surface_write_to_png(sf, path);
     cairo_destroy(cr);
     cairo_surface_destroy(sf);
+}
+
+// One action played out frame by frame: eight steps through it, from the side and from the front, in today's
+// costume (XPET_COSTUME / XPET_DATE as for the sheet). For looking at a new trick without a screen.
+int writeStrip(const std::string& name, const char* path) {
+    const art3d::ActionInfo* a = art3d::actionNamed(name);
+    if (!a) {
+        fprintf(stderr, "xpet: no action called '%s'; there are:", name.c_str());
+        for (const auto& x : art3d::ACTIONS) fprintf(stderr, " %s", x.name);
+        fputc('\n', stderr);
+        return 1;
+    }
+    double zoom = getenv("XPET_SHEET_ZOOM") ? atof(getenv("XPET_SHEET_ZOOM")) : 1.6;
+    const int cellW = (int)(100 * zoom), cellH = (int)(78 * zoom), N = 8;
+    cairo_surface_t* sf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, cellW * N, cellH * 2);
+    cairo_t* cr = cairo_create(sf);
+    cairo_set_source_rgb(cr, 0.82, 0.85, 0.90);
+    cairo_paint(cr);
+    for (int row = 0; row < 2; ++row)
+        for (int i = 0; i < N; ++i) {
+            art3d::Frame f;
+            f.yaw = row ? 90 : 30;
+            double p = (i + 0.5) / N;
+            f.t = 1.0 + p * a->secs;
+            f.costume = wardrobe::today();
+            art3d::renderStill(cr, f, i * cellW + cellW / 2.0, row * cellH + cellH - 14 * zoom, zoom, a->action, p);
+        }
+    cairo_surface_write_to_png(sf, path);
+    cairo_destroy(cr);
+    cairo_surface_destroy(sf);
+    return 0;
 }
 
 bool compositorRunning(Display* dpy) {
@@ -1928,7 +1976,7 @@ bool compositorRunning(Display* dpy) {
 }
 
 void usage() {
-    puts("usage: xpet [--name NAME] [--reset] [--no-details] [--sheet FILE.png]\n"
+    puts("usage: xpet [--name NAME] [--reset] [--no-details] [--sheet FILE.png] [--strip ACTION FILE.png]\n"
          "       xpet --send JSON|TEXT     send a message to the running pig\n"
          "       xpet --send-hook          forward a Claude Code hook (JSON on stdin)\n"
          "       xpet --ask [TEXT]         ask the brain (mochi-brain) to do something\n"
@@ -2039,6 +2087,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--sheet" && i + 1 < argc) { writeSheet(argv[++i]); return 0; }
+        else if (a == "--strip" && i + 2 < argc) return writeStrip(argv[i + 1], argv[i + 2]);
         else if (a == "--send" && i + 1 < argc) return sendCommand(argv[++i]);
         else if (a == "--send-hook") return sendHook();
         else if (a == "--ask") {

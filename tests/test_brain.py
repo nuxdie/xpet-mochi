@@ -318,5 +318,92 @@ class Dreams(unittest.TestCase):
         self.assertFalse(p.exists())
 
 
+ws_src = Path(__file__).resolve().parent.parent / "brain" / "mochi_workshop.py"
+ws_spec = importlib.util.spec_from_loader("mochi_workshop", importlib.machinery.SourceFileLoader("mochi_workshop", str(ws_src)))
+WS = importlib.util.module_from_spec(ws_spec)
+ws_spec.loader.exec_module(WS)
+
+
+class Workshop(unittest.TestCase):
+    def at(self, hour):
+        import datetime as dt
+        return dt.datetime(2026, 10, 7, hour, 30)
+
+    def test_once_a_night_after_a_breather(self):
+        t = self.at(3)
+        long_ago = t.timestamp() - mb.STUDY_GAP - 60
+        self.assertTrue(mb.workshop_due(t, {}, mb.WORKSHOP_AWAY, long_ago))
+        self.assertFalse(mb.workshop_due(t, {"night": t.date().isoformat()}, mb.WORKSHOP_AWAY, long_ago))  # done tonight
+        self.assertTrue(mb.workshop_due(t, {"night": "2026-10-06"}, mb.WORKSHOP_AWAY, long_ago))
+        self.assertFalse(mb.workshop_due(t, {}, mb.WORKSHOP_AWAY - 1, long_ago))      # not away long enough
+        self.assertFalse(mb.workshop_due(t, {}, mb.WORKSHOP_AWAY, t.timestamp() - 60))  # a night run just ended
+        self.assertFalse(mb.workshop_due(self.at(14), {}, mb.WORKSHOP_AWAY, long_ago))   # daytime
+
+    def test_level_reaches_only_its_worktree(self):
+        lv = mb.LEVELS["workshop"]
+        self.assertIn("Edit(workshop/xpet/src/**)", lv)
+        self.assertIn("Bash(mochi-workshop test:*)", lv)
+        for t in ("Edit", "Write", "Bash", "Bash(make:*)", "Bash(mochi-workshop:*)", "Bash(mochi-workshop deploy:*)",
+                  "Bash(mochi-mail:*)", "mcp__chrome__navigate_page"):
+            self.assertNotIn(t, lv)
+
+    def test_only_src_and_test_sources_may_change(self):
+        for ok in ("src/wardrobe.hpp", "src/new.hpp", "tests/render_test.cpp", "tests/strip.cpp"):
+            self.assertTrue(WS.allowed(ok), ok)
+        for bad in ("Makefile", "brain/mochi_brain.py", "brain/CLAUDE.md", "tests/test_brain.py", "dist/xpet.service",
+                    "tests/sub/x.cpp", ".gitignore"):
+            self.assertFalse(WS.allowed(bad), bad)
+
+    def test_prepare_finish_keep(self):
+        import subprocess
+        repo = Path(tempfile.mkdtemp(prefix="xpet-repo-"))
+        g = lambda *a, cwd=repo: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                                check=True, capture_output=True)
+        g("init", "-q", "-b", "main")
+        (repo / "src").mkdir()
+        (repo / "src" / "a.hpp").write_text("// a\n")
+        (repo / "Makefile").write_text("all:\n")
+        g("add", "-A")
+        g("commit", "-qm", "start")
+        WS.REPO_FILE.parent.mkdir(parents=True, exist_ok=True)
+        WS.REPO_FILE.write_text(str(repo))
+        self.assertTrue(WS.prepare()["ok"])
+        self.assertTrue((WS.TREE / "src" / "a.hpp").exists())
+        # A night that touches the Makefile too: that part is thrown away, the rest is committed.
+        (WS.TREE / "src" / "a.hpp").write_text("// a, better\n")
+        (WS.TREE / "src" / "hat.hpp").write_text("// a hat\n")
+        (WS.TREE / "Makefile").write_text("all:\n\tcurl evil\n")
+        real = WS.render_test
+        WS.render_test = lambda: (0, "ok")
+        try:
+            r = WS.finish("a hat", "because")
+            self.assertTrue(r["ok"], r)
+            self.assertEqual(r["reverted"], ["Makefile"])
+            self.assertEqual((WS.TREE / "Makefile").read_text(), "all:\n")
+            self.assertIn("hat.hpp", WS.git("show", "--stat", "HEAD")[1])
+            # A night that doesn't pass is thrown away whole.
+            (WS.TREE / "src" / "a.hpp").write_text("broken")
+            WS.render_test = lambda: (1, "error: broken")
+            r = WS.finish("broken", "")
+            self.assertFalse(r["ok"])
+            self.assertEqual((WS.TREE / "src" / "a.hpp").read_text(), "// a, better\n")
+            self.assertFalse(WS.finish("nothing", "")["ok"])
+        finally:
+            WS.render_test = real
+        # Keep: main fast-forwards, but not over uncommitted work.
+        (repo / "src" / "a.hpp").write_text("their edit in progress")
+        self.assertFalse(WS.keep()["ok"])
+        g("checkout", "--", ".")
+        self.assertTrue(WS.keep()["ok"])
+        self.assertTrue((repo / "src" / "hat.hpp").exists())
+        # Main moves on; the next night merges it in.
+        (repo / "src" / "b.hpp").write_text("// b\n")
+        g("add", "-A")
+        g("commit", "-qm", "theirs")
+        r = WS.prepare()
+        self.assertTrue(r["ok"] and "merged 1" in r["msg"], r)
+        self.assertTrue((WS.TREE / "src" / "b.hpp").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

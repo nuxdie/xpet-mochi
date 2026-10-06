@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <string>
 #include <vector>
 
 namespace art3d {
@@ -107,6 +108,22 @@ struct Part {
     std::vector<Sphere> spheres;
 };
 
+// Something the pig wears (a scarf, a hat): extra boxes riding on its parts, so they move with them. Each piece is
+// in its anchor's own space: Body has its origin under the middle of the body on its bottom face (the body box
+// spans x -8..8, y 0..8, z -5..5); Head has its origin at the neck (the head spans x 0..8, y -4..4, z -4..4,
+// the face is +x); Tail at the root of the tail (it sticks out along -x); legs at the hip (a leg spans y -6..0).
+// The designs and the dates they're worn on live in wardrobe.hpp.
+enum class Anchor { Body, Head, Tail, LegFL, LegFR, LegBL, LegBR };
+struct Piece {
+    Anchor at;
+    Box box;
+};
+struct Costume {
+    std::string name;
+    std::vector<Piece> pieces;
+    double hatHeight = 0;  // model units it adds above the head, so bubbles and hearts clear it
+};
+
 // Per face: outward normal n and tangent axes (u, v) with n = u × v, so corners (±hu, ±hv) wind CCW from outside.
 struct FaceAxes {
     V3 n, u, v;
@@ -129,6 +146,26 @@ inline const RGB PINK = rgb(0xF0A5A2), SNOUT = rgb(0xD97F7D), DARK = rgb(0x4A262
 
 enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle };
 
+// Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
+// "trick" event all go through this table, so a new action belongs here too.
+struct ActionInfo {
+    const char* name;
+    Action action;
+    double secs;
+};
+inline const ActionInfo ACTIONS[] = {
+    {"sniff", Action::Sniff, 1.7},     {"stretch", Action::Stretch, 2.2},     {"shake", Action::Shake, 0.9},
+    {"lookaround", Action::LookAround, 2.4}, {"hop", Action::Hop, 0.55},   {"struggle", Action::Struggle, 1.1},
+    {"nuzzle", Action::Nuzzle, 1.3},   {"headshake", Action::HeadShake, 0.9}, {"land", Action::Land, 0.4},
+    {"jump", Action::Jump, 0.45},      {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
+    {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 1.6},         {"snuffle", Action::Snuffle, 1.4},
+};
+inline const ActionInfo* actionNamed(const std::string& name) {
+    for (const ActionInfo& a : ACTIONS)
+        if (name == a.name) return &a;
+    return nullptr;
+}
+
 struct Frame {
     Pose pose = Pose::Stand;
     Eyes eyes = Eyes::Open;
@@ -146,6 +183,7 @@ struct Frame {
     RGB tint{1, 1, 1};    // time-of-day light: warm in the evening, cool and dim at night
     double lookX = 0, lookY = 0, lookW = 0;  // a point to look at, relative to the head (screen px), and how much to care
     int lookKind = 0;                         // 0 nothing, 1 that point, 2 you (out of the screen)
+    const Costume* costume = nullptr;         // what it's wearing today (wardrobe.hpp), if anything
 };
 
 // Every number that moves. Base + motion + actions add up into one of these each frame.
@@ -540,9 +578,20 @@ inline std::vector<Part> assemble(const Frame& f, const Rig& r) {
     V3 pivot{-8 * sxz * (1 - r.centred), 4 * sy * r.centred, 0};
     Xf body = world * Xf::trans({pivot.x + r.bodyX, 6 + r.bodyY + pivot.y, 0}) * Xf::rotZ(r.bodyPitch) * Xf::rotX(r.bodyRoll) *
               Xf::trans({-pivot.x, -pivot.y, 0});
+    // The costume's pieces ride on their parts; on the body they squash and stretch with it.
+    auto dress = [&](Part& p, Anchor at) {
+        if (!f.costume) return;
+        for (const Piece& pc : f.costume->pieces) {
+            if (pc.at != at) continue;
+            Box bx = pc.box;
+            if (at == Anchor::Body) { bx.c = {bx.c.x * sxz, bx.c.y * sy, bx.c.z * sxz}; bx.s = {bx.s.x * sxz, bx.s.y * sy, bx.s.z * sxz}; }
+            p.boxes.push_back(bx);
+        }
+    };
     Part b;
     b.xf = body;
     b.boxes.push_back({{0, 4 * sy, 0}, {16 * sxz, 8 * sy, 10 * sxz}, PINK, 0, {}});
+    dress(b, Anchor::Body);
     parts.push_back(b);
     // Legs hang from hips at the body's bottom corners.
     const V3 hips[4] = {{6, 0, -3}, {6, 0, 3}, {-6, 0, -3}, {-6, 0, 3}};
@@ -554,17 +603,20 @@ inline std::vector<Part> assemble(const Frame& f, const Rig& r) {
         // the body's side, so it is hidden until the leg swings out far enough for the top to actually show.
         if (std::fabs(r.leg[i]) < 28 && std::fabs(r.splay[i]) < 14) lb.hidden |= 1u << 2;
         l.boxes.push_back(lb);
+        dress(l, (Anchor)((int)Anchor::LegFL + i));
         parts.push_back(l);
     }
     // Head pivots at the neck: front-top of the body, slightly inside it.
     Part h = headPart(f.pose == Pose::Sleep ? Eyes::Closed : f.eyes, r.snout);  // asleep is asleep
     h.xf = body * Xf::trans({6 * sxz + r.neck, 6 * sy, 0}) * Xf::rotY(-r.headYaw) * Xf::rotZ(-r.headPitch) * Xf::rotX(r.headRoll);
+    dress(h, Anchor::Head);
     parts.push_back(h);
     // Tail nub at the rear top, wagging.
     Part tl;
     tl.xf = body * Xf::trans({-8 * sxz, 6.5 * sy, 0}) * Xf::rotY(r.tail);
     tl.boxes.push_back({{-1, 0, 0}, {2, 1.2, 1.2}, PINK, 1u << 0, {}});
     tl.boxes.push_back({{-2.2, 0.5, 0.5}, {1.1, 1.1, 1.1}, SNOUT, 0, {}});
+    dress(tl, Anchor::Tail);
     parts.push_back(tl);
 
     // Props sit on the ground in front of the pig, a little to the side the camera sees (the pig faces into the
@@ -852,10 +904,10 @@ inline HeadPos render(cairo_t* cr, const Frame& f, const Rig& rig, double cx, do
     cairo_restore(cr);
     cairo_surface_destroy(img);
 
-    // The head part is the sixth (body, four legs, head); its top-centre in world space.
+    // The head part is the sixth (body, four legs, head); its top-centre in world space, hat included.
     const Part& head = parts[5];
     double hx, hy;
-    cam.project(cam.to(head.xf.pt({4, 4, 0})), hx, hy);
+    cam.project(cam.to(head.xf.pt({4, 4 + (f.costume ? f.costume->hatHeight : 0), 0})), hx, hy);
     return {hx, hy};
 }
 
