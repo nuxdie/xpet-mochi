@@ -234,7 +234,8 @@ def rollback(why):
         shutil.copy2(GOOD, tmp)
         tmp.replace(BIN)
     bad = st.get("deployed")
-    if bad and git("merge-base", "--is-ancestor", bad, "HEAD")[0] == 0:
+    # Revert it on the branch only if it's the workshop's own (never something that's already in main).
+    if bad and git("merge-base", "--is-ancestor", bad, "HEAD")[0] == 0 and git("merge-base", "--is-ancestor", bad, "main")[0]:
         sh(["git", "-c", "user.name=Mochi", "-c", "user.email=mochi@localhost", "revert", "--no-edit", bad], cwd=TREE)
     st.setdefault("broken", []).append({"sha": bad, "why": why, "at": time.time()})
     st["broken"] = st["broken"][-20:]
