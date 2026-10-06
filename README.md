@@ -44,7 +44,7 @@ with Mochi's key. Its rounds, dreams and `claude -p` runs stay out. `mochi-archi
 ## The brain
 
 Claude Code is the brain. `brain/mochi_brain.py` (installed as `mochi-brain`) is a thin relay with no judgement in
-it. It needs the `claude` CLI, plus `xprop`, `zenity` and `notify-send`.
+it. It needs the `claude` CLI, plus `xprop`, `zenity` and `notify-send`; "Show me" renders markdown with `gir1.2-webkit2-4.1` and `python3-markdown` (plain zenity text without them).
 
 About every 30 minutes while you're at the computer (and when you ask, when you answer an offer, when you come
 back from a break of two hours or more, and once first thing each day) the relay starts `claude -p` in Mochi's
