@@ -58,6 +58,7 @@ PET_SOCK = RUNTIME / "xpet.sock"
 BRAIN_SOCK = RUNTIME / "mochi-brain.sock"
 CLAUDE = shutil.which("claude") or str(HOME / ".local/bin/claude")
 SENSE = shutil.which("mochi-sense") or str(HOME / ".local/bin/mochi-sense")  # Mochi's senses (read-only digests)
+VIEW = shutil.which("mochi-view") or str(HOME / ".local/bin/mochi-view")  # the "Show me" window, markdown rendered
 SENSE_TIMEOUT = 150         # refreshing senses/digest.md before a round must not hold the round up for long
 
 # ---- when to run ---------------------------------------------------------------------------------
@@ -519,13 +520,15 @@ def is_text(path):
 
 
 def open_text(path, title="Mochi"):
-    """Show a report on screen: text in a zenity window, anything else (PDF, picture) in its own application."""
+    """Show a report on screen: text in a mochi-view window (markdown rendered), anything else (PDF, picture) in its
+    own application."""
     if not is_text(path):
         subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
         return
-    subprocess.Popen(["zenity", "--text-info", f"--filename={path}", f"--title={title}",
-                      "--width=780", "--height=640", "--font=Monospace 10"],
+    # mochi-view renders the markdown; should it fail (no WebKit), the plain zenity box still shows the text.
+    subprocess.Popen(["sh", "-c", '"$0" "$1" "$2" || zenity --text-info --filename="$1" --title="$2" '
+                      '--width=780 --height=640 --font="Monospace 10"', VIEW, str(path), title],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 

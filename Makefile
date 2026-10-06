@@ -17,6 +17,7 @@ install: xpet
 	install -Dm755 brain/mochi_browser.py $(PREFIX)/bin/mochi-browser
 	install -Dm755 brain/mochi_archive.py $(PREFIX)/bin/mochi-archive
 	install -Dm755 brain/mochi_workshop.py $(PREFIX)/bin/mochi-workshop
+	install -Dm755 brain/mochi_view.py $(PREFIX)/bin/mochi-view
 	install -Dm644 brain/CLAUDE.md $(MOCHI_HOME)/CLAUDE.md
 	mkdir -p $(HOME)/.config/mochi && echo "$(CURDIR)" > $(HOME)/.config/mochi/xpet-repo  # where mochi-workshop finds the repo
 
