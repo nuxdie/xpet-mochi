@@ -1095,6 +1095,7 @@ public:
         bool working = st == St::Work;
         if (happyLeft > 0 || st == St::Play || (working && shown == Act::Done)) eyes = art::Eyes::Happy;
         if (blink > 0 || (st == St::Eat && (tick / 8) % 2)) eyes = art::Eyes::Closed;
+        if (anim.action == art3d::Action::Rouse && anim.actionT < anim.actionLen * art3d::ROUSE_YAWN) eyes = art::Eyes::Closed;
         bool mirror = dir < 0;
         art::Prop prop = art::Prop::Nothing;
         if (working) {
@@ -1576,6 +1577,14 @@ private:
         set(St::Sleep, 20 * 60);
     }
 
+    // Waking up on its own, rested: it gets up with a yawn, a stretch and a shake rather than just standing up.
+    // (Woken by you it only grumbles: that's in onPet and the socket.)
+    void wakeUp() {
+        say("mrrp", 2);
+        anim.start(art3d::Action::Rouse, 3.0);
+        set(St::Idle, 3.2);
+    }
+
     // ---- state machine
 
     void set(St n, double secs = 0) {
@@ -1714,7 +1723,7 @@ private:
         else if (st == St::Walk) walkStep(*sg, 1.5, false);
         if (st == St::Air) return;
 
-        if (playLeft <= 0 && st == St::Sleep && s.energy >= 100) { say("mrrp", 2); set(St::Idle, 1); }
+        if (playLeft <= 0 && st == St::Sleep && s.energy >= 100) wakeUp();
         if (st != St::Play && (stLeft -= dt) <= 0) {
             if (st == St::Eat) {
                 s.food += 35;
@@ -1723,8 +1732,8 @@ private:
                 happyLeft = 1.5;
                 spawn(0);
             }
-            if (st == St::Sleep) { say("mrrp", 2); s.clamp(); }
-            decide();
+            if (st == St::Sleep) { s.clamp(); wakeUp(); }
+            else decide();
         }
         // Walking may have carried us off the ledge.
         if (grounded() && !D.segAt(plat, px, py)) fall();

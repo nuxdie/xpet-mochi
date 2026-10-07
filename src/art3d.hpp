@@ -144,7 +144,7 @@ inline const RGB PINK = rgb(0xF0A5A2), SNOUT = rgb(0xD97F7D), DARK = rgb(0x4A262
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -159,7 +159,10 @@ inline const ActionInfo ACTIONS[] = {
     {"nuzzle", Action::Nuzzle, 1.3},   {"headshake", Action::HeadShake, 0.9}, {"land", Action::Land, 0.4},
     {"jump", Action::Jump, 0.45},      {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 1.6},         {"snuffle", Action::Snuffle, 1.4},
+    {"rouse", Action::Rouse, 3.0},
 };
+// Rouse keeps its eyes shut through the yawn: the first this much of it (the pet closes them, the rig can't).
+constexpr double ROUSE_YAWN = 0.4;
 inline const ActionInfo* actionNamed(const std::string& name) {
     for (const ActionInfo& a : ACTIONS)
         if (name == a.name) return &a;
@@ -457,6 +460,27 @@ inline Rig actionRig(Action a, double p, double t) {
             r.headPitch = -6 * e;
             r.headRoll = 5 * std::sin(t * 9) * e;
             break;
+        case Action::Rouse: {  // waking up from a nap: a big yawn, a long play-bow stretch, then shake the sleep off
+            // Each stage rises, holds and lets go (a plateau, not a sine), and they overlap a little so it flows.
+            auto stage = [&](double a, double b) {
+                double q = (p - a) / (b - a);
+                return smoothstep(q * 3.5) * smoothstep((1 - q) * 3.5);
+            };
+            double yawn = stage(0.0, ROUSE_YAWN), bow = stage(0.36, 0.8), shake = env((p - 0.78) / 0.22);
+            double dip = env(p / 0.08);  // anticipation: the head ducks a touch before it tips back
+            r.headPitch = 6 * dip - 34 * yawn - 20 * bow;
+            r.headRoll = 7 * yawn + 2 * std::sin(t * 21) * yawn + 22 * std::sin(t * 32 + 1.2) * shake;  // the yawn's shiver
+            r.snout = 1 + 0.3 * yawn;  // mouth open wide
+            r.scaleY = 1 + 0.04 * yawn;  // the big breath in
+            r.leg[0] = r.leg[1] = 55 * bow;
+            r.bodyPitch = -16 * bow;
+            r.bodyY = 2.4 * bow;
+            r.scaleXZ = 1 + 0.05 * bow;
+            r.bodyRoll = 13 * std::sin(t * 32) * shake;
+            r.headYaw = 8 * std::sin(t * 16) * shake;
+            r.tail = 25 * yawn + 20 * bow + 40 * std::sin(t * 30) * shake;
+            break;
+        }
         case Action::Scratch:  // hind leg scratching behind the "ear"
             r.leg[3] = -70 * e;
             r.splay[3] = 35 * e + 12 * std::sin(t * 24) * e;
