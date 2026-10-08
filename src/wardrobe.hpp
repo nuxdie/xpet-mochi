@@ -22,7 +22,7 @@ using art3d::Decal;
 using art3d::rgb;
 
 inline const art3d::RGB RUST = rgb(0xC8552B), CREAM = rgb(0xF3E3C3), WITCH = rgb(0x3B2650), PUMPKIN = rgb(0xF08A24),
-                        BUCKLE = rgb(0xF2D04B);
+                        BUCKLE = rgb(0xF2D04B), TEAL = rgb(0x2A7F86), DEEP_TEAL = rgb(0x1F6168);
 
 // Autumn: a chunky knitted scarf round the neck, one end hanging down the side.
 inline Costume autumnScarf() {
@@ -59,9 +59,34 @@ inline Costume witchHat() {
     return c;
 }
 
+// Winter: a knitted bobble hat, pulled down to just above the eyes, with a ribbed cuff and a cream pom-pom.
+inline Costume bobbleHat() {
+    Costume c{"bobble-hat", {}, 6.2};
+    // The cuff: a little wider than the head all round, its bottom edge (y 3.3) clear of the eyes (they end at 3).
+    Box cuff{{4, 4.1, 0}, {8.8, 1.6, 8.8}, TEAL, 0, {}};
+    for (double k : {-3.0, -1.5, 0.0, 1.5, 3.0}) {  // darker ribs running up the knit
+        cuff.decals.push_back({0, 0, k, 0.8, 0.22, DEEP_TEAL});  // front: u is y, v is z
+        cuff.decals.push_back({1, k, 0, 0.22, 0.8, DEEP_TEAL});  // back: u is z, v is y
+        cuff.decals.push_back({4, k, 0, 0.22, 0.8, DEEP_TEAL});  // +z: u is x, v is y
+        cuff.decals.push_back({5, 0, k, 0.8, 0.22, DEEP_TEAL});  // -z: u is y, v is x
+    }
+    c.pieces.push_back({Anchor::Head, cuff});
+    // The crown, with one cream stripe round it.
+    Box crown{{4, 5.7, 0}, {8.0, 1.6, 8.0}, TEAL, 0, {}};
+    crown.decals.push_back({0, 0, 0, 0.25, 4.0, CREAM});
+    crown.decals.push_back({1, 0, 0, 4.0, 0.25, CREAM});
+    crown.decals.push_back({4, 0, 0, 4.0, 0.25, CREAM});
+    crown.decals.push_back({5, 0, 0, 0.25, 4.0, CREAM});
+    c.pieces.push_back({Anchor::Head, crown});
+    c.pieces.push_back({Anchor::Head, {{3.9, 6.9, 0}, {6.4, 0.8, 6.4}, TEAL, 0, {}}});  // gathered at the top
+    c.pieces.push_back({Anchor::Head, {{3.8, 7.5, 0}, {4.2, 0.6, 4.2}, TEAL, 0, {}}});
+    c.pieces.push_back({Anchor::Head, {{3.6, 8.9, 0}, {3.2, 2.6, 3.2}, CREAM, 0, {}}});  // the pom-pom
+    return c;
+}
+
 // Every costume there is (the render test goes through all of them).
 inline const std::vector<Costume>& all() {
-    static const std::vector<Costume> v = {autumnScarf(), witchHat()};
+    static const std::vector<Costume> v = {autumnScarf(), witchHat(), bobbleHat()};
     return v;
 }
 
@@ -80,6 +105,7 @@ struct Season {
 inline const Season SEASONS[] = {
     {"witch-hat", 1024, 1101},
     {"autumn-scarf", 922, 1120},
+    {"bobble-hat", 1121, 228},  // all winter, through the new year
 };
 
 inline const Costume* forDate(int month, int day) {
