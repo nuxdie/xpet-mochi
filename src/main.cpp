@@ -1660,7 +1660,7 @@ private:
         }
         bool hard = vy > 20;
         if (now() - placedAt < 3) stayUntil = now() + 90;  // you put it here: it stays a while
-        anim.start(art3d::Action::Land, hard ? 0.5 : 0.3);
+        anim.start(art3d::Action::Land, hard ? 0.8 : 0.55);  // long enough for the settle after the squash
         thrown = false;
         vx = vy = 0;
         if (playLeft > 0 && (visitWin || st == St::Play || st == St::Air)) { set(St::Play); return; }

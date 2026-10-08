@@ -156,7 +156,7 @@ struct ActionInfo {
 inline const ActionInfo ACTIONS[] = {
     {"sniff", Action::Sniff, 1.7},     {"stretch", Action::Stretch, 2.2},     {"shake", Action::Shake, 0.9},
     {"lookaround", Action::LookAround, 2.4}, {"hop", Action::Hop, 0.55},   {"struggle", Action::Struggle, 1.1},
-    {"nuzzle", Action::Nuzzle, 1.3},   {"headshake", Action::HeadShake, 0.9}, {"land", Action::Land, 0.4},
+    {"nuzzle", Action::Nuzzle, 1.3},   {"headshake", Action::HeadShake, 0.9}, {"land", Action::Land, 0.7},
     {"jump", Action::Jump, 0.45},      {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 1.6},         {"snuffle", Action::Snuffle, 1.4},
     {"rouse", Action::Rouse, 3.0},
@@ -417,12 +417,21 @@ inline Rig actionRig(Action a, double p, double t) {
         case Action::HeadShake:
             r.headYaw = 32 * std::sin(t * 19) * e;
             break;
-        case Action::Land:  // squash on impact
-            r.scaleY = 1 - 0.28 * e;
-            r.scaleXZ = 1 + 0.14 * e;
-            r.headPitch = 14 * e;
-            for (double& s : r.splay) s = 10 * e;
+        case Action::Land: {  // squash on impact, bounce back a little too tall, then wobble down to rest
+            // A damped spring: g > 0 is squash, g < 0 the rebound stretch. Each swing is about a third of the one
+            // before, and the last fifth fades to nothing so the hand-off to the pose doesn't pop.
+            double fade = smoothstep((1 - p) * 5);
+            double g = std::sin(p * 14.3) * std::exp(-4.8 * p) * fade;
+            double lag = std::sin(p * 14.3 - 0.9) * std::exp(-4.8 * p) * smoothstep(p * 8) * fade;  // the head follows late
+            r.scaleY = 1 - 0.28 * g;
+            r.scaleXZ = 1 + 0.14 * g;
+            r.bodyY = -0.6 * std::max(0.0, g);  // sinks into its legs
+            for (double& s : r.splay) s = 10 * std::max(0.0, g);
+            r.headPitch = 16 * lag;  // a nod after the body has already stopped
+            r.bodyRoll = 3.5 * std::sin(p * 19) * smoothstep((p - 0.1) * 6) * std::exp(-2.5 * p) * fade;  // finds its balance
+            r.tail = 30 * std::sin(p * 22) * std::exp(-3 * p) * fade;
             break;
+        }
         case Action::Jump:  // stretch on take-off
             r.scaleY = 1 + 0.16 * e;
             r.scaleXZ = 1 - 0.07 * e;
