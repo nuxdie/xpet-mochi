@@ -15,6 +15,7 @@ Everything is read-only: sqlite files are copied before being opened, the NAS is
 the web services are only GET.
 """
 
+import base64
 import datetime as dt
 import glob
 import http.cookiejar
@@ -30,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -1480,7 +1482,7 @@ def sense_mail(args):
     return "\n".join(out)
 
 
-# ---- calendars (Google Calendar's secret iCal addresses) ----------------------------------------------
+# ---- calendars (Google CalDAV with the mail app passwords, or iCal URLs) ----------------------------------------------
 
 def ics_events(text):
     """The VEVENTs of an iCalendar file as dicts of their properties (first value wins; params kept as 'NAME;PARAMS')."""
@@ -1532,20 +1534,50 @@ def ics_text(value):
     return re.sub(r"\\[nN,;\\]", lambda m: ICS_UNESCAPE[m.group(0)], value or "").strip()
 
 
+CALDAV = "https://www.google.com/calendar/dav/{cal}/events/"  # Google's CalDAV; takes the mail app passwords
+CALDAV_QUERY = ('<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data/>'
+                '</d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range '
+                'start="{lo}" end="{hi}"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>')
+
+
+def caldav_text(spec, lo, hi):
+    """The iCalendar text of one calendar's events in [lo, hi], over CalDAV with a mail account's app password.
+    spec: {"account": "nuxdie", "id": "nuxdie@gmail.com"} (account = a name in mail.accounts)."""
+    acct = spec["account"]
+    user = CFG["mail"]["accounts"][acct]
+    pw = (Path(CFG["mail"]["password_dir"]) / f"{acct}.pass").read_text().replace(" ", "").strip()
+    url = CALDAV.format(cal=urllib.parse.quote(spec.get("id") or user))
+    fmt = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    body = CALDAV_QUERY.format(lo=fmt(lo), hi=fmt(hi)).encode()
+    req = urllib.request.Request(url, data=body, method="REPORT", headers={
+        "Depth": "1", "Content-Type": "application/xml",
+        "Authorization": "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        root = ET.fromstring(r.read())
+    return "\n".join(el.text or "" for el in root.iter("{urn:ietf:params:xml:ns:caldav}calendar-data"))
+
+
 def calendar_snapshot(days_back=1, days_ahead=90):
-    """{uid@calendar: {...}} for every event in the window (recurring ones by their series), across the calendars."""
-    cals = (CFG.get("calendar") or {}).get("ics") or {}
-    if not cals:
-        return {"ok": False, "error": f"no calendars configured (calendar.ics in {CONFIG_FILE})"}
+    """{uid@calendar: {...}} for every event in the window (recurring ones by their series), across the calendars:
+    calendar.caldav ({name: {"account", "id"}}, Google CalDAV with the mail app passwords) and calendar.ics
+    ({name: secret iCal URL})."""
+    conf = CFG.get("calendar") or {}
+    sources = [(n, "caldav", v) for n, v in (conf.get("caldav") or {}).items()] + \
+              [(n, "ics", v) for n, v in (conf.get("ics") or {}).items()]
+    if not sources:
+        return {"ok": False, "error": f"no calendars configured (calendar.caldav or calendar.ics in {CONFIG_FILE})"}
     lo, hi = time.time() - days_back * 86400, time.time() + days_ahead * 86400
     out, errors = {}, []
-    for name, url in cals.items():
+    for name, kind, spec in sources:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "mochi-sense"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                text = r.read().decode("utf-8", "replace")
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            errors.append(f"{name}: {type(e).__name__}")  # never the URL: it is a secret
+            if kind == "caldav":
+                text = caldav_text(spec, lo, hi)
+            else:
+                req = urllib.request.Request(spec, headers={"User-Agent": "mochi-sense"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    text = r.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError, ValueError, KeyError, ET.ParseError) as e:
+            errors.append(f"{name}: {type(e).__name__}{' ' + str(e.code) if hasattr(e, 'code') else ''}")  # never a URL
             continue
         for e in ics_events(text):
             start, all_day = ics_time(e.get("DTSTART", ""), e.get("DTSTART;", ""))
@@ -1568,7 +1600,7 @@ def when_text(start, all_day):
 
 
 def sense_calendar(args):
-    head = "## Calendars (iCal feeds)"
+    head = "## Calendars (Google, over CalDAV)"
     pos = positional(args)
     sub = pos[0] if pos else "upcoming"
     snap = calendar_snapshot(days_ahead=max(1, days_arg(args, 14)) if sub != "feed" else 90)
@@ -1576,7 +1608,8 @@ def sense_calendar(args):
         return json.dumps(snap, ensure_ascii=False)
     if not snap.get("ok"):
         return f"{head}\n_not available: {snap.get('error')}_"
-    rows = sorted((e["start"], e) for e in snap["events"].values() if e["start"] >= time.time() - 86400 and not e["rrule"])
+    rows = sorted(((e["start"], e) for e in snap["events"].values() if e["start"] >= time.time() - 86400 and not e["rrule"]),
+                  key=lambda x: x[0])
     out = [head, f"Next {days_arg(args, 14)} days, {len(rows)} events" +
            (f" (unreadable: {'; '.join(snap['errors'])})" if snap["errors"] else "")]
     out.append(md_table([(when_text(s, e["all_day"]), e["calendar"], e["summary"], e["where"],
@@ -1758,7 +1791,7 @@ SENSORS = {
     "home": (sense_home, "home assistant: people, what's on, vacuums, climate, recent changes  [--grep REGEX | WORD]"),
     "hosts": (sense_hosts, "ssh hosts: uptime, disk, failed units, containers  [HOST] | HOST COMMAND..."),
     "network": (sense_network, "hosts up/down, web services, tailscale, kde connect, mDNS"),
-    "calendar": (sense_calendar, "calendars from their iCal feeds: upcoming [--days N] | feed (JSON)"),
+    "calendar": (sense_calendar, "their Google calendars (CalDAV): upcoming [--days N] | feed (JSON)"),
     "mail": (sense_mail, "local mail: recent | unread | search QUERY | show QUERY | folders  [--days N] [--limit N] [--chars N]"),
     "sessions": (sense_sessions, "claude code sessions by project  [--days N]"),
     "repos": (sense_repos, "git repos with recent commits and dirty state  [--days N]"),

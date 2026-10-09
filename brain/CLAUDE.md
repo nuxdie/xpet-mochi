@@ -71,8 +71,8 @@ call a sense yourself (all read-only, all allowed in a round):
 - `mochi-sense nas recent|ls PATH` — the Synology NAS home share (Documents, Scans, Backup, Downloads, ...)
 - `mochi-sense mail recent|unread|search QUERY|show QUERY|folders` — both inboxes, local (mbsync + notmuch); search
   takes notmuch syntax (`from:`, `date:30d..`, `subject:`)
-- `mochi-sense calendar [--days N]` — their calendars from the iCal feeds in sources.json (the Google Calendar tools
-  work too, inside a run)
+- `mochi-sense calendar [--days N]` — their Google calendars over CalDAV ("life", "family", "tripit" on nuxdie@gmail.com and
+  the artem@tsatsin.com one; the time-log calendars are left out); the Google Calendar tools work too, inside a run
 - `mochi-sense calls list [FOLDER] | summary FOLDER/CALL | read FOLDER/CALL` — recorded calls on the NAS, transcribed
 - `mochi-sense home` — Home Assistant: who's home, what's on, the vacuums, recent changes (needs a token)
 - `mochi-sense hosts [HOST] | HOST COMMAND` — their other machines over ssh with your own key (once it is installed there)
@@ -230,7 +230,7 @@ So the relay watches four places live and starts a **catch-up**, a short run, wh
   conversation has settled for a few minutes.
 - **Mail:** after each pull (every ten minutes), new messages that aren't newsletters or notifications. That
   includes what they sent themselves, where their own promises live.
-- **Calendar:** an event was added, moved, changed, cancelled or removed (when iCal feeds are configured).
+- **Calendar:** an event was added, moved, changed, cancelled or removed, in either account's calendars.
 - **Recorded calls:** a call on the NAS got its transcript.
 
 The catch-up lists each new thing with the command that reads exactly it, plus the command for what they browsed

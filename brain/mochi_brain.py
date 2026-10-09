@@ -964,12 +964,12 @@ class Feed:
                 ready once it has been quiet FEED_SETTLE, or its first new message is FEED_MAX_WAIT old.
       mail      after every mail pull: new messages that aren't bulk (List-Unsubscribe and the like).
       calls     every SLOW_FEED_EVERY: a recorded call on the NAS that got its transcript.
-      calendar  every SLOW_FEED_EVERY, if iCal feeds are configured: events added, moved, changed or cancelled.
+      calendar  every SLOW_FEED_EVERY: events added, moved, changed or cancelled (Google CalDAV, sources.json).
     Everything but Telegram is ready at once. The first look at each source is only a baseline. A source that stays
     unreadable for FEED_DOWN_AFTER wakes Mochi once (and again when it's back). state is relay.json's "feed"."""
 
     LABELS = {"telegram": "their Telegram archive", "mail": "their local mail index",
-              "calls": "the recorded-calls folder on the NAS", "calendar": "their calendar feeds"}
+              "calls": "the recorded-calls folder on the NAS", "calendar": "their Google calendars (CalDAV)"}
 
     def __init__(self, state, fire):
         self.state, self.fire = state, fire
@@ -2204,7 +2204,7 @@ def main(argv):
             print(f"Feed: Telegram last polled {at(f.get('last_poll'))}, {len(f.get('counts') or {})} chats tracked; "
                   f"mail {'tracked' if f.get('mail_seen') is not None else 'not yet seen'}; "
                   f"calls {'tracked' if f.get('calls') is not None else 'not yet seen'}; "
-                  f"calendar {'tracked' if f.get('cal') is not None else 'not set up (calendar.ics in sources.json)'}")
+                  f"calendar {'tracked' if f.get('cal') is not None else 'not set up (calendar in sources.json)'}")
             print(f"Last catch-up {at(f.get('last_catchup'))}, {(rs.get('counts') or {}).get('catchups', 0)} today "
                   f"(max {CATCHUP_PER_DAY})")
             for src, d in (f.get("down") or {}).items():
