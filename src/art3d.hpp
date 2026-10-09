@@ -417,16 +417,21 @@ inline Rig actionRig(Action a, double p, double t) {
         case Action::HeadShake:
             r.headYaw = 32 * std::sin(t * 19) * e;
             break;
-        case Action::Land: {  // squash on impact, bounce back a little too tall, then wobble down to rest
-            // A damped spring: g > 0 is squash, g < 0 the rebound stretch. Each swing is about a third of the one
-            // before, and the last fifth fades to nothing so the hand-off to the pose doesn't pop.
+        case Action::Land: {  // squash on impact, bounce back up off the floor, then a smaller dip to rest
+            // A damped spring: g > 0 is squash, g < 0 the rebound. Light damping so the rebound and the second dip
+            // are visible (the first version damped so hard the rebound was a 6% stretch nobody could see), and the
+            // last fifth fades to nothing so the hand-off to the pose doesn't pop.
             double fade = smoothstep((1 - p) * 5);
-            double g = std::sin(p * 14.3) * std::exp(-4.8 * p) * fade;
-            double lag = std::sin(p * 14.3 - 0.9) * std::exp(-4.8 * p) * smoothstep(p * 8) * fade;  // the head follows late
-            r.scaleY = 1 - 0.28 * g;
-            r.scaleXZ = 1 + 0.14 * g;
+            double g = std::sin(p * 13) * std::exp(-3.2 * p) * fade;
+            double lag = std::sin(p * 13 - 0.9) * std::exp(-3.2 * p) * smoothstep(p * 8) * fade;  // the head follows late
+            double up = std::max(0.0, -g);
+            r.scaleY = 1 - (g > 0 ? 0.3 : 0.4) * g;  // the stretch reads stronger than the squash
+            r.scaleXZ = 1 + (g > 0 ? 0.15 : 0.18) * g;
             r.bodyY = -0.6 * std::max(0.0, g);  // sinks into its legs
+            r.lift = 9 * up;                    // the rebound leaves the floor, about a third of a hop
+            r.shadow = 1 - 0.8 * up;
             for (double& s : r.splay) s = 10 * std::max(0.0, g);
+            for (double& l : r.leg) l = 14 * up;  // legs tuck a little in the air, like a small hop
             r.headPitch = 16 * lag;  // a nod after the body has already stopped
             r.bodyRoll = 3.5 * std::sin(p * 19) * smoothstep((p - 0.1) * 6) * std::exp(-2.5 * p) * fade;  // finds its balance
             r.tail = 30 * std::sin(p * 22) * std::exp(-3 * p) * fade;
