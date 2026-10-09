@@ -178,7 +178,7 @@ def md_table(rows, head):
     return "\n".join(out)
 
 
-VALUE_OPTS = {"--days", "-d", "--limit", "--lines", "--grep", "--page", "--date", "--chars", "--provider", "--part", "--depth"}
+VALUE_OPTS = {"--since", "--hours", "--days", "-d", "--limit", "--lines", "--grep", "--page", "--date", "--chars", "--provider", "--part", "--depth"}
 
 
 def split_args(args):
@@ -243,6 +243,9 @@ SEARCH_PARAMS = {"duckduckgo.com": "q", "google.com": "q", "youtube.com": "searc
 
 
 def sense_browser(args):
+    hours = opt(args, "--hours")
+    if hours:
+        return browser_timeline(float(hours))
     days = days_arg(args, 2)
     pat = opt(args, "--grep")
     visits = list(browser_visits(days))
@@ -286,6 +289,30 @@ def sense_browser(args):
             if ts_titles:
                 out.append(f"- **{h}**: " + " · ".join(t for _, t in ts_titles))
     return "\n".join(out)
+
+
+def browser_timeline(hours):
+    """What they looked at in the last few hours, oldest first: one line per page (repeats folded), searches marked."""
+    visits = sorted(browser_visits(hours / 24))
+    rows, last = [], None
+    for ts, url, title, _ in visits:
+        h = host_of(url)
+        if not h or any(h == d or h.endswith("." + d) for d in CFG["ignore_domains"]):
+            continue
+        q = ""
+        for dom, param in SEARCH_PARAMS.items():
+            if h == dom or h.endswith("." + dom):
+                q = (urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get(param) or [""])[0].strip()
+        key = (h, q or title[:60])
+        if key == last:
+            continue
+        last = key
+        what = f"search “{q[:80]}”" if q else (title[:90] or url[:90])
+        rows.append(f"- {dt.datetime.fromtimestamp(ts):%H:%M} {h}: {what}")
+    head = f"## Browser, last {hours:g}h ({len(rows)} pages, oldest first)"
+    if len(rows) > 120:
+        rows = [f"_({len(rows) - 120} earlier pages left out)_"] + rows[-120:]
+    return head + "\n" + ("\n".join(rows) or "_nothing_")
 
 
 # ---- shell history ----------------------------------------------------------------------------------
@@ -372,6 +399,33 @@ def tg_text(m):
     return re.sub(r"\s+", " ", t)
 
 
+def tg_when(m, short=False):
+    """The message's time in local time (the archive stores UTC), as 2026-10-07 18:00 (short: 10-07 18:00)."""
+    raw = (m.get("metadata") or {}).get("originalDate") or ""
+    try:
+        t = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        t = (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).astimezone()
+    except ValueError:
+        return raw[:16]
+    return t.strftime("%m-%d %H:%M" if short else "%Y-%m-%d %H:%M")
+
+
+def tg_utc(m):
+    return ((m.get("metadata") or {}).get("originalDate") or "")[:19]
+
+
+def tg_kind(d):
+    """user | bot | group | channel | self"""
+    e = d.get("entity") or {}
+    if e.get("self"):
+        return "self"
+    if d.get("isUser"):
+        return "bot" if e.get("bot") or d.get("bot") else "user"
+    if d.get("isGroup") or e.get("megagroup") or e.get("className") == "Chat":
+        return "group"
+    return "channel"
+
+
 def tg_who(m):
     s = m.get("sender") or {}
     return s.get("name") or s.get("id") or "?"
@@ -400,7 +454,7 @@ def dialog_name(d):
 
 def sense_telegram(args):
     tg = TgArchive()
-    head = f"## Telegram archive ({CFG['tg_archive']['url']})"
+    head = f"## Telegram archive ({CFG['tg_archive']['url']}; times are local)"
     if not tg.cookie:
         return f"{head}\n_unreachable: {tg.why}. Set tg_archive.password (or password_file) in {CONFIG_FILE}._"
     pos = positional(args)
@@ -414,11 +468,17 @@ def sense_telegram(args):
             pg = d.get("pagination", {})
             title = f"{head}\n**Search `{q}`**: {pg.get('totalCount', '?')} hits, page {page} of {pg.get('total', '?')}\n"
             if chars:
-                return title + "\n".join(f"- {m.get('metadata', {}).get('originalDate', '')[:16]} [{m.get('chatName', '')[:30]}] "
+                return title + "\n".join(f"- {tg_when(m)} [{m.get('chatName', '')[:30]}] "
                                           f"{tg_who(m)[:20]}: {tg_text(m)[:chars]}" for m in d.get("messages", []))
-            rows = [(m.get("metadata", {}).get("originalDate", "")[:16], m.get("chatName", "")[:30], tg_who(m)[:20], tg_text(m)[:90])
+            rows = [(tg_when(m), m.get("chatName", "")[:30], tg_who(m)[:20], tg_text(m)[:90])
                     for m in d.get("messages", [])]
             return title + md_table(rows, ["when", "chat", "from", "text"])
+        if sub == "counts":  # for the relay's live feed: messages per dialog, as JSON
+            dialogs = tg.get("/api/dialogs")
+            dialogs = dialogs if isinstance(dialogs, list) else dialogs.get("dialogs") or []
+            return json.dumps({"ok": True, "dialogs": {str(d.get("tgDialogId")): {
+                "n": d.get("messageCount") or 0, "name": dialog_name(d)[:60], "kind": tg_kind(d),
+                "archived": bool(d.get("archived"))} for d in dialogs}}, ensure_ascii=False)
         if sub == "range":
             d = tg.get(f"/api/dialog/{pos[1]}/date-range")
             return f"{head}\n**Dialog {pos[1]}** spans: {json.dumps(d)[:300]}"
@@ -427,12 +487,29 @@ def sense_telegram(args):
             limit = min(int(opt(args, "--limit") or 40), 100)
             date = opt(args, "--date")
             me = tg_self_id(tg)
-            if date:  # history: the messages around the first one on or after this date, oldest first
+            since = opt(args, "--since")  # local time, like the times shown: only what's newer, oldest first
+            if since:
+                try:
+                    cut = dt.datetime.fromisoformat(since.replace(" ", "T")).astimezone(dt.timezone.utc)
+                except ValueError:
+                    return f"{head}\n_--since takes a local time like 2026-10-09T08:00_"
+                cut = cut.strftime("%Y-%m-%dT%H:%M:%S")
+                msgs, page = [], 1
+                while page <= 5:
+                    batch = tg.get(f"/api/dialog/{did}/messages", limit=100, page=page).get("messages", [])
+                    msgs += [m for m in batch if tg_utc(m) > cut]
+                    if not batch or tg_utc(batch[-1]) <= cut:
+                        break
+                    page += 1
+                msgs = msgs[::-1]
+                order = f"{len(msgs)} since {since}, oldest first" + ("; more before that" if page > 5 else "")
+                date = None
+            elif date:  # history: the messages around the first one on or after this date, oldest first
                 d = tg.get(f"/api/dialog/{did}/messages/cursor", date=date, limit=limit)
                 msgs = d.get("messages", [])
                 order = f"around {date}, oldest first" + ("; older exist" if d.get("hasOlder") else "") + \
                         ("; newer exist" if d.get("hasNewer") else "")
-            else:
+            if not since and not date:
                 page = int(opt(args, "--page") or 1)
                 d = tg.get(f"/api/dialog/{did}/messages", limit=limit, page=page)
                 msgs = d.get("messages", [])
@@ -440,8 +517,8 @@ def sense_telegram(args):
             who = lambda m: "me" if me and str((m.get("sender") or {}).get("id")) == me else tg_who(m)[:20]
             if chars:
                 return f"{head}\n**Dialog {did}** ({order}):\n" + "\n".join(
-                    f"- {m.get('metadata', {}).get('originalDate', '')[:16]} {who(m)}: {tg_text(m)[:chars]}" for m in msgs)
-            rows = [(m.get("metadata", {}).get("originalDate", "")[:16], who(m), tg_text(m)[:100]) for m in msgs]
+                    f"- {tg_when(m)} {who(m)}: {tg_text(m)[:chars]}" for m in msgs)
+            rows = [(tg_when(m), who(m), tg_text(m)[:100]) for m in msgs]
             return f"{head}\n**Dialog {did}** ({order}):\n" + md_table(rows, ["when", "from", "text"])
         # recent / dialogs
         status = tg.get("/api/agent/status")
@@ -482,7 +559,7 @@ def sense_telegram(args):
             line = f"- **{dialog_name(d)[:40]}** ({kind}, id {d.get('tgDialogId')}, {d.get('messageCount', '?')} msgs)"
             for m in msgs[:2]:
                 me = "me" if str((m.get("sender") or {}).get("id")) == self_id else tg_who(m)[:18]
-                line += f"\n    - {m.get('metadata', {}).get('originalDate', '')[5:16]} {me}: {tg_text(m)[:110]}"
+                line += f"\n    - {tg_when(m, short=True)} {me}: {tg_text(m)[:110]}"
             out.append(line)
         return "\n".join(out)
     except (urllib.error.URLError, OSError, ValueError) as e:
@@ -1516,9 +1593,9 @@ def sense_sources(args):
 # ---- all -----------------------------------------------------------------------------------------------
 
 SENSORS = {
-    "browser": (sense_browser, "browser history: sites, searches, pages  [--days N] [--grep REGEX]"),
+    "browser": (sense_browser, "browser history: sites, searches, pages  [--days N] [--grep REGEX] | --hours H (a timeline)"),
     "shell": (sense_shell, "shell history: commands, hosts, dirs  [--lines N]"),
-    "telegram": (sense_telegram, "telegram archive: recent | dialogs | search WORDS [--page N] | dialog ID [--date YYYY-MM-DD | --page N] | range ID  [--days N] [--limit N] [--chars N]"),
+    "telegram": (sense_telegram, "telegram archive: recent | dialogs | search WORDS [--page N] | dialog ID [--since 2026-10-09T08:00 | --date YYYY-MM-DD | --page N] | range ID | counts (JSON)  [--days N] [--limit N] [--chars N]"),
     "llm": (sense_llm, "llm chat archive: recent | search WORDS | list [--page N] [--provider P] | show ID [--chars N]  [--limit N]"),
     "nas": (sense_nas, "nas: recent [--days N] | ls PATH | read PATH [--chars N] | tree [PATH] [--depth N] | find REGEX | index  (tree/find use the nightly index)"),
     "youtube": (sense_youtube, "their YouTube channel: list | read ID [--part N] [--chars N]  (title, date, description, auto-captions)"),
