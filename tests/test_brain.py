@@ -179,11 +179,11 @@ class LiveFeed(unittest.TestCase):
         f, _ = self.feed()
         f.take(counts(nastya=10, denis=5), t=1000)
         f.take(counts(nastya=12, denis=5), t=1120)
-        self.assertEqual(f.ready(t=1120), [])
+        self.assertEqual(f.ready(t=1120)[0], [])
         f.take(counts(nastya=13, denis=5), t=1240)
         self.assertEqual(f.state["new"]["nastya"]["n"], 3)
-        self.assertEqual(f.ready(t=1240 + mb.FEED_SETTLE - 1), [])
-        self.assertEqual([d for d, _ in f.ready(t=1240 + mb.FEED_SETTLE)], ["nastya"])
+        self.assertEqual(f.ready(t=1240 + mb.FEED_SETTLE - 1)[0], [])
+        self.assertEqual([d for d, _ in f.ready(t=1240 + mb.FEED_SETTLE)[0]], ["nastya"])
         self.assertEqual(f.state["new"]["nastya"]["since"], 1000 - 300)  # from the poll before the first new one
 
     def test_a_long_conversation_is_read_anyway(self):
@@ -191,7 +191,7 @@ class LiveFeed(unittest.TestCase):
         f.take(counts(denis=5), t=0)
         for i in range(1, 12):
             f.take(counts(denis=5 + i), t=i * 120)
-        self.assertEqual([d for d, _ in f.ready(t=11 * 120)], ["denis"])  # first new at 120, now 1320 >= 120 + 20 min
+        self.assertEqual([d for d, _ in f.ready(t=11 * 120)[0]], ["denis"])  # first new at 120, now 1320 >= 120 + 20 min
 
     def test_bots_channels_self_and_muted_are_not_news(self):
         f, _ = self.feed()
@@ -224,6 +224,55 @@ class LiveFeed(unittest.TestCase):
         self.assertIn("401", fired[0][0])
         f.take(counts(nastya=1), t=T0 + mb.FEED_DOWN_AFTER + 240)
         self.assertIn("readable again", fired[1][0])
+
+    def test_mail_new_non_bulk_messages_become_items(self):
+        f, _ = self.feed()
+        m = lambda **kw: dict({"from": "Nastya <n@x>", "subject": "contract", "account": "artem", "sent": False,
+                               "bulk": False}, **kw)
+        f.take({"ok": True, "messages": {"a": m()}}, t=1000, src="mail")  # baseline
+        self.assertEqual(f.state["items"], {})
+        f.take({"ok": True, "messages": {"a": m(), "b": m(subject="signed"), "c": m(bulk=True),
+                                         "d": m(sent=True, subject="re: signed")}}, t=1600, src="mail")
+        lines = [it["line"] for it in f.state["items"].values()]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("from Nastya <n@x>: “signed”", lines[0])
+        self.assertIn("id:b", lines[0])
+        self.assertIn("they sent", lines[1])
+        self.assertEqual(f.ready(t=1600)[1][0][0], "mail:b")  # ready at once
+
+    def test_calls_fire_when_the_transcript_lands(self):
+        f, _ = self.feed()
+        f.take({"ok": True, "calls": {"dad/old": [".mp3", ".txt"]}}, t=0 + 1, src="calls")
+        f.take({"ok": True, "calls": {"dad/old": [".mp3", ".txt"], "work/new": [".mkv"]}}, t=300, src="calls")
+        self.assertEqual(f.state["items"], {})  # a recording alone isn't readable yet
+        f.take({"ok": True, "calls": {"dad/old": [".mp3", ".txt"], "work/new": [".mkv", ".dialog", ".summary"]}},
+               t=600, src="calls")
+        self.assertEqual(list(f.state["items"]), ["call:work/new"])
+        self.assertIn('calls summary "work/new"', f.state["items"]["call:work/new"]["line"])
+
+    def test_calendar_added_moved_cancelled_removed(self):
+        f, _ = self.feed()
+        T = time.time()
+        ev = lambda summary, start, **kw: dict({"calendar": "life", "summary": summary, "start": start,
+                                                "all_day": False, "where": "", "status": "", "rrule": ""}, **kw)
+        f.take({"ok": True, "events": {"n": ev("call nastya", T + 86400), "w": ev("walk", T + 2 * 86400),
+                                       "g": ev("gaming", T + 3 * 86400)}}, t=T, src="calendar")
+        f.take({"ok": True, "events": {"n": ev("call nastya", T + 86400 + 3600), "w": ev("walk", T + 2 * 86400,
+                                       status="CANCELLED"), "new": ev("dentist", T + 5 * 86400)}}, t=T + 300,
+               src="calendar")
+        lines = sorted(it["line"] for it in f.state["items"].values())
+        self.assertEqual(len(lines), 4, lines)
+        self.assertTrue(any("“call nastya” moved from" in l for l in lines))
+        self.assertTrue(any("“walk”" in l and "cancelled" in l for l in lines))
+        self.assertTrue(any("“dentist” added" in l for l in lines))
+        self.assertTrue(any("“gaming”" in l and "removed" in l for l in lines))
+
+    def test_calendar_not_configured_is_silent(self):
+        f, fired = self.feed()
+        for i in range(5):
+            f.take({"ok": False, "error": "no calendars configured (calendar.ics in x)"}, t=1000 + i * 3600,
+                   src="calendar")
+        self.assertEqual(fired, [])
 
 
 class Stub:

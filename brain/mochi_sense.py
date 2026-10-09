@@ -961,7 +961,11 @@ def sense_calls(args):
     try:
         calls = call_index()
     except OSError as e:
+        if sub == "feed":
+            return json.dumps({"ok": False, "error": str(e)[:200]})
         return f"{head}\n_unreachable: {e}_"
+    if sub == "feed":  # for the relay's live feed
+        return json.dumps({"ok": True, "calls": {k: sorted(c["exts"]) for k, c in calls.items()}}, ensure_ascii=False)
     if sub in ("read", "summary"):
         key = " ".join(pos[1:]).strip().strip("/")
         for e in CALL_EXTS | MEDIA_EXTS:
@@ -1387,6 +1391,47 @@ def mail_show(query, chars):
     return "\n\n".join(parts) if parts else "_no message matches_"
 
 
+BULK_HEADERS = re.compile(rb"^(list-unsubscribe|list-id|precedence: *(bulk|list|junk)|auto-submitted: *auto-generated)",
+                          re.I | re.M)
+
+
+def is_bulk(path):
+    """Newsletters, notifications and other machine mail: the headers say so (List-Unsubscribe, List-Id, ...)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(32768).split(b"\r\n\r\n", 1)[0].split(b"\n\n", 1)[0]
+    except OSError:
+        return False
+    return bool(BULK_HEADERS.search(head))
+
+
+def mail_feed(days):
+    """For the relay's live feed: every message of the last days with who, what and whether it is bulk, as JSON."""
+    ready, why = mail_status()
+    if not ready:
+        return {"ok": False, "error": why}
+    ok, out = notmuch("show", "--format=json", "--body=false", "--entire-thread=false", f"date:{days}d..", timeout=120)
+    if not ok:
+        return {"ok": False, "error": out[:200]}
+    msgs = {}
+
+    def walk(node):
+        if isinstance(node, dict) and "headers" in node:
+            h, tags = node["headers"], node.get("tags", [])
+            files = node.get("filename") or []
+            files = files if isinstance(files, list) else [files]
+            msgs[node["id"]] = {"from": h.get("From", "")[:80], "subject": h.get("Subject", "")[:120],
+                                "account": mail_acct(tags), "sent": "sent" in tags, "bulk": any(is_bulk(f) for f in files[:1])}
+        elif isinstance(node, list):
+            for n in node:
+                walk(n)
+    try:
+        walk(json.loads(out or "[]"))
+    except ValueError:
+        return {"ok": False, "error": "unparseable notmuch output"}
+    return {"ok": True, "messages": msgs}
+
+
 def sense_mail(args):
     """mail: recent | unread | search QUERY | show QUERY | folders  [--days N] [--limit N] [--chars N]
     QUERY is notmuch syntax: from:, to:, subject:, tag:unread, tag:ACCOUNT, folder:, date:2w.., attachment:, plain words."""
@@ -1398,6 +1443,8 @@ def sense_mail(args):
     sub = pos[0] if pos else "recent"
     limit = int(opt(args, "--limit") or 25)
     accts = CFG["mail"]["accounts"]
+    if sub == "feed":
+        return json.dumps(mail_feed(days_arg(args, 2)), ensure_ascii=False)
     if sub == "search":
         q = " ".join(pos[1:])
         rows = thread_rows(nm_search(q, limit))
@@ -1432,6 +1479,113 @@ def sense_mail(args):
                "`mochi-sense mail show id:MSGID` · `mochi-sense mail unread --days 7`_")
     return "\n".join(out)
 
+
+# ---- calendars (Google Calendar's secret iCal addresses) ----------------------------------------------
+
+def ics_events(text):
+    """The VEVENTs of an iCalendar file as dicts of their properties (first value wins; params kept as 'NAME;PARAMS')."""
+    text = re.sub(r"\r?\n[ \t]", "", text)  # unfold
+    events, cur = [], None
+    for line in text.splitlines():
+        if line == "BEGIN:VEVENT":
+            cur = {}
+        elif line == "END:VEVENT":
+            if cur is not None:
+                events.append(cur)
+            cur = None
+        elif cur is not None and ":" in line:
+            name, _, value = line.partition(":")
+            key, _, params = name.partition(";")
+            if key not in cur:
+                cur[key] = value
+                cur[key + ";"] = params
+    return events
+
+
+def ics_time(value, params=""):
+    """(epoch, all_day) for a DTSTART/DTEND value: 20261010T190000Z, 20261010T190000 (+TZID) or 20261010."""
+    value = value.strip()
+    if not value:
+        return None, False
+    try:
+        if len(value) == 8:
+            return dt.datetime.strptime(value, "%Y%m%d").timestamp(), True
+        t = dt.datetime.strptime(value[:15], "%Y%m%dT%H%M%S")
+        if value.endswith("Z"):
+            return t.replace(tzinfo=dt.timezone.utc).timestamp(), False
+        tz = re.search(r"TZID=([^;:]+)", params or "")
+        if tz:
+            try:
+                from zoneinfo import ZoneInfo
+                return t.replace(tzinfo=ZoneInfo(tz.group(1).strip('"'))).timestamp(), False
+            except Exception:
+                pass
+        return t.timestamp(), False
+    except ValueError:
+        return None, False
+
+
+ICS_UNESCAPE = {"\\n": "\n", "\\N": "\n", "\\,": ",", "\\;": ";", "\\\\": "\\"}
+
+
+def ics_text(value):
+    return re.sub(r"\\[nN,;\\]", lambda m: ICS_UNESCAPE[m.group(0)], value or "").strip()
+
+
+def calendar_snapshot(days_back=1, days_ahead=90):
+    """{uid@calendar: {...}} for every event in the window (recurring ones by their series), across the calendars."""
+    cals = (CFG.get("calendar") or {}).get("ics") or {}
+    if not cals:
+        return {"ok": False, "error": f"no calendars configured (calendar.ics in {CONFIG_FILE})"}
+    lo, hi = time.time() - days_back * 86400, time.time() + days_ahead * 86400
+    out, errors = {}, []
+    for name, url in cals.items():
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "mochi-sense"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                text = r.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            errors.append(f"{name}: {type(e).__name__}")  # never the URL: it is a secret
+            continue
+        for e in ics_events(text):
+            start, all_day = ics_time(e.get("DTSTART", ""), e.get("DTSTART;", ""))
+            rrule = e.get("RRULE", "")
+            if start is None or (not rrule and not lo <= start <= hi):
+                continue
+            uid = f"{e.get('UID', '')}{'@' + e['RECURRENCE-ID'] if e.get('RECURRENCE-ID') else ''}@{name}"
+            out[uid] = {"calendar": name, "summary": ics_text(e.get("SUMMARY", ""))[:120],
+                        "start": start, "all_day": all_day, "where": ics_text(e.get("LOCATION", ""))[:80],
+                        "status": e.get("STATUS", ""), "rrule": rrule[:80],
+                        "mod": e.get("LAST-MODIFIED", "") + "/" + e.get("SEQUENCE", "")}
+    if errors and not out:
+        return {"ok": False, "error": "; ".join(errors)}
+    return {"ok": True, "events": out, "errors": errors}
+
+
+def when_text(start, all_day):
+    t = dt.datetime.fromtimestamp(start)
+    return t.strftime("%a %Y-%m-%d") + ("" if all_day else t.strftime(" %H:%M"))
+
+
+def sense_calendar(args):
+    head = "## Calendars (iCal feeds)"
+    pos = positional(args)
+    sub = pos[0] if pos else "upcoming"
+    snap = calendar_snapshot(days_ahead=max(1, days_arg(args, 14)) if sub != "feed" else 90)
+    if sub == "feed":
+        return json.dumps(snap, ensure_ascii=False)
+    if not snap.get("ok"):
+        return f"{head}\n_not available: {snap.get('error')}_"
+    rows = sorted((e["start"], e) for e in snap["events"].values() if e["start"] >= time.time() - 86400 and not e["rrule"])
+    out = [head, f"Next {days_arg(args, 14)} days, {len(rows)} events" +
+           (f" (unreadable: {'; '.join(snap['errors'])})" if snap["errors"] else "")]
+    out.append(md_table([(when_text(s, e["all_day"]), e["calendar"], e["summary"], e["where"],
+                          e["status"].lower() if e["status"] not in ("", "CONFIRMED") else "") for s, e in rows],
+                        ["when", "calendar", "what", "where", ""]))
+    rec = [e for e in snap["events"].values() if e["rrule"]]
+    if rec:
+        out.append(f"Recurring series: {len(rec)} (" + ", ".join(sorted({e['summary'][:30] for e in rec})[:15]) + ")")
+    return "\n".join(out)
 
 # ---- Home Assistant -----------------------------------------------------------------------------------
 
@@ -1604,12 +1758,13 @@ SENSORS = {
     "home": (sense_home, "home assistant: people, what's on, vacuums, climate, recent changes  [--grep REGEX | WORD]"),
     "hosts": (sense_hosts, "ssh hosts: uptime, disk, failed units, containers  [HOST] | HOST COMMAND..."),
     "network": (sense_network, "hosts up/down, web services, tailscale, kde connect, mDNS"),
+    "calendar": (sense_calendar, "calendars from their iCal feeds: upcoming [--days N] | feed (JSON)"),
     "mail": (sense_mail, "local mail: recent | unread | search QUERY | show QUERY | folders  [--days N] [--limit N] [--chars N]"),
     "sessions": (sense_sessions, "claude code sessions by project  [--days N]"),
     "repos": (sense_repos, "git repos with recent commits and dirty state  [--days N]"),
     "sources": (sense_sources, "the registry: every source and whether it is reachable"),
 }
-DIGEST = ["network", "mail", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "home", "hosts"]
+DIGEST = ["network", "mail", "calendar", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "home", "hosts"]
 
 
 def sense_all(args):
