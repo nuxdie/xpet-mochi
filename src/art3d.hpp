@@ -417,13 +417,17 @@ inline Rig actionRig(Action a, double p, double t) {
         case Action::HeadShake:
             r.headYaw = 32 * std::sin(t * 19) * e;
             break;
-        case Action::Land: {  // squash on impact, bounce back up off the floor, then a smaller dip to rest
-            // A damped spring: g > 0 is squash, g < 0 the rebound. Light damping so the rebound and the second dip
-            // are visible (the first version damped so hard the rebound was a 6% stretch nobody could see), and the
-            // last fifth fades to nothing so the hand-off to the pose doesn't pop.
-            double fade = smoothstep((1 - p) * 5);
-            double g = std::sin(p * 13) * std::exp(-3.2 * p) * fade;
-            double lag = std::sin(p * 13 - 0.9) * std::exp(-3.2 * p) * smoothstep(p * 8) * fade;  // the head follows late
+        case Action::Land: {  // squash on impact, one bounce off the floor, a soft touch-down, rest
+            // One spring cycle and no more (he asked for a single bounce): g > 0 is squash, g < 0 the rebound. After
+            // the rebound only the touch-down squash is kept, never a second lift. The last fifth fades to nothing so
+            // the hand-off to the pose doesn't pop.
+            auto spring = [](double x) {
+                if (x < 0 || x > 3 * M_PI) return 0.0;
+                return x < 2 * M_PI ? std::sin(x) : std::max(0.0, std::sin(x));
+            };
+            double fade = smoothstep((1 - p) * 5), decay = std::exp(-2.4 * p);
+            double g = spring(p * 9.75) * decay * fade;
+            double lag = spring(p * 9.75 - 0.9) * decay * fade;  // the head follows late
             double up = std::max(0.0, -g);
             r.scaleY = 1 - (g > 0 ? 0.3 : 0.4) * g;  // the stretch reads stronger than the squash
             r.scaleXZ = 1 + (g > 0 ? 0.15 : 0.18) * g;
