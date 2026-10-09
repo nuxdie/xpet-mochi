@@ -965,6 +965,7 @@ class Feed:
       mail      after every mail pull: new messages that aren't bulk (List-Unsubscribe and the like).
       calls     every SLOW_FEED_EVERY: a recorded call on the NAS that got its transcript.
       calendar  every SLOW_FEED_EVERY: events added, moved, changed or cancelled (Google CalDAV, sources.json).
+                A calendar marked "log" (a time log, holidays) only leaves an event for the next run.
     Everything but Telegram is ready at once. The first look at each source is only a baseline. A source that stays
     unreadable for FEED_DOWN_AFTER wakes Mochi once (and again when it's back). state is relay.json's "feed"."""
 
@@ -1088,24 +1089,31 @@ class Feed:
         evs, old = data.get("events") or {}, self.state["cal"]
         cur = {uid: {"s": e.get("summary", ""), "t": e.get("start") or 0, "a": bool(e.get("all_day")),
                      "w": e.get("where", ""), "st": e.get("status", ""), "c": e.get("calendar", ""),
-                     "r": bool(e.get("rrule"))} for uid, e in evs.items()}
+                     "r": bool(e.get("rrule")), "l": bool(e.get("log"))} for uid, e in evs.items()}
         when = lambda e: dt.datetime.fromtimestamp(e["t"]).strftime("%a %d %b" + ("" if e["a"] else " %H:%M"))
         if old is not None:
+            item = self.item
+
+            def note(key, line, t, log):  # a time log's entries ride along with the next run instead of starting one
+                if log:
+                    self.fire(line, False, False)
+                else:
+                    item(key, line, t)
             for uid, e in cur.items():
                 o = old.get(uid)
                 what = f"calendar '{e['c']}': “{e['s']}”"
                 if o is None:
-                    self.item(f"cal:{uid}:{e['t']}", f"{what} added, {when(e)}" + (f" at {e['w']}" if e["w"] else ""), t)
+                    note(f"cal:{uid}:{e['t']}", f"{what} added, {when(e)}" + (f" at {e['w']}" if e["w"] else ""), t, e["l"])
                 elif e["st"] == "CANCELLED" and o["st"] != "CANCELLED":
-                    self.item(f"cal:{uid}:x", f"{what} {when(e)} cancelled", t)
+                    note(f"cal:{uid}:x", f"{what} {when(e)} cancelled", t, e["l"])
                 elif (o["t"], o["a"]) != (e["t"], e["a"]):
-                    self.item(f"cal:{uid}:{e['t']}", f"{what} moved from {when(o)} to {when(e)}", t)
+                    note(f"cal:{uid}:{e['t']}", f"{what} moved from {when(o)} to {when(e)}", t, e["l"])
                 elif (o["s"], o["w"]) != (e["s"], e["w"]):
-                    self.item(f"cal:{uid}:{e['s']}{e['w']}", f"{what} {when(e)} changed (was “{o['s']}”"
-                                                              f"{', at ' + o['w'] if o['w'] else ''})", t)
+                    note(f"cal:{uid}:{e['s']}{e['w']}", f"{what} {when(e)} changed (was “{o['s']}”"
+                                                         f"{', at ' + o['w'] if o['w'] else ''})", t, e["l"])
             for uid, o in old.items():
                 if uid not in cur and not o["r"] and t + 3600 < o["t"] < t + 80 * 86400:
-                    self.item(f"cal:{uid}:gone", f"calendar '{o['c']}': “{o['s']}” {when(o)} removed", t)
+                    note(f"cal:{uid}:gone", f"calendar '{o['c']}': “{o['s']}” {when(o)} removed", t, o.get("l"))
         self.state["cal"] = cur
 
     def ready(self, t=None):

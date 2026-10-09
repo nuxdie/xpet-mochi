@@ -267,6 +267,17 @@ class LiveFeed(unittest.TestCase):
         self.assertTrue(any("“dentist” added" in l for l in lines))
         self.assertTrue(any("“gaming”" in l and "removed" in l for l in lines))
 
+    def test_log_calendars_ride_along_instead_of_waking(self):
+        f, fired = self.feed()
+        T = time.time()
+        ev = lambda summary, start, **kw: dict({"calendar": "sleep", "summary": summary, "start": start,
+                                                "all_day": False, "where": "", "status": "", "rrule": "", "log": True}, **kw)
+        f.take({"ok": True, "events": {}}, t=T, src="calendar")
+        f.take({"ok": True, "events": {"s": ev("Sleep", T - 3600)}}, t=T + 300, src="calendar")
+        self.assertEqual(f.state["items"], {})
+        self.assertEqual(len(fired), 1)
+        self.assertIn("calendar 'sleep': “Sleep” added", fired[0][0])
+
     def test_calendar_not_configured_is_silent(self):
         f, fired = self.feed()
         for i in range(5):

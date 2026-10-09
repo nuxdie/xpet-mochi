@@ -1588,6 +1588,7 @@ def calendar_snapshot(days_back=1, days_ahead=90):
             out[uid] = {"calendar": name, "summary": ics_text(e.get("SUMMARY", ""))[:120],
                         "start": start, "all_day": all_day, "where": ics_text(e.get("LOCATION", ""))[:80],
                         "status": e.get("STATUS", ""), "rrule": rrule[:80],
+                        "log": bool(kind == "caldav" and spec.get("log")),
                         "mod": e.get("LAST-MODIFIED", "") + "/" + e.get("SEQUENCE", "")}
     if errors and not out:
         return {"ok": False, "error": "; ".join(errors)}
@@ -1603,18 +1604,28 @@ def sense_calendar(args):
     head = "## Calendars (Google, over CalDAV)"
     pos = positional(args)
     sub = pos[0] if pos else "upcoming"
-    snap = calendar_snapshot(days_ahead=max(1, days_arg(args, 14)) if sub != "feed" else 90)
+    snap = calendar_snapshot(days_back=7, days_ahead=max(1, days_arg(args, 14))) if sub != "feed" else calendar_snapshot()
     if sub == "feed":
         return json.dumps(snap, ensure_ascii=False)
     if not snap.get("ok"):
         return f"{head}\n_not available: {snap.get('error')}_"
-    rows = sorted(((e["start"], e) for e in snap["events"].values() if e["start"] >= time.time() - 86400 and not e["rrule"]),
-                  key=lambda x: x[0])
+    rows = sorted(((e["start"], e) for e in snap["events"].values()
+                   if e["start"] >= time.time() - 86400 and not e["rrule"] and not e["log"]), key=lambda x: x[0])
     out = [head, f"Next {days_arg(args, 14)} days, {len(rows)} events" +
            (f" (unreadable: {'; '.join(snap['errors'])})" if snap["errors"] else "")]
     out.append(md_table([(when_text(s, e["all_day"]), e["calendar"], e["summary"], e["where"],
                           e["status"].lower() if e["status"] not in ("", "CONFIRMED") else "") for s, e in rows],
                         ["when", "calendar", "what", "where", ""]))
+    logs = defaultdict(list)
+    for e in snap["events"].values():
+        if e["log"] and not e["rrule"] and e["start"] <= time.time() + days_arg(args, 14) * 86400:
+            logs[e["calendar"]].append(e)
+    if logs:
+        out.append("\n**Logs and background calendars** (last 7 days and ahead, newest first):")
+        for name, es in sorted(logs.items()):
+            es.sort(key=lambda e: e["start"], reverse=True)
+            out.append(f"- **{name}** ({len(es)}): " + " · ".join(f"{when_text(e['start'], e['all_day'])[4:]} {e['summary'][:40]}"
+                                                            for e in es[:8]))
     rec = [e for e in snap["events"].values() if e["rrule"]]
     if rec:
         out.append(f"Recurring series: {len(rec)} (" + ", ".join(sorted({e['summary'][:30] for e in rec})[:15]) + ")")
