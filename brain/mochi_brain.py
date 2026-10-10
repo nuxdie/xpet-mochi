@@ -57,6 +57,7 @@ COMMS_FILE = WORK / "comms.jsonl"  # what passed between them and Mochi, for moc
 RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 PET_SOCK = RUNTIME / "xpet.sock"
 BRAIN_SOCK = RUNTIME / "mochi-brain.sock"
+VAULT_SOCK = RUNTIME / "mochi-vault.sock"  # mochi-vault: the relay passes your Allow/Deny taps to it
 CLAUDE = shutil.which("claude") or str(HOME / ".local/bin/claude")
 SENSE = shutil.which("mochi-sense") or str(HOME / ".local/bin/mochi-sense")  # Mochi's senses (read-only digests)
 VIEW = shutil.which("mochi-view") or str(HOME / ".local/bin/mochi-view")  # the "Show me" window, markdown rendered
@@ -71,6 +72,8 @@ LONG_BREAK = 2 * 3600        # away this long = a round when you're back, even i
 AWAY_ROUND_EVERY = 2 * 3600  # while you're away and the Telegram bot is set up: a light round this often
 TG_AUDIBLE_PER_DAY = 3       # Telegram messages that may buzz your phone per day; the rest arrive silently
 TG_QUIET_HOURS = (23, 8)     # nothing buzzes between these hours, except an urgent say
+VAULT_ASKS_PER_DAY = 20      # mochi-vault sign-in questions on the phone per day (each one is a tap they owe)
+VAULT_LEASE_MINUTES = 10     # what an Allow covers (mochi-vault's LEASE_MINUTES; only the wording here)
 ROUND_MODEL = "sonnet"
 TASK_MODEL = None            # things you asked for or approved: the default model
 
@@ -171,6 +174,9 @@ BROWSE_TOOLS = ["mcp__chrome__" + t for t in (
 BROWSE_ACT_TOOLS = ["mcp__chrome__" + t for t in (
     "fill", "fill_form", "type_text", "upload_file", "drag", "handle_dialog", "evaluate_script", "get_css_styles",
     "lighthouse_audit")]
+# Their Bitwarden logins, through mochi-vault (brain/mochi_vault.py): Mochi names a tab, the vault asks them on the
+# phone, fills and submits; the password never passes through the run. Only runs they asked for or approved.
+VAULT_TOOLS = ["Bash(mochi-vault fill:*)", "Bash(mochi-vault status)", "Bash(mochi-vault has:*)"]
 CHANGE_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash", "mcp__claude_ai_Google_Calendar__create_event",
                 "mcp__claude_ai_Google_Calendar__update_event", "mcp__claude_ai_Google_Drive__create_file",
                 "mcp__claude_ai_Google_Drive__update_file", "mcp__claude_ai_Google_Drive__copy_file"]
@@ -178,6 +184,8 @@ NEVER = [  # denied at every level, including things you approved
     "Bash(sudo:*)", "Bash(su:*)", "Bash(pkexec:*)", "Bash(rm -rf:*)", "Bash(rm -fr:*)",
     "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git reset --hard:*)", "Bash(git clean:*)",
     "Bash(dd:*)", "Bash(mkfs:*)", "Bash(shutdown:*)", "Bash(reboot:*)", "Bash(crontab:*)",
+    "Bash(bw:*)", "Bash(mochi-vault unlock:*)", "Bash(mochi-vault serve:*)",  # the vault is theirs to open
+    "Bash(mochi-vault remember:*)", "Bash(mochi-vault forget:*)", "Bash(secret-tool:*)",
     "mcp__claude_ai_Gmail__send_message", "mcp__claude_ai_Gmail__reply", "mcp__claude_ai_Gmail__forward",
     "mcp__claude_ai_Gmail__trash_message", "mcp__claude_ai_Gmail__trash_thread",
     "mcp__claude_ai_Gmail__delete_draft", "mcp__claude_ai_Gmail__mark_message_spam",
@@ -193,7 +201,8 @@ LEVELS = {
     "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + BROWSE_TOOLS,
     "dream": READ_TOOLS + OWN_FILES,  # reads and rewrites its own notes; no mail, no browser
     "workshop": READ_TOOLS + OWN_FILES + WORKSHOP_TOOLS,  # its notes and its own body; nothing else
-    "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS,
+    "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS
+                + VAULT_TOOLS,
 }
 
 BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}\n```'
@@ -533,10 +542,12 @@ def open_chat(session, prompt):
 
 
 def browser_args(headed):
-    """--mcp-config for Mochi's own Chrome, if mochi-browser and chrome-devtools-mcp are installed."""
+    """--mcp-config for Mochi's own Chrome, if mochi-browser and chrome-devtools-mcp are installed. Starts the Chrome
+    (with the debugging port mochi-vault signs in through) unless it's up already."""
     if not BROWSER:
         return []
     try:
+        BROWSER.ensure(headed=headed)
         path = BROWSER.write_config(headed=headed)
     except Exception as e:
         log(f"browser: no config ({e})")
@@ -1145,6 +1156,21 @@ Send me a photo or a document (a caption says what to do with it) and I'll take 
 /asks  what's waiting   /brief  the latest report   /seen  today's journal   /status   /round"""
 
 
+def vault_decide(rid, choice, reason=""):
+    """Your Allow (the account's index) or Deny (None) to mochi-vault, which checks it came from this process."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(10)
+    try:
+        s.connect(str(VAULT_SOCK))
+        s.sendall(json.dumps({"cmd": "decide", "id": rid, "choice": choice, "reason": reason}).encode() + b"\n")
+        r = json.loads(s.recv(65536) or b"{}")
+        return bool(r.get("ok")), str(r.get("text") or "")
+    except (OSError, ValueError) as e:
+        return False, f"mochi-vault unreachable ({e})"
+    finally:
+        s.close()
+
+
 class Telegram:
     """The relay's line to your phone. Only the owner's id is listened to or written to. Sends are best effort:
     if the bot can't reach you (you haven't opened it yet), the pig still has everything."""
@@ -1157,6 +1183,7 @@ class Telegram:
         self.offset = int(relay.state.get("tg_offset") or 0)
         self.trouble = ""  # the last reason a send failed, logged once per reason
         self.ignored = set()
+        self.vault = {}  # request id -> (message id, text, accounts) for the sign-in questions on the phone
         if self.on:
             threading.Thread(target=self.poller, daemon=True).start()
             log("telegram: bot connected (asks reach your phone while you're away)")
@@ -1255,6 +1282,46 @@ class Telegram:
             return f"(can't read the report: {e})"
         return body if len(body) <= limit else body[:limit] + "\n\n(… the rest is on the pig)"
 
+    # -- mochi-vault: a sign-in Mochi wants to make with one of their logins, asked on the phone every time
+
+    def vault_ask(self, m):
+        rid = str(m.get("id") or "")
+        if not re.fullmatch(r"[0-9a-f]{16}", rid):
+            return
+        if not self.on:
+            vault_decide(rid, None, "the Telegram bot is off, so there was no one to ask")
+            return
+        if self.relay.count("vault_asks") >= VAULT_ASKS_PER_DAY:
+            vault_decide(rid, None, f"over today's {VAULT_ASKS_PER_DAY} sign-in questions; ask again tomorrow")
+            return
+        self.relay.bump("vault_asks")
+        accounts = [str(a)[:60] for a in (m.get("accounts") or [])][:8]
+        text = (f"🔑 Mochi wants to sign in to {str(m.get('host'))[:80]}\n{str(m.get('why') or '')[:300]}\n\n"
+                f"It types the login into its own Chrome; it never sees the password. Allowing covers that account "
+                f"on this site for {VAULT_LEASE_MINUTES} minutes.")
+        rows = [[(a, f"v:{rid}:{i}")] for i, a in enumerate(accounts)] + [[("Deny", f"v:{rid}:x")]]
+        mid = self.send(text, buttons=rows, buzz=not self.quiet_now())
+        if not mid:
+            vault_decide(rid, None, "couldn't reach their phone")
+            return
+        self.vault[rid] = (mid, text, accounts)
+        log(f"vault: asked on the phone to sign in to {m.get('host')}")
+
+    def vault_answer(self, rid, idx, mid):
+        mid0, text, accounts = self.vault.pop(rid, (mid, "", []))
+        choice = None if idx == "x" else (int(idx) if idx.isdigit() else None)
+        ok, msg = vault_decide(rid, choice, "" if choice is not None else "they tapped Deny")
+        if not ok and choice is not None:
+            self.edit(mid0, f"{text}\n\n(couldn't pass that on: {msg})")
+        else:
+            self.edit(mid0, f"{text}\n\n" + (f"✓ allowed: {msg}" if choice is not None else "✗ denied"))
+        log(f"vault: {'allowed' if choice is not None else 'denied'} on the phone" + ("" if ok else f" ({msg})"))
+
+    def vault_done(self, m):
+        got = self.vault.pop(str(m.get("id") or ""), None)
+        if got:
+            self.edit(got[0], f"{got[1]}\n\n{str(m.get('label') or 'closed')[:60]}")
+
     # -- what arrives from the phone (called from the relay's loop thread)
 
     def handle(self, u):
@@ -1303,6 +1370,10 @@ class Telegram:
     def on_button(self, data, mid):
         r = self.relay
         kind, _, rest = data.partition(":")
+        if kind == "v":
+            rid, _, idx = rest.partition(":")
+            self.vault_answer(rid, idx, mid)
+            return
         aid, _, idx = rest.rpartition(":") if kind == "a" else (rest, "", "")
         a = r.state["asks"].get(aid)
         if not a:
@@ -1518,6 +1589,10 @@ class Relay:
             for aid, a in self.state["asks"].items():
                 self.pet.ask(aid, a["text"], a.get("options") or REPORT_OPTIONS, a.get("urgent", False))
             log(f"pig said hello, re-sent {len(self.state['asks'])} asks")
+        elif ev == "vault_ask":
+            self.tg.vault_ask(m)
+        elif ev == "vault_done":
+            self.tg.vault_done(m)
         elif ev == "round":
             self.start_round("you asked for a round now")
         elif ev == "trigger":
@@ -2116,7 +2191,7 @@ class Relay:
 # ---- Claude ----------------------------------------------------------------------------------------
 
 def claude_run(prompt, level, model=None, timeout=900):
-    cmd = [CLAUDE] + browser_args(headed=False) + ["-p", "--output-format", "json", "--permission-mode", "dontAsk",
+    cmd = [CLAUDE] + (browser_args(headed=False) if level in ("round", "approved") else []) + ["-p", "--output-format", "json", "--permission-mode", "dontAsk",
                                                      "--allowedTools", ",".join(LEVELS[level]), "--disallowedTools", ",".join(NEVER)]
     if model:
         cmd += ["--model", model]
@@ -2129,6 +2204,9 @@ def claude_run(prompt, level, model=None, timeout=900):
         return {"ok": False, "text": "", "error": f"timed out after {timeout}s", "secs": now() - t0, "cost": 0}
     except OSError as e:
         return {"ok": False, "text": "", "error": str(e), "secs": now() - t0, "cost": 0}
+    finally:
+        if BROWSER:
+            BROWSER.stop()  # the run's headless Chrome; a visible window stays
     try:
         j = json.loads(p.stdout)
     except ValueError:

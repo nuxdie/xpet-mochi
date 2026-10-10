@@ -8,10 +8,12 @@
 
 Mochi browses through Google's chrome-devtools-mcp (an MCP server Claude Code talks to), always with its own Chrome
 profile in ~/.local/share/mochi/chrome: its own cookies, logins, history and bookmarks, nothing of yours. The relay
-writes the server config before every run and passes it with `--mcp-config`. Background runs get a headless Chrome
-that lives only as long as the run; a chat gets a visible window. If Mochi's Chrome is already open on your screen
-(`mochi-browser open`), every run attaches to that window instead, so you can watch, and log it into things first.
-The debugging port is bound to localhost only; anything on this machine could drive that window while it's open.
+writes the server config before every run and passes it with `--mcp-config`. Chrome is always started by this module
+with a debugging port (so mochi-vault can sign in on a page without the password passing through Mochi) and the MCP
+server attaches to it: background runs get a headless Chrome that the relay closes when the run ends; a chat opens
+the visible window. If Mochi's Chrome is already open on your screen (`mochi-browser open`), every run attaches to
+that window instead, so you can watch, and log it into things first. The debugging port is bound to localhost only;
+anything on this machine could drive that browser while it's up.
 
 Config (optional, `browser` in ~/.config/mochi/sources.json): `chrome` (executable, default google-chrome),
 `port` (default 9333), `server` (path to chrome-devtools-mcp if it isn't found on its own).
@@ -24,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -74,7 +77,7 @@ def server():
 
 
 def running():
-    """The browser Mochi (or you) opened with `mochi-browser open`, if it's up: Chrome's /json/version."""
+    """Mochi's Chrome, if it's up (the window from `mochi-browser open`, or a run's headless one): /json/version."""
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port()}/json/version", timeout=2) as r:
             return json.load(r)
@@ -95,18 +98,60 @@ def mcp_config(headed=False):
     args = ["--no-usage-statistics", "--no-category-performance", "--no-category-emulation", "--no-category-memory",
             "--no-category-network", "--screenshot-format", "jpeg", "--screenshot-max-width", "1280",
             "--viewport", "1280x900", "--workspace", str(REPORTS)]
-    if running():
+    if running() or not chrome():
         args = ["--browser-url", f"http://127.0.0.1:{port()}"] + args
-    else:
-        args = ["--user-data-dir", str(PROFILE)] + args + ([] if headed else ["--headless"])
-        if chrome():
-            args += ["--executable-path", chrome()]
+    else:  # not started (ensure() failed): let the server launch its own over a pipe, as before
+        args = ["--user-data-dir", str(PROFILE), "--executable-path", chrome()] + args + ([] if headed else ["--headless"])
     env = {"PATH": os.pathsep.join(bindirs + [os.environ.get("PATH", "/usr/bin:/bin")]),
            "CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS": "1"}
     for k in ("DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "HOME"):
         if os.environ.get(k):
             env[k] = os.environ[k]
     return {"mcpServers": {"chrome": {"command": srv, "args": args, "env": env}}}
+
+
+def launch(headless):
+    """Start Mochi's Chrome with the debugging port (localhost only) and wait for it. True once it answers."""
+    exe = chrome()
+    if not exe:
+        return False
+    PROFILE.mkdir(parents=True, exist_ok=True)
+    cmd = [exe, f"--user-data-dir={PROFILE}", f"--remote-debugging-port={port()}", "--remote-debugging-address=127.0.0.1",
+           "--no-first-run", "--no-default-browser-check", "--window-size=1280,900"]
+    cmd += ["--headless", "--hide-scrollbars", "--mute-audio"] if headless else []
+    subprocess.Popen(cmd + ["about:blank"], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(40):
+        if running():
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def ensure(headed=False):
+    """Mochi's Chrome up for a run: the open window if there is one, else a new one (headless unless headed).
+    Returns True when this call started it (the caller closes it with stop() when the run is over)."""
+    if not server() or running() or in_use():
+        return False
+    return launch(headless=not headed)
+
+
+def in_use():
+    """The profile is held by a Chrome without our port (one the MCP server launched itself, as before): leave it be,
+    a second Chrome on the same profile would only open a tab in that one."""
+    lock = PROFILE / "SingletonLock"
+    try:
+        pid = int(os.readlink(lock).rpartition("-")[2])
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def stop():
+    """Close the headless Chrome a run used. A visible window (yours, or a chat's) stays."""
+    v = running() or {}
+    if "Headless" in v.get("Browser", "") + v.get("User-Agent", ""):
+        subprocess.run(["pkill", "-f", "--", f"user-data-dir={PROFILE} --remote-debugging-port={port()}"], check=False)
 
 
 def write_config(headed=False):
@@ -133,10 +178,11 @@ def open_browser(url=None):
             subprocess.Popen([exe, f"--user-data-dir={PROFILE}", url], start_new_session=True,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return 0
-    PROFILE.mkdir(parents=True, exist_ok=True)
-    cmd = [exe, f"--user-data-dir={PROFILE}", f"--remote-debugging-port={port()}", "--remote-debugging-address=127.0.0.1",
-           "--no-first-run", "--no-default-browser-check", "--window-size=1280,900", url or "about:blank"]
-    subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not launch(headless=False):
+        sys.exit("mochi-browser: Chrome didn't come up")
+    if url:
+        subprocess.Popen([exe, f"--user-data-dir={PROFILE}", url], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"opened Mochi's Chrome (profile {PROFILE}, debugging port {port()}, localhost only). "
           "Runs attach to this window while it's open; close it when you're done.")
     return 0
@@ -158,7 +204,7 @@ def status():
     print(f"chrome:   {chrome() or 'NOT FOUND'}")
     print(f"server:   {srv or 'NOT FOUND (npm install -g chrome-devtools-mcp)'}")
     v = running()
-    print(f"window:   {'open: ' + v.get('Browser', '') + ' (runs attach to it)' if v else 'not open (runs use a headless Chrome of their own)'}")
+    print(f"window:   {'up: ' + v.get('Browser', '') + ' (runs attach to it)' if v else 'not open (runs start a headless Chrome of their own)'}")
     print(f"configs:  {CONFIG_FILES[False]} / {CONFIG_FILES[True]} (rewritten before each run)")
     return 0 if srv and chrome() else 1
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=mochi-vault: Mochi signs in with your Bitwarden logins, asking you each time (mochi-vault unlock after each start)
+
+[Service]
+ExecStart=%h/.local/bin/mochi-vault serve
+Restart=on-failure
+RestartSec=5
+# The logins live only in this process's memory: no core dumps, no swapping it out readable.
+LimitCORE=0
+MemorySwapMax=0
+
+[Install]
+WantedBy=default.target
