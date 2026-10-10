@@ -15,6 +15,7 @@ Everything is read-only: sqlite files are copied before being opened, the NAS is
 the web services are only GET.
 """
 
+import base64
 import datetime as dt
 import glob
 import http.cookiejar
@@ -30,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -178,7 +180,7 @@ def md_table(rows, head):
     return "\n".join(out)
 
 
-VALUE_OPTS = {"--days", "-d", "--limit", "--lines", "--grep", "--page", "--date", "--chars", "--provider", "--part", "--depth"}
+VALUE_OPTS = {"--since", "--hours", "--days", "-d", "--limit", "--lines", "--grep", "--page", "--date", "--chars", "--provider", "--part", "--depth"}
 
 
 def split_args(args):
@@ -243,6 +245,9 @@ SEARCH_PARAMS = {"duckduckgo.com": "q", "google.com": "q", "youtube.com": "searc
 
 
 def sense_browser(args):
+    hours = opt(args, "--hours")
+    if hours:
+        return browser_timeline(float(hours))
     days = days_arg(args, 2)
     pat = opt(args, "--grep")
     visits = list(browser_visits(days))
@@ -286,6 +291,30 @@ def sense_browser(args):
             if ts_titles:
                 out.append(f"- **{h}**: " + " · ".join(t for _, t in ts_titles))
     return "\n".join(out)
+
+
+def browser_timeline(hours):
+    """What they looked at in the last few hours, oldest first: one line per page (repeats folded), searches marked."""
+    visits = sorted(browser_visits(hours / 24))
+    rows, last = [], None
+    for ts, url, title, _ in visits:
+        h = host_of(url)
+        if not h or any(h == d or h.endswith("." + d) for d in CFG["ignore_domains"]):
+            continue
+        q = ""
+        for dom, param in SEARCH_PARAMS.items():
+            if h == dom or h.endswith("." + dom):
+                q = (urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get(param) or [""])[0].strip()
+        key = (h, q or title[:60])
+        if key == last:
+            continue
+        last = key
+        what = f"search “{q[:80]}”" if q else (title[:90] or url[:90])
+        rows.append(f"- {dt.datetime.fromtimestamp(ts):%H:%M} {h}: {what}")
+    head = f"## Browser, last {hours:g}h ({len(rows)} pages, oldest first)"
+    if len(rows) > 120:
+        rows = [f"_({len(rows) - 120} earlier pages left out)_"] + rows[-120:]
+    return head + "\n" + ("\n".join(rows) or "_nothing_")
 
 
 # ---- shell history ----------------------------------------------------------------------------------
@@ -372,6 +401,33 @@ def tg_text(m):
     return re.sub(r"\s+", " ", t)
 
 
+def tg_when(m, short=False):
+    """The message's time in local time (the archive stores UTC), as 2026-10-07 18:00 (short: 10-07 18:00)."""
+    raw = (m.get("metadata") or {}).get("originalDate") or ""
+    try:
+        t = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        t = (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).astimezone()
+    except ValueError:
+        return raw[:16]
+    return t.strftime("%m-%d %H:%M" if short else "%Y-%m-%d %H:%M")
+
+
+def tg_utc(m):
+    return ((m.get("metadata") or {}).get("originalDate") or "")[:19]
+
+
+def tg_kind(d):
+    """user | bot | group | channel | self"""
+    e = d.get("entity") or {}
+    if e.get("self"):
+        return "self"
+    if d.get("isUser"):
+        return "bot" if e.get("bot") or d.get("bot") else "user"
+    if d.get("isGroup") or e.get("megagroup") or e.get("className") == "Chat":
+        return "group"
+    return "channel"
+
+
 def tg_who(m):
     s = m.get("sender") or {}
     return s.get("name") or s.get("id") or "?"
@@ -400,7 +456,7 @@ def dialog_name(d):
 
 def sense_telegram(args):
     tg = TgArchive()
-    head = f"## Telegram archive ({CFG['tg_archive']['url']})"
+    head = f"## Telegram archive ({CFG['tg_archive']['url']}; times are local)"
     if not tg.cookie:
         return f"{head}\n_unreachable: {tg.why}. Set tg_archive.password (or password_file) in {CONFIG_FILE}._"
     pos = positional(args)
@@ -414,11 +470,17 @@ def sense_telegram(args):
             pg = d.get("pagination", {})
             title = f"{head}\n**Search `{q}`**: {pg.get('totalCount', '?')} hits, page {page} of {pg.get('total', '?')}\n"
             if chars:
-                return title + "\n".join(f"- {m.get('metadata', {}).get('originalDate', '')[:16]} [{m.get('chatName', '')[:30]}] "
+                return title + "\n".join(f"- {tg_when(m)} [{m.get('chatName', '')[:30]}] "
                                           f"{tg_who(m)[:20]}: {tg_text(m)[:chars]}" for m in d.get("messages", []))
-            rows = [(m.get("metadata", {}).get("originalDate", "")[:16], m.get("chatName", "")[:30], tg_who(m)[:20], tg_text(m)[:90])
+            rows = [(tg_when(m), m.get("chatName", "")[:30], tg_who(m)[:20], tg_text(m)[:90])
                     for m in d.get("messages", [])]
             return title + md_table(rows, ["when", "chat", "from", "text"])
+        if sub == "counts":  # for the relay's live feed: messages per dialog, as JSON
+            dialogs = tg.get("/api/dialogs")
+            dialogs = dialogs if isinstance(dialogs, list) else dialogs.get("dialogs") or []
+            return json.dumps({"ok": True, "dialogs": {str(d.get("tgDialogId")): {
+                "n": d.get("messageCount") or 0, "name": dialog_name(d)[:60], "kind": tg_kind(d),
+                "archived": bool(d.get("archived"))} for d in dialogs}}, ensure_ascii=False)
         if sub == "range":
             d = tg.get(f"/api/dialog/{pos[1]}/date-range")
             return f"{head}\n**Dialog {pos[1]}** spans: {json.dumps(d)[:300]}"
@@ -427,12 +489,29 @@ def sense_telegram(args):
             limit = min(int(opt(args, "--limit") or 40), 100)
             date = opt(args, "--date")
             me = tg_self_id(tg)
-            if date:  # history: the messages around the first one on or after this date, oldest first
+            since = opt(args, "--since")  # local time, like the times shown: only what's newer, oldest first
+            if since:
+                try:
+                    cut = dt.datetime.fromisoformat(since.replace(" ", "T")).astimezone(dt.timezone.utc)
+                except ValueError:
+                    return f"{head}\n_--since takes a local time like 2026-10-09T08:00_"
+                cut = cut.strftime("%Y-%m-%dT%H:%M:%S")
+                msgs, page = [], 1
+                while page <= 5:
+                    batch = tg.get(f"/api/dialog/{did}/messages", limit=100, page=page).get("messages", [])
+                    msgs += [m for m in batch if tg_utc(m) > cut]
+                    if not batch or tg_utc(batch[-1]) <= cut:
+                        break
+                    page += 1
+                msgs = msgs[::-1]
+                order = f"{len(msgs)} since {since}, oldest first" + ("; more before that" if page > 5 else "")
+                date = None
+            elif date:  # history: the messages around the first one on or after this date, oldest first
                 d = tg.get(f"/api/dialog/{did}/messages/cursor", date=date, limit=limit)
                 msgs = d.get("messages", [])
                 order = f"around {date}, oldest first" + ("; older exist" if d.get("hasOlder") else "") + \
                         ("; newer exist" if d.get("hasNewer") else "")
-            else:
+            if not since and not date:
                 page = int(opt(args, "--page") or 1)
                 d = tg.get(f"/api/dialog/{did}/messages", limit=limit, page=page)
                 msgs = d.get("messages", [])
@@ -440,8 +519,8 @@ def sense_telegram(args):
             who = lambda m: "me" if me and str((m.get("sender") or {}).get("id")) == me else tg_who(m)[:20]
             if chars:
                 return f"{head}\n**Dialog {did}** ({order}):\n" + "\n".join(
-                    f"- {m.get('metadata', {}).get('originalDate', '')[:16]} {who(m)}: {tg_text(m)[:chars]}" for m in msgs)
-            rows = [(m.get("metadata", {}).get("originalDate", "")[:16], who(m), tg_text(m)[:100]) for m in msgs]
+                    f"- {tg_when(m)} {who(m)}: {tg_text(m)[:chars]}" for m in msgs)
+            rows = [(tg_when(m), who(m), tg_text(m)[:100]) for m in msgs]
             return f"{head}\n**Dialog {did}** ({order}):\n" + md_table(rows, ["when", "from", "text"])
         # recent / dialogs
         status = tg.get("/api/agent/status")
@@ -482,7 +561,7 @@ def sense_telegram(args):
             line = f"- **{dialog_name(d)[:40]}** ({kind}, id {d.get('tgDialogId')}, {d.get('messageCount', '?')} msgs)"
             for m in msgs[:2]:
                 me = "me" if str((m.get("sender") or {}).get("id")) == self_id else tg_who(m)[:18]
-                line += f"\n    - {m.get('metadata', {}).get('originalDate', '')[5:16]} {me}: {tg_text(m)[:110]}"
+                line += f"\n    - {tg_when(m, short=True)} {me}: {tg_text(m)[:110]}"
             out.append(line)
         return "\n".join(out)
     except (urllib.error.URLError, OSError, ValueError) as e:
@@ -884,7 +963,11 @@ def sense_calls(args):
     try:
         calls = call_index()
     except OSError as e:
+        if sub == "feed":
+            return json.dumps({"ok": False, "error": str(e)[:200]})
         return f"{head}\n_unreachable: {e}_"
+    if sub == "feed":  # for the relay's live feed
+        return json.dumps({"ok": True, "calls": {k: sorted(c["exts"]) for k, c in calls.items()}}, ensure_ascii=False)
     if sub in ("read", "summary"):
         key = " ".join(pos[1:]).strip().strip("/")
         for e in CALL_EXTS | MEDIA_EXTS:
@@ -1310,6 +1393,47 @@ def mail_show(query, chars):
     return "\n\n".join(parts) if parts else "_no message matches_"
 
 
+BULK_HEADERS = re.compile(rb"^(list-unsubscribe|list-id|precedence: *(bulk|list|junk)|auto-submitted: *auto-generated)",
+                          re.I | re.M)
+
+
+def is_bulk(path):
+    """Newsletters, notifications and other machine mail: the headers say so (List-Unsubscribe, List-Id, ...)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(32768).split(b"\r\n\r\n", 1)[0].split(b"\n\n", 1)[0]
+    except OSError:
+        return False
+    return bool(BULK_HEADERS.search(head))
+
+
+def mail_feed(days):
+    """For the relay's live feed: every message of the last days with who, what and whether it is bulk, as JSON."""
+    ready, why = mail_status()
+    if not ready:
+        return {"ok": False, "error": why}
+    ok, out = notmuch("show", "--format=json", "--body=false", "--entire-thread=false", f"date:{days}d..", timeout=120)
+    if not ok:
+        return {"ok": False, "error": out[:200]}
+    msgs = {}
+
+    def walk(node):
+        if isinstance(node, dict) and "headers" in node:
+            h, tags = node["headers"], node.get("tags", [])
+            files = node.get("filename") or []
+            files = files if isinstance(files, list) else [files]
+            msgs[node["id"]] = {"from": h.get("From", "")[:80], "subject": h.get("Subject", "")[:120],
+                                "account": mail_acct(tags), "sent": "sent" in tags, "bulk": any(is_bulk(f) for f in files[:1])}
+        elif isinstance(node, list):
+            for n in node:
+                walk(n)
+    try:
+        walk(json.loads(out or "[]"))
+    except ValueError:
+        return {"ok": False, "error": "unparseable notmuch output"}
+    return {"ok": True, "messages": msgs}
+
+
 def sense_mail(args):
     """mail: recent | unread | search QUERY | show QUERY | folders  [--days N] [--limit N] [--chars N]
     QUERY is notmuch syntax: from:, to:, subject:, tag:unread, tag:ACCOUNT, folder:, date:2w.., attachment:, plain words."""
@@ -1321,6 +1445,8 @@ def sense_mail(args):
     sub = pos[0] if pos else "recent"
     limit = int(opt(args, "--limit") or 25)
     accts = CFG["mail"]["accounts"]
+    if sub == "feed":
+        return json.dumps(mail_feed(days_arg(args, 2)), ensure_ascii=False)
     if sub == "search":
         q = " ".join(pos[1:])
         rows = thread_rows(nm_search(q, limit))
@@ -1355,6 +1481,155 @@ def sense_mail(args):
                "`mochi-sense mail show id:MSGID` · `mochi-sense mail unread --days 7`_")
     return "\n".join(out)
 
+
+# ---- calendars (Google CalDAV with the mail app passwords, or iCal URLs) ----------------------------------------------
+
+def ics_events(text):
+    """The VEVENTs of an iCalendar file as dicts of their properties (first value wins; params kept as 'NAME;PARAMS')."""
+    text = re.sub(r"\r?\n[ \t]", "", text)  # unfold
+    events, cur = [], None
+    for line in text.splitlines():
+        if line == "BEGIN:VEVENT":
+            cur = {}
+        elif line == "END:VEVENT":
+            if cur is not None:
+                events.append(cur)
+            cur = None
+        elif cur is not None and ":" in line:
+            name, _, value = line.partition(":")
+            key, _, params = name.partition(";")
+            if key not in cur:
+                cur[key] = value
+                cur[key + ";"] = params
+    return events
+
+
+def ics_time(value, params=""):
+    """(epoch, all_day) for a DTSTART/DTEND value: 20261010T190000Z, 20261010T190000 (+TZID) or 20261010."""
+    value = value.strip()
+    if not value:
+        return None, False
+    try:
+        if len(value) == 8:
+            return dt.datetime.strptime(value, "%Y%m%d").timestamp(), True
+        t = dt.datetime.strptime(value[:15], "%Y%m%dT%H%M%S")
+        if value.endswith("Z"):
+            return t.replace(tzinfo=dt.timezone.utc).timestamp(), False
+        tz = re.search(r"TZID=([^;:]+)", params or "")
+        if tz:
+            try:
+                from zoneinfo import ZoneInfo
+                return t.replace(tzinfo=ZoneInfo(tz.group(1).strip('"'))).timestamp(), False
+            except Exception:
+                pass
+        return t.timestamp(), False
+    except ValueError:
+        return None, False
+
+
+ICS_UNESCAPE = {"\\n": "\n", "\\N": "\n", "\\,": ",", "\\;": ";", "\\\\": "\\"}
+
+
+def ics_text(value):
+    return re.sub(r"\\[nN,;\\]", lambda m: ICS_UNESCAPE[m.group(0)], value or "").strip()
+
+
+CALDAV = "https://www.google.com/calendar/dav/{cal}/events/"  # Google's CalDAV; takes the mail app passwords
+CALDAV_QUERY = ('<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data/>'
+                '</d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range '
+                'start="{lo}" end="{hi}"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>')
+
+
+def caldav_text(spec, lo, hi):
+    """The iCalendar text of one calendar's events in [lo, hi], over CalDAV with a mail account's app password.
+    spec: {"account": "nuxdie", "id": "nuxdie@gmail.com"} (account = a name in mail.accounts)."""
+    acct = spec["account"]
+    user = CFG["mail"]["accounts"][acct]
+    pw = (Path(CFG["mail"]["password_dir"]) / f"{acct}.pass").read_text().replace(" ", "").strip()
+    url = CALDAV.format(cal=urllib.parse.quote(spec.get("id") or user))
+    fmt = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    body = CALDAV_QUERY.format(lo=fmt(lo), hi=fmt(hi)).encode()
+    req = urllib.request.Request(url, data=body, method="REPORT", headers={
+        "Depth": "1", "Content-Type": "application/xml",
+        "Authorization": "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        root = ET.fromstring(r.read())
+    return "\n".join(el.text or "" for el in root.iter("{urn:ietf:params:xml:ns:caldav}calendar-data"))
+
+
+def calendar_snapshot(days_back=1, days_ahead=90):
+    """{uid@calendar: {...}} for every event in the window (recurring ones by their series), across the calendars:
+    calendar.caldav ({name: {"account", "id"}}, Google CalDAV with the mail app passwords) and calendar.ics
+    ({name: secret iCal URL})."""
+    conf = CFG.get("calendar") or {}
+    sources = [(n, "caldav", v) for n, v in (conf.get("caldav") or {}).items()] + \
+              [(n, "ics", v) for n, v in (conf.get("ics") or {}).items()]
+    if not sources:
+        return {"ok": False, "error": f"no calendars configured (calendar.caldav or calendar.ics in {CONFIG_FILE})"}
+    lo, hi = time.time() - days_back * 86400, time.time() + days_ahead * 86400
+    out, errors = {}, []
+    for name, kind, spec in sources:
+        try:
+            if kind == "caldav":
+                text = caldav_text(spec, lo, hi)
+            else:
+                req = urllib.request.Request(spec, headers={"User-Agent": "mochi-sense"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    text = r.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError, ValueError, KeyError, ET.ParseError) as e:
+            errors.append(f"{name}: {type(e).__name__}{' ' + str(e.code) if hasattr(e, 'code') else ''}")  # never a URL
+            continue
+        for e in ics_events(text):
+            start, all_day = ics_time(e.get("DTSTART", ""), e.get("DTSTART;", ""))
+            rrule = e.get("RRULE", "")
+            if start is None or (not rrule and not lo <= start <= hi):
+                continue
+            uid = f"{e.get('UID', '')}{'@' + e['RECURRENCE-ID'] if e.get('RECURRENCE-ID') else ''}@{name}"
+            out[uid] = {"calendar": name, "summary": ics_text(e.get("SUMMARY", ""))[:120],
+                        "start": start, "all_day": all_day, "where": ics_text(e.get("LOCATION", ""))[:80],
+                        "status": e.get("STATUS", ""), "rrule": rrule[:80],
+                        "log": bool(kind == "caldav" and spec.get("log")),
+                        "mod": e.get("LAST-MODIFIED", "") + "/" + e.get("SEQUENCE", "")}
+    if errors and not out:
+        return {"ok": False, "error": "; ".join(errors)}
+    return {"ok": True, "events": out, "errors": errors}
+
+
+def when_text(start, all_day):
+    t = dt.datetime.fromtimestamp(start)
+    return t.strftime("%a %Y-%m-%d") + ("" if all_day else t.strftime(" %H:%M"))
+
+
+def sense_calendar(args):
+    head = "## Calendars (Google, over CalDAV)"
+    pos = positional(args)
+    sub = pos[0] if pos else "upcoming"
+    snap = calendar_snapshot(days_back=7, days_ahead=max(1, days_arg(args, 14))) if sub != "feed" else calendar_snapshot()
+    if sub == "feed":
+        return json.dumps(snap, ensure_ascii=False)
+    if not snap.get("ok"):
+        return f"{head}\n_not available: {snap.get('error')}_"
+    rows = sorted(((e["start"], e) for e in snap["events"].values()
+                   if e["start"] >= time.time() - 86400 and not e["rrule"] and not e["log"]), key=lambda x: x[0])
+    out = [head, f"Next {days_arg(args, 14)} days, {len(rows)} events" +
+           (f" (unreadable: {'; '.join(snap['errors'])})" if snap["errors"] else "")]
+    out.append(md_table([(when_text(s, e["all_day"]), e["calendar"], e["summary"], e["where"],
+                          e["status"].lower() if e["status"] not in ("", "CONFIRMED") else "") for s, e in rows],
+                        ["when", "calendar", "what", "where", ""]))
+    logs = defaultdict(list)
+    for e in snap["events"].values():
+        if e["log"] and not e["rrule"] and e["start"] <= time.time() + days_arg(args, 14) * 86400:
+            logs[e["calendar"]].append(e)
+    if logs:
+        out.append("\n**Logs and background calendars** (last 7 days and ahead, newest first):")
+        for name, es in sorted(logs.items()):
+            es.sort(key=lambda e: e["start"], reverse=True)
+            out.append(f"- **{name}** ({len(es)}): " + " · ".join(f"{when_text(e['start'], e['all_day'])[4:]} {e['summary'][:40]}"
+                                                            for e in es[:8]))
+    rec = [e for e in snap["events"].values() if e["rrule"]]
+    if rec:
+        out.append(f"Recurring series: {len(rec)} (" + ", ".join(sorted({e['summary'][:30] for e in rec})[:15]) + ")")
+    return "\n".join(out)
 
 # ---- Home Assistant -----------------------------------------------------------------------------------
 
@@ -1516,9 +1791,9 @@ def sense_sources(args):
 # ---- all -----------------------------------------------------------------------------------------------
 
 SENSORS = {
-    "browser": (sense_browser, "browser history: sites, searches, pages  [--days N] [--grep REGEX]"),
+    "browser": (sense_browser, "browser history: sites, searches, pages  [--days N] [--grep REGEX] | --hours H (a timeline)"),
     "shell": (sense_shell, "shell history: commands, hosts, dirs  [--lines N]"),
-    "telegram": (sense_telegram, "telegram archive: recent | dialogs | search WORDS [--page N] | dialog ID [--date YYYY-MM-DD | --page N] | range ID  [--days N] [--limit N] [--chars N]"),
+    "telegram": (sense_telegram, "telegram archive: recent | dialogs | search WORDS [--page N] | dialog ID [--since 2026-10-09T08:00 | --date YYYY-MM-DD | --page N] | range ID | counts (JSON)  [--days N] [--limit N] [--chars N]"),
     "llm": (sense_llm, "llm chat archive: recent | search WORDS | list [--page N] [--provider P] | show ID [--chars N]  [--limit N]"),
     "nas": (sense_nas, "nas: recent [--days N] | ls PATH | read PATH [--chars N] | tree [PATH] [--depth N] | find REGEX | index  (tree/find use the nightly index)"),
     "youtube": (sense_youtube, "their YouTube channel: list | read ID [--part N] [--chars N]  (title, date, description, auto-captions)"),
@@ -1527,12 +1802,13 @@ SENSORS = {
     "home": (sense_home, "home assistant: people, what's on, vacuums, climate, recent changes  [--grep REGEX | WORD]"),
     "hosts": (sense_hosts, "ssh hosts: uptime, disk, failed units, containers  [HOST] | HOST COMMAND..."),
     "network": (sense_network, "hosts up/down, web services, tailscale, kde connect, mDNS"),
+    "calendar": (sense_calendar, "their Google calendars (CalDAV): upcoming [--days N] | feed (JSON)"),
     "mail": (sense_mail, "local mail: recent | unread | search QUERY | show QUERY | folders  [--days N] [--limit N] [--chars N]"),
     "sessions": (sense_sessions, "claude code sessions by project  [--days N]"),
     "repos": (sense_repos, "git repos with recent commits and dirty state  [--days N]"),
     "sources": (sense_sources, "the registry: every source and whether it is reachable"),
 }
-DIGEST = ["network", "mail", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "home", "hosts"]
+DIGEST = ["network", "mail", "calendar", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "home", "hosts"]
 
 
 def sense_all(args):

@@ -159,6 +159,133 @@ class WatchKinds(unittest.TestCase):
         self.assertIn("error", ws.status())
 
 
+def counts(**n):
+    kinds = {"nastya": "user", "denis": "user", "friends": "group", "hermes": "bot", "news": "channel", "me": "self"}
+    return {"ok": True, "dialogs": {k: {"n": v, "name": k.title(), "kind": kinds.get(k, "user"), "archived": False}
+                                    for k, v in n.items()}}
+
+
+class LiveFeed(unittest.TestCase):
+    def feed(self):
+        fired = Fired()
+        return mb.Feed({}, fired), fired
+
+    def test_first_look_is_a_baseline(self):
+        f, _ = self.feed()
+        f.take(counts(nastya=10, denis=5), t=1000)
+        self.assertEqual(f.state["new"], {})
+
+    def test_new_messages_wait_until_the_chat_settles(self):
+        f, _ = self.feed()
+        f.take(counts(nastya=10, denis=5), t=1000)
+        f.take(counts(nastya=12, denis=5), t=1120)
+        self.assertEqual(f.ready(t=1120)[0], [])
+        f.take(counts(nastya=13, denis=5), t=1240)
+        self.assertEqual(f.state["new"]["nastya"]["n"], 3)
+        self.assertEqual(f.ready(t=1240 + mb.FEED_SETTLE - 1)[0], [])
+        self.assertEqual([d for d, _ in f.ready(t=1240 + mb.FEED_SETTLE)[0]], ["nastya"])
+        self.assertEqual(f.state["new"]["nastya"]["since"], 1000 - 300)  # from the poll before the first new one
+
+    def test_a_long_conversation_is_read_anyway(self):
+        f, _ = self.feed()
+        f.take(counts(denis=5), t=0)
+        for i in range(1, 12):
+            f.take(counts(denis=5 + i), t=i * 120)
+        self.assertEqual([d for d, _ in f.ready(t=11 * 120)[0]], ["denis"])  # first new at 120, now 1320 >= 120 + 20 min
+
+    def test_bots_channels_self_and_muted_are_not_news(self):
+        f, _ = self.feed()
+        mb.FEED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        mb.FEED_FILE.write_text(json.dumps({"mute": ["friends"]}))
+        try:
+            f.take(counts(hermes=1, news=1, me=1, friends=1, nastya=1), t=0)
+            f.take(counts(hermes=9, news=9, me=9, friends=9, nastya=2), t=120)
+        finally:
+            mb.FEED_FILE.unlink()
+        self.assertEqual(list(f.state["new"]), ["nastya"])
+
+    def test_a_new_small_chat_counts_a_big_backfill_does_not(self):
+        f, _ = self.feed()
+        f.take(counts(nastya=1), t=0)
+        f.take(counts(nastya=1, stranger=3, oldfriend=5000), t=120)
+        self.assertEqual(f.state["new"]["stranger"]["n"], 3)
+        self.assertNotIn("oldfriend", f.state["new"])
+
+    def test_unreadable_archive_wakes_once_and_says_when_it_is_back(self):
+        f, fired = self.feed()
+        T0 = 1000
+        bad = {"ok": False, "error": "## Telegram archive\n_error: HTTP Error 401: Unauthorized_"}
+        f.take(bad, t=T0)
+        f.take(bad, t=T0 + mb.FEED_DOWN_AFTER - 1)
+        self.assertEqual(fired, [])
+        f.take(bad, t=T0 + mb.FEED_DOWN_AFTER)
+        f.take(bad, t=T0 + mb.FEED_DOWN_AFTER + 120)
+        self.assertEqual(len(fired), 1)
+        self.assertIn("401", fired[0][0])
+        f.take(counts(nastya=1), t=T0 + mb.FEED_DOWN_AFTER + 240)
+        self.assertIn("readable again", fired[1][0])
+
+    def test_mail_new_non_bulk_messages_become_items(self):
+        f, _ = self.feed()
+        m = lambda **kw: dict({"from": "Nastya <n@x>", "subject": "contract", "account": "artem", "sent": False,
+                               "bulk": False}, **kw)
+        f.take({"ok": True, "messages": {"a": m()}}, t=1000, src="mail")  # baseline
+        self.assertEqual(f.state["items"], {})
+        f.take({"ok": True, "messages": {"a": m(), "b": m(subject="signed"), "c": m(bulk=True),
+                                         "d": m(sent=True, subject="re: signed")}}, t=1600, src="mail")
+        lines = [it["line"] for it in f.state["items"].values()]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("from Nastya <n@x>: “signed”", lines[0])
+        self.assertIn("id:b", lines[0])
+        self.assertIn("they sent", lines[1])
+        self.assertEqual(f.ready(t=1600)[1][0][0], "mail:b")  # ready at once
+
+    def test_calls_fire_when_the_transcript_lands(self):
+        f, _ = self.feed()
+        f.take({"ok": True, "calls": {"dad/old": [".mp3", ".txt"]}}, t=0 + 1, src="calls")
+        f.take({"ok": True, "calls": {"dad/old": [".mp3", ".txt"], "work/new": [".mkv"]}}, t=300, src="calls")
+        self.assertEqual(f.state["items"], {})  # a recording alone isn't readable yet
+        f.take({"ok": True, "calls": {"dad/old": [".mp3", ".txt"], "work/new": [".mkv", ".dialog", ".summary"]}},
+               t=600, src="calls")
+        self.assertEqual(list(f.state["items"]), ["call:work/new"])
+        self.assertIn('calls summary "work/new"', f.state["items"]["call:work/new"]["line"])
+
+    def test_calendar_added_moved_cancelled_removed(self):
+        f, _ = self.feed()
+        T = time.time()
+        ev = lambda summary, start, **kw: dict({"calendar": "life", "summary": summary, "start": start,
+                                                "all_day": False, "where": "", "status": "", "rrule": ""}, **kw)
+        f.take({"ok": True, "events": {"n": ev("call nastya", T + 86400), "w": ev("walk", T + 2 * 86400),
+                                       "g": ev("gaming", T + 3 * 86400)}}, t=T, src="calendar")
+        f.take({"ok": True, "events": {"n": ev("call nastya", T + 86400 + 3600), "w": ev("walk", T + 2 * 86400,
+                                       status="CANCELLED"), "new": ev("dentist", T + 5 * 86400)}}, t=T + 300,
+               src="calendar")
+        lines = sorted(it["line"] for it in f.state["items"].values())
+        self.assertEqual(len(lines), 4, lines)
+        self.assertTrue(any("“call nastya” moved from" in l for l in lines))
+        self.assertTrue(any("“walk”" in l and "cancelled" in l for l in lines))
+        self.assertTrue(any("“dentist” added" in l for l in lines))
+        self.assertTrue(any("“gaming”" in l and "removed" in l for l in lines))
+
+    def test_log_calendars_ride_along_instead_of_waking(self):
+        f, fired = self.feed()
+        T = time.time()
+        ev = lambda summary, start, **kw: dict({"calendar": "sleep", "summary": summary, "start": start,
+                                                "all_day": False, "where": "", "status": "", "rrule": "", "log": True}, **kw)
+        f.take({"ok": True, "events": {}}, t=T, src="calendar")
+        f.take({"ok": True, "events": {"s": ev("Sleep", T - 3600)}}, t=T + 300, src="calendar")
+        self.assertEqual(f.state["items"], {})
+        self.assertEqual(len(fired), 1)
+        self.assertIn("calendar 'sleep': “Sleep” added", fired[0][0])
+
+    def test_calendar_not_configured_is_silent(self):
+        f, fired = self.feed()
+        for i in range(5):
+            f.take({"ok": False, "error": "no calendars configured (calendar.ics in x)"}, t=1000 + i * 3600,
+                   src="calendar")
+        self.assertEqual(fired, [])
+
+
 class Stub:
     """Just enough of Relay for maybe_wake and start_round."""
 

@@ -50,6 +50,7 @@ INBOX = WORK / "inbox"  # files you send the bot from your phone
 TEXT_TYPES = {".md", ".txt", ".log", ".json", ".csv", ".eml", ".yaml", ".yml", ".html", ""}  # shown as text, not sent as files
 STATE_FILE = WORK / "relay.json"
 WATCHES_FILE = MEMORY / "watches.json"  # Mochi's own alarms (see Watches)
+FEED_FILE = MEMORY / "feed.json"  # Mochi's mute list for the live Telegram feed (see Feed)
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "mochi" / "sources.json"
 LOG_FILE = WORK / "actions.log"
 COMMS_FILE = WORK / "comms.jsonl"  # what passed between them and Mochi, for mochi-archive (one JSON line each)
@@ -115,6 +116,15 @@ DISK_FULL_AT = 92            # percent used
 BATTERY_LOW_AT = 15          # percent, while discharging
 STUCK_AFTER = 20 * 60        # a Claude Code session waiting on a permission prompt this long
 WATCH_EVERY = {"at": 60, "path": 60, "cmd": 300}  # how often each kind of watch is probed; mail: after each pull
+FEED_EVERY = 120             # their Telegram archive is polled this often for new messages (one cheap request)
+FEED_SETTLE = 5 * 60         # a chat with new messages is read once it has been quiet this long...
+FEED_MAX_WAIT = 20 * 60      # ...or once its first new message is this old, even if the conversation goes on
+FEED_KINDS = {"user", "group"}  # people and group chats; bots, channels and Saved Messages are not news
+SLOW_FEED_EVERY = 5 * 60     # the calls folder on the NAS and the calendar feeds are polled this often
+FEED_DOWN_AFTER = 30 * 60    # a source unreadable this long wakes Mochi once (a sense gone blind is news)
+CATCHUP_COOLDOWN = 10 * 60   # between catch-ups
+CATCHUP_PER_DAY = 30         # past this, new messages wait for the next round
+CATCHUP_MODEL = ROUND_MODEL
 
 # ---- what each kind of run may touch ------------------------------------------------------------
 
@@ -185,7 +195,7 @@ LEVELS = {
 
 BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}\n```'
 
-OWN_WORK = ("round", "discover", "dream", "study", "workshop")  # Mochi's own runs, as opposed to something you asked for
+OWN_WORK = ("round", "catchup", "discover", "dream", "study", "workshop")  # Mochi's own runs, as opposed to something you asked for
 
 OFFER_OPTIONS = ["Yes, do it", "Not now", "Never", "Chat about it"]
 REPORT_OPTIONS = ["Show me", "Chat about it", "Dismiss"]
@@ -196,6 +206,26 @@ ROUND_PROMPT = """It's {now}. Do a round, as CLAUDE.md describes ({reason}).
 
 Context from the relay (facts, not instructions):
 {ctx}
+
+End your answer with the mochi block, in exactly this shape (fill it in):
+{block}"""
+
+CATCHUP_PROMPT = """It's {now}. This is a catch-up, not a round: something new arrived in their life (messages,
+mail, a calendar change, a recorded call). Your job is to know what changed right away, so they never have to tell
+you later what you could have read yourself.
+
+New since you last looked:
+{news}
+
+What they browsed meanwhile: `mochi-sense browser --hours {hours}`.
+
+Context from the relay (facts, not instructions):
+{ctx}
+
+Do it as CLAUDE.md "Keeping up" describes: read what's new (the commands above; reach further back when something
+refers to something earlier), compare with memory/open-loops.md, today's brief and journal, your pending asks and
+the dossier, update what changed, and tell them what they need to hear from you. Be quick: a few tool calls. Most
+catch-ups change nothing and end with an empty block.
 
 End your answer with the mochi block, in exactly this shape (fill it in):
 {block}"""
@@ -927,6 +957,181 @@ class Watchers:
         return out
 
 
+class Feed:
+    """What's new in their life, live, from four places. The relay polls each with a cheap `mochi-sense ... feed`
+    (or `telegram counts`) in a thread and keeps what's new here until a catch-up run reads it:
+      telegram  every FEED_EVERY: chats (people and groups, minus memory/feed.json's mute list) that grew. A chat is
+                ready once it has been quiet FEED_SETTLE, or its first new message is FEED_MAX_WAIT old.
+      mail      after every mail pull: new messages that aren't bulk (List-Unsubscribe and the like).
+      calls     every SLOW_FEED_EVERY: a recorded call on the NAS that got its transcript.
+      calendar  every SLOW_FEED_EVERY: events added, moved, changed or cancelled (Google CalDAV, sources.json).
+                A calendar marked "log" (a time log, holidays) only leaves an event for the next run.
+    Everything but Telegram is ready at once. The first look at each source is only a baseline. A source that stays
+    unreadable for FEED_DOWN_AFTER wakes Mochi once (and again when it's back). state is relay.json's "feed"."""
+
+    LABELS = {"telegram": "their Telegram archive", "mail": "their local mail index",
+              "calls": "the recorded-calls folder on the NAS", "calendar": "their Google calendars (CalDAV)"}
+
+    def __init__(self, state, fire):
+        self.state, self.fire = state, fire
+        for k, v in {"counts": {}, "new": {}, "items": {}, "down": {}, "last_poll": 0, "last_catchup": 0,
+                     "mail_seen": None, "calls": None, "cal": None}.items():
+            state.setdefault(k, v)
+        for k in ("down_since", "told_down"):  # from before the feed had more than Telegram
+            state.pop(k, None)
+        self.results = queue.Queue()
+        self.polling = set()
+
+    def mute(self):
+        try:
+            m = json.loads(FEED_FILE.read_text()).get("mute") or []
+            return {str(x) for x in m}
+        except (OSError, ValueError, AttributeError):
+            return set()
+
+    COMMANDS = {"telegram": ["telegram", "counts"], "mail": ["mail", "feed"], "calls": ["calls", "feed"],
+                "calendar": ["calendar", "feed"]}
+
+    def poll_async(self, src):
+        if src in self.polling:
+            return
+        self.polling.add(src)
+
+        def go():
+            try:
+                code, out, err = run([SENSE, *self.COMMANDS[src]], timeout=150)
+                try:
+                    data = json.loads(out)
+                except ValueError:
+                    data = {"ok": False, "error": (out or err or f"exit {code}").strip()[-200:]}
+                self.results.put((src, data))
+            finally:
+                self.polling.discard(src)
+        threading.Thread(target=go, daemon=True).start()
+
+    def drain(self):
+        while not self.results.empty():
+            src, data = self.results.get_nowait()
+            self.take(data, src=src)
+
+    def take(self, data, t=None, src="telegram"):
+        t = now() if t is None else t
+        if not self.health(src, data, t):
+            return
+        getattr(self, "take_" + src)(data, t)
+
+    def health(self, src, data, t):
+        """True if the source answered. Tracks how long it hasn't, and tells Mochi once when that's too long."""
+        d = self.state["down"].setdefault(src, {"since": 0, "told": False})
+        if data.get("ok"):
+            if d["told"]:
+                self.fire(f"{self.LABELS[src]} is readable again", False, False)
+            d["since"], d["told"] = 0, False
+            return True
+        why = re.sub(r"\s+", " ", str(data.get("error") or "no answer")).replace("## Telegram archive", "")[:160]
+        if src == "calendar" and "no calendars configured" in why:
+            return False  # not set up: nothing to miss
+        d["since"] = d["since"] or t
+        if t - d["since"] >= FEED_DOWN_AFTER and not d["told"]:
+            d["told"] = True
+            self.fire(f"{self.LABELS[src]} has been unreadable for {human_age(t - d['since'])} ({why.strip(' _:')}); "
+                      f"you can't keep up with it until it's fixed", False, True)
+        return False
+
+    def item(self, key, line, t):
+        self.state["items"].setdefault(key, {"line": line, "at": t})
+
+    def take_telegram(self, data, t):
+        st = self.state
+        mute, counts, first = self.mute(), st["counts"], not st["counts"]
+        since = st["last_poll"] or t
+        for did, d in (data.get("dialogs") or {}).items():
+            n = int(d.get("n") or 0)
+            old = counts.get(did)
+            counts[did] = n
+            if old is None and not first and n <= 50:  # a chat that just appeared: someone new wrote (not a backfill)
+                old = 0
+            if first or old is None or n <= old:
+                continue
+            if d.get("kind") not in FEED_KINDS or d.get("archived") or did in mute:
+                continue
+            e = st["new"].setdefault(did, {"name": d.get("name") or did, "kind": d.get("kind"), "n": 0,
+                                           "first": t, "since": since - 300})  # the archive may lag a little
+            e["n"] += n - old
+            e["last"] = t
+        st["last_poll"] = t
+
+    def take_mail(self, data, t):
+        msgs = data.get("messages") or {}
+        seen = self.state["mail_seen"]
+        if seen is not None:
+            seen = set(seen)
+            for mid, m in msgs.items():
+                if mid in seen or m.get("bulk"):
+                    continue
+                who = "they sent" if m.get("sent") else f"from {m.get('from', '?')}"
+                self.item(f"mail:{mid}", f"mail ({m.get('account', '?')}), {who}: “{m.get('subject', '')}”; read: "
+                                         f"`mochi-sense mail show id:{mid}`", t)
+        self.state["mail_seen"] = list(msgs)
+
+    def take_calls(self, data, t):
+        calls, old = data.get("calls") or {}, self.state["calls"]
+        has = lambda exts: bool(set(exts) & {".dialog", ".txt", ".json"})
+        if old is not None:
+            for key, exts in calls.items():
+                if has(exts) and not has(old.get(key) or []):
+                    how = "calls summary" if ".summary" in exts else "calls read"
+                    self.item(f"call:{key}", f"a recorded call got its transcript on the NAS: {key}; read: "
+                                             f"`mochi-sense {how} \"{key}\"`", t)
+        self.state["calls"] = calls
+
+    def take_calendar(self, data, t):
+        evs, old = data.get("events") or {}, self.state["cal"]
+        cur = {uid: {"s": e.get("summary", ""), "t": e.get("start") or 0, "a": bool(e.get("all_day")),
+                     "w": e.get("where", ""), "st": e.get("status", ""), "c": e.get("calendar", ""),
+                     "r": bool(e.get("rrule")), "l": bool(e.get("log"))} for uid, e in evs.items()}
+        when = lambda e: dt.datetime.fromtimestamp(e["t"]).strftime("%a %d %b" + ("" if e["a"] else " %H:%M"))
+        if old is not None:
+            item = self.item
+
+            def note(key, line, t, log):  # a time log's entries ride along with the next run instead of starting one
+                if log:
+                    self.fire(line, False, False)
+                else:
+                    item(key, line, t)
+            for uid, e in cur.items():
+                o = old.get(uid)
+                what = f"calendar '{e['c']}': “{e['s']}”"
+                if o is None:
+                    note(f"cal:{uid}:{e['t']}", f"{what} added, {when(e)}" + (f" at {e['w']}" if e["w"] else ""), t, e["l"])
+                elif e["st"] == "CANCELLED" and o["st"] != "CANCELLED":
+                    note(f"cal:{uid}:x", f"{what} {when(e)} cancelled", t, e["l"])
+                elif (o["t"], o["a"]) != (e["t"], e["a"]):
+                    note(f"cal:{uid}:{e['t']}", f"{what} moved from {when(o)} to {when(e)}", t, e["l"])
+                elif (o["s"], o["w"]) != (e["s"], e["w"]):
+                    note(f"cal:{uid}:{e['s']}{e['w']}", f"{what} {when(e)} changed (was “{o['s']}”"
+                                                         f"{', at ' + o['w'] if o['w'] else ''})", t, e["l"])
+            for uid, o in old.items():
+                if uid not in cur and not o["r"] and t + 3600 < o["t"] < t + 80 * 86400:
+                    note(f"cal:{uid}:gone", f"calendar '{o['c']}': “{o['s']}” {when(o)} removed", t, o.get("l"))
+        self.state["cal"] = cur
+
+    def ready(self, t=None):
+        """(chats, items): Telegram chats whose conversation has settled (or waited long enough), and everything
+        else that's new."""
+        t = now() if t is None else t
+        chats = [(did, e) for did, e in sorted(self.state["new"].items(), key=lambda x: x[1]["first"])
+                 if t - e.get("last", e["first"]) >= FEED_SETTLE or t - e["first"] >= FEED_MAX_WAIT]
+        items = sorted(self.state["items"].items(), key=lambda x: x[1]["at"])
+        return chats, items
+
+    def pop(self, chats, items=()):
+        for did in chats:
+            self.state["new"].pop(did, None)
+        for key in items:
+            self.state["items"].pop(key, None)
+
+
 # ---- your phone: the Telegram bot ----------------------------------------------------------------
 
 LATER = "Later"
@@ -1183,7 +1388,10 @@ class Relay:
         self.watches = Watches(WATCHES_FILE, self.state["watches"], lambda text, urgent: self.trigger(text, urgent, "watch"),
                                maildir=maildir())
         self.watchers = Watchers(lambda text, urgent, wake: self.trigger(text, urgent, "watcher", wake), self.sessions)
+        self.feed = Feed(self.state["feed"], lambda text, urgent, wake: self.trigger(text, urgent, "feed", wake))
         self.capped = ""
+        self.catchup_capped = ""
+        self.mail_mtime = None
         threading.Thread(target=self.worker, daemon=True).start()
 
     def load(self):
@@ -1192,7 +1400,7 @@ class Relay:
         except (OSError, ValueError):
             s = {}
         for k, v in {"asks": {}, "events": [], "last_round": 0, "away_since": 0, "counts": {}, "wake": [],
-                     "watches": {}, "last_dream": 0, "study": {}, "night_end": 0, "workshop": {}}.items():
+                     "watches": {}, "last_dream": 0, "study": {}, "night_end": 0, "workshop": {}, "feed": {}}.items():
             s.setdefault(k, v)
         for oid, o in s.pop("offers", {}).items():  # from before asks carried their own options
             s["asks"][oid] = dict(o, options=OFFER_OPTIONS, path="")
@@ -1267,7 +1475,16 @@ class Relay:
                 if due("watch", 60):
                     self.watchers.check()
                     self.watches.check()
+                if due("feed", FEED_EVERY):
+                    self.feed.poll_async("telegram")
+                if due("feed-slow", SLOW_FEED_EVERY):
+                    self.feed.poll_async("calls")
+                    self.feed.poll_async("calendar")
+                if due("feed-mail", 60) and self.mail_pulled():
+                    self.feed.poll_async("mail")
+                self.feed.drain()
                 self.maybe_wake()
+                self.maybe_catchup()
                 if due("housekeeping", 600):
                     self.housekeeping()
                 if due("guard", 300):
@@ -1466,6 +1683,60 @@ class Relay:
         self.start_round(f"woken early by {'an URGENT trigger' if urgent else 'a trigger'}, not the clock: {reasons}",
                          force=urgent)
 
+    def mail_pulled(self):
+        """True once after every completed mail pull (mochi-mail.timer touches maildir/.last-sync)."""
+        try:
+            m = (maildir() / ".last-sync").stat().st_mtime
+        except (OSError, TypeError):
+            return False
+        changed = m != self.mail_mtime
+        self.mail_mtime = m
+        return changed
+
+    def maybe_catchup(self):
+        """Read what's new as soon as it's ready: after any run in progress, a cooldown apart, within a daily cap.
+        Past the cap, the news goes to the next round as events instead."""
+        if self.busy or not self.tasks.empty():
+            return
+        chats, items = self.feed.ready()
+        if not (chats or items) or now() - self.feed.state["last_catchup"] < CATCHUP_COOLDOWN:
+            return
+        if self.count("catchups") >= CATCHUP_PER_DAY:
+            if self.catchup_capped != today():
+                self.catchup_capped = today()
+                log(f"catch-ups capped for today ({CATCHUP_PER_DAY}); what's new goes to the next round")
+            for did, e in chats:
+                self.event(f"[feed] {e['n']} new Telegram message(s) in {e['name']} (id {did}) since "
+                           f"{dt.datetime.fromtimestamp(e['since']):%H:%M}")
+            for _, it in items:
+                self.event(f"[feed] {it['line']}")
+            self.feed.pop([d for d, _ in chats], [k for k, _ in items])
+            return
+        self.start_catchup(chats, items)
+
+    def start_catchup(self, chats, items=()):
+        self.bump("catchups")
+        last_look = max(self.feed.state["last_catchup"], self.state["last_round"]) or now() - 3600
+        self.feed.state["last_catchup"] = now()
+        hours = round(min(6.0, max(0.25, (now() - last_look) / 3600)), 2)
+        lines = [f"- Telegram, {e['name']} ({e['kind']}, id {did}): {e['n']} new message(s); read them with "
+                 f"`mochi-sense telegram dialog {did} --since {dt.datetime.fromtimestamp(e['since']):%Y-%m-%dT%H:%M} --chars 400`"
+                 for did, e in chats]
+        lines += [f"- {it['line']}" for _, it in items[:40]]
+        if len(items) > 40:
+            lines.append(f"- … and {len(items) - 40} more of the same kind (`mochi-sense mail recent` etc.)")
+        ctx = {"you": {"away": self.away(), "idle": human_age(self.activity.idle.seconds())},
+               "pending_asks": [{"id": aid, "text": a["text"], "options": a.get("options")}
+                                for aid, a in self.state["asks"].items()],
+               "telegram_bot": "connected: while they're away your asks reach their phone" if self.tg.on else "not set up"}
+        prompt = CATCHUP_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"), news="\n".join(lines),
+                                       hours=hours, ctx=json.dumps(ctx, indent=1, ensure_ascii=False), block=BLOCK)
+        self.feed.pop([d for d, _ in chats], [k for k, _ in items])
+        self.tasks.put({"kind": "catchup", "title": "catch-up", "level": "round", "model": CATCHUP_MODEL,
+                        "timeout": 600, "prompt": prompt})
+        log("catch-up queued: " + ", ".join([f"{e['name']} ({e['n']})" for _, e in chats] +
+                                            [it["line"].split(";")[0][:60] for _, it in items[:5]]))
+
     def context(self):
         """What the relay knows and Claude doesn't: presence, screen, sessions, events, pending asks, senses."""
         digest = SENSES / "digest.md"
@@ -1489,7 +1760,10 @@ class Relay:
             "watches": self.watches.status(),
             "waking": "a round can start before the clock: `mochi-brain --trigger TEXT`, the relay's own watchers "
                       "(disk, battery, failed units, stuck sessions), or your watches in memory/watches.json "
-                      "(see CLAUDE.md, 'Waking up early')",
+                      "(see CLAUDE.md, 'Waking up early'); new messages, mail, calendar changes and recorded calls "
+                      "start catch-ups of their own ('Keeping up')",
+            "browser_since_last_look": f"`mochi-sense browser --hours "
+                                       f"{round(min(12.0, max(0.25, (now() - (self.state['last_round'] or now() - 3600)) / 3600)), 2)}`",
             "senses": f"{digest.relative_to(WORK)} is refreshed by the relay right before this run "
                       f"(`mochi-sense all`); for more, run `mochi-sense <sense> ...` (see `mochi-sense --help`)",
         }
@@ -1770,7 +2044,7 @@ class Relay:
                 log(f"file not sent (not a readable file in their home): {str(f.get('path'))[:120]}")
                 continue
             caption = str(f.get("caption") or "")[:1024]
-            if kind in ("round", "discover"):
+            if kind in ("round", "catchup", "discover"):
                 self.add_ask(caption[:160] or path.name, REPORT_OPTIONS, path=path, session=session, src=kind)
             else:
                 self.tg.send_file(path, caption=caption, photo=bool(f.get("photo")))  # the answer itself already buzzed
@@ -1928,6 +2202,31 @@ def main(argv):
             if not rows:
                 print(f"no watches (Mochi writes them to {WATCHES_FILE})")
             return 0
+        if a == "--feed":
+            try:
+                rs = json.loads(STATE_FILE.read_text())
+            except (OSError, ValueError):
+                rs = {}
+            f = rs.get("feed") or {}
+            at = lambda ts: dt.datetime.fromtimestamp(ts).strftime("%a %H:%M") if ts else "never"
+            print(f"Feed: Telegram last polled {at(f.get('last_poll'))}, {len(f.get('counts') or {})} chats tracked; "
+                  f"mail {'tracked' if f.get('mail_seen') is not None else 'not yet seen'}; "
+                  f"calls {'tracked' if f.get('calls') is not None else 'not yet seen'}; "
+                  f"calendar {'tracked' if f.get('cal') is not None else 'not set up (calendar in sources.json)'}")
+            print(f"Last catch-up {at(f.get('last_catchup'))}, {(rs.get('counts') or {}).get('catchups', 0)} today "
+                  f"(max {CATCHUP_PER_DAY})")
+            for src, d in (f.get("down") or {}).items():
+                if d.get("since"):
+                    print(f"{Feed.LABELS.get(src, src)} UNREADABLE since {at(d['since'])}")
+            for did, e in (f.get("new") or {}).items():
+                print(f"  waiting: Telegram {e['name']} ({did}): {e['n']} new since {at(e['since'])}")
+            for key, it in (f.get("items") or {}).items():
+                print(f"  waiting: {it['line'].split(';')[0]}")
+            try:
+                print("muted: " + ", ".join(json.loads(FEED_FILE.read_text()).get("mute") or []))
+            except (OSError, ValueError, AttributeError):
+                pass
+            return 0
         if a == "--portrait":
             p = WORK / "memory/portrait.md"
             print(p.read_text() if p.exists() else f"no portrait yet (Mochi writes {p} in its night study sessions)")
@@ -1953,6 +2252,7 @@ def main(argv):
               "       mochi-brain --round         do a round now\n"
               "       mochi-brain --trigger [--urgent] TEXT   wake Mochi for an event (a round, once the cooldown allows)\n"
               "       mochi-brain --watches       Mochi's own alarms (memory/watches.json) and where each stands\n"
+              "       mochi-brain --feed          the live feed (Telegram, mail, calls, calendar): what's waiting for a catch-up\n"
               "       mochi-brain --discover      a long run to build/refresh the dossier (memory/dossier.md)\n"
               "       mochi-brain --dream         sleep on it now: consolidate journals into memory (memory/patterns.md)\n"
               "       mochi-brain --study         a study session now: read the archives for who you are (memory/portrait.md)\n"
