@@ -933,7 +933,8 @@ public:
         for (auto& p : particles) { p.x += p.vx; p.y += p.vy; p.life -= dt; }
         particles.erase(std::remove_if(particles.begin(), particles.end(), [](auto& p) { return p.life <= 0; }),
                         particles.end());
-        if (st == St::Sleep && tick % 40 == 0) spawn(1);
+        if (lyingDown() && st != St::Sleep) anim.action = art3d::Action::Idle;  // picked up or woken halfway down
+        if (st == St::Sleep && !lyingDown() && tick % 40 == 0) spawn(1);
         updateActivity();
         if (bubbleLeft > 0) bubbleLeft -= dt;
         animate(dt);
@@ -1096,6 +1097,7 @@ public:
         if (happyLeft > 0 || st == St::Play || (working && shown == Act::Done)) eyes = art::Eyes::Happy;
         if (blink > 0 || (st == St::Eat && (tick / 8) % 2)) eyes = art::Eyes::Closed;
         if (anim.action == art3d::Action::Rouse && anim.actionT < anim.actionLen * art3d::ROUSE_YAWN) eyes = art::Eyes::Closed;
+        if (lyingDown() && anim.actionT > anim.actionLen * art3d::BEDTIME_EYES) eyes = art::Eyes::Closed;
         bool mirror = dir < 0;
         art::Prop prop = art::Prop::Nothing;
         if (working) {
@@ -1124,7 +1126,7 @@ public:
             atDesk = false;
         }
         // Turn around smoothly: the pig swings through "facing you" on the way. At the desk it turns to the prop.
-        bool faceYou = (bubbleLeft > 0 || happyLeft > 0) && !atDesk && (pose == art::Pose::Stand || pose == art::Pose::Sit);
+        bool faceYou = (bubbleLeft > 0 || happyLeft > 0) && !atDesk && !lyingDown() && (pose == art::Pose::Stand || pose == art::Pose::Sit);
         double targetYaw = closeupOn() ? (backingOff ? 270 : 90) : faceYou ? 90 : atDesk ? deskYaw : (mirror ? 150 : 30);
         double turn = std::fmod(targetYaw - yaw + 540, 360) - 180;  // shortest way round
         yaw = std::fmod(yaw + turn * 0.16 + 360, 360);
@@ -1135,7 +1137,7 @@ public:
         fr.tint = dayTint();
         fr.talking = bubbleLeft > 0; fr.happy = happyLeft > 0; fr.hungry = s.food < 25 && !working;
         fr.progress = st == St::Eat ? 1 - clampd(stLeft / 4, 0, 1) : 0;
-        fr.lookX = lookX; fr.lookY = lookY; fr.lookW = lookW; fr.lookKind = lookKind;
+        fr.lookX = lookX; fr.lookY = lookY; fr.lookW = lyingDown() ? 0 : lookW; fr.lookKind = lookKind;  // no glances mid-turn
         fr.propX = deskX; fr.propZ = deskZ; fr.propYaw = deskPropYaw;
         fr.costume = costume;
         art3d::Rig rig = anim.update(fr);
@@ -1572,10 +1574,13 @@ private:
         set(St::Eat, 4);
     }
 
+    // Lying down: on the floor it first turns once round on its spot and flops (Bedtime), then sleeps.
     void goSleep() {
         say("*yawn*", 2);
+        if (grounded() && st != St::Sleep) anim.start(art3d::Action::Bedtime, 3.2);
         set(St::Sleep, 20 * 60);
     }
+    bool lyingDown() const { return anim.action == art3d::Action::Bedtime; }
 
     // Waking up on its own, rested: it gets up with a yawn, a stretch and a shake rather than just standing up.
     // (Woken by you it only grumbles: that's in onPet and the socket.)
@@ -1800,7 +1805,7 @@ private:
             case St::Air: return art::Pose::Fall;
             case St::Drag: return art::Pose::Dangle;
             case St::Sit: return art::Pose::Sit;
-            case St::Sleep: return art::Pose::Sleep;
+            case St::Sleep: return lyingDown() ? art::Pose::Stand : art::Pose::Sleep;  // Bedtime does the lying down
             case St::Eat: return art::Pose::Eat;
             case St::Work: return shown == Act::Alert ? art::Pose::Stand : art::Pose::Sit;
             case St::Walk:

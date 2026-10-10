@@ -144,7 +144,7 @@ inline const RGB PINK = rgb(0xF0A5A2), SNOUT = rgb(0xD97F7D), DARK = rgb(0x4A262
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -159,10 +159,12 @@ inline const ActionInfo ACTIONS[] = {
     {"nuzzle", Action::Nuzzle, 1.3},   {"headshake", Action::HeadShake, 0.9}, {"land", Action::Land, 0.7},
     {"jump", Action::Jump, 0.45},      {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 1.6},         {"snuffle", Action::Snuffle, 1.4},
-    {"rouse", Action::Rouse, 3.0},
+    {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},
 };
 // Rouse keeps its eyes shut through the yawn: the first this much of it (the pet closes them, the rig can't).
 constexpr double ROUSE_YAWN = 0.4;
+// Bedtime shuts them once the head goes down, from this far in.
+constexpr double BEDTIME_EYES = 0.74;
 inline const ActionInfo* actionNamed(const std::string& name) {
     for (const ActionInfo& a : ACTIONS)
         if (name == a.name) return &a;
@@ -203,6 +205,7 @@ struct Rig {
     double neck = 0;         // head pushed forward along the body (the close-up stare)
     double centred = 0;      // 0: the body tilts about its rear-bottom corner (sitting, stretching);
                              // 1: about its centre (in the air), so a tumble stays put
+    double yaw = 0;          // the whole pig turned on the spot, on top of the frame's yaw (only actions use it)
 };
 
 inline Rig operator+(Rig a, const Rig& b) {
@@ -213,6 +216,7 @@ inline Rig operator+(Rig a, const Rig& b) {
     a.snout += b.snout - 1; a.tail += b.tail; a.shadow = std::min(a.shadow, b.shadow); a.lift += b.lift;
     a.centred = std::max(a.centred, b.centred);
     a.neck += b.neck;
+    a.yaw += b.yaw;
     return a;
 }
 inline void ease(double& v, double target, double k) { v += (target - v) * k; }
@@ -499,6 +503,41 @@ inline Rig actionRig(Action a, double p, double t) {
             r.tail = 25 * yawn + 20 * bow + 40 * std::sin(t * 30) * shake;
             break;
         }
+        case Action::Bedtime: {  // lying down for a nap like a dog: sniff the spot, turn once round on it, flop
+            // Unlike the others it doesn't come back to zero: it ends in exactly the Sleep pose's shape (and a full
+            // turn), and the animator hands that to the base layer, so the pet can switch to Sleep without a pop.
+            auto stage = [&](double a, double b) {
+                double q = (p - a) / (b - a);
+                return smoothstep(q * 3.5) * smoothstep((1 - q) * 3.5);
+            };
+            auto fall = [&](double a, double b) {  // accelerating, like dropping: slow to let go, quick at the floor
+                double q = std::clamp((p - a) / (b - a), 0.0, 1.0);
+                return q * q;
+            };
+            double sniff = stage(0.0, 0.2);
+            double q = std::clamp((p - 0.14) / 0.42, 0.0, 1.0), turning = env(q);
+            double step = smoothstep(q) * 2 * M_PI * 3;  // three steps round, in time with the turn
+            double back = fall(0.56, 0.68), front = fall(0.6, 0.72);  // the rump goes down first, then the front
+            double plop = env((p - 0.72) / 0.1), sigh = env((p - 0.8) / 0.18);
+            double head = smoothstep((p - 0.7) / 0.14);  // the head comes down last, onto its chin
+            r.yaw = 360 * smoothstep(q);
+            double a = 26 * std::sin(step) * turning;
+            r.leg[0] = r.leg[3] = a;
+            r.leg[1] = r.leg[2] = -a;
+            r.leg[0] += 90 * front; r.leg[1] += 90 * front;
+            r.leg[2] += -90 * back; r.leg[3] += -90 * back;
+            r.bodyY = -0.4 * sniff + 0.5 * std::fabs(std::sin(step)) * turning - 2 * back - 2 * front;
+            r.bodyPitch = 14 * (back - front);
+            r.bodyRoll = -5 * turning;  // leaning into the turn
+            r.headPitch = 30 * sniff + 12 * turning + 14 * head + 6 * env((p - 0.74) / 0.14);  // the chin sinks, settles
+            r.headYaw = 18 * turning;  // nose following its tail round
+            r.headRoll = 6 * head;
+            r.snout = 1 + 0.22 * std::fabs(std::sin(t * 22)) * sniff;
+            r.scaleY = 1 - 0.12 * plop + 0.07 * sigh;  // lands heavy, then one long breath out
+            r.scaleXZ = 1 + 0.06 * plop;
+            r.tail = 25 * std::sin(step) * turning + 30 * std::sin(p * 40) * env((p - 0.8) / 0.15);
+            break;
+        }
         case Action::Scratch:  // hind leg scratching behind the "ear"
             r.leg[3] = -70 * e;
             r.splay[3] = 35 * e + 12 * std::sin(t * 24) * e;
@@ -562,7 +601,14 @@ struct Animator {
         if (action != Action::Idle) {
             actionT += dt;
             r = r + actionRig(action, actionT / actionLen, f.t);
-            if (actionT >= actionLen) action = Action::Idle;
+            if (actionT >= actionLen) {
+                // Where it ended becomes the base, which eases on to the pose from there: most actions end at zero,
+                // but one that finishes in another shape (Bedtime, lying down) then hands over without a pop.
+                Rig end = actionRig(action, 1.0, f.t);
+                end.yaw = 0;  // a whole turn is no turn
+                base = base + end;
+                action = Action::Idle;
+            }
         }
         return r;
     }
@@ -612,7 +658,7 @@ inline void propPlacement(Prop prop, double deskYaw, double& x, double& z, doubl
 // Assemble the pig and its prop in world space (yaw applied), ground at y = 0.
 inline std::vector<Part> assemble(const Frame& f, const Rig& r) {
     std::vector<Part> parts;
-    Xf world = Xf::rotY(-f.yaw) * Xf::trans({0, r.lift, 0});
+    Xf world = Xf::rotY(-(f.yaw + r.yaw)) * Xf::trans({0, r.lift, 0});
     // Body: 16 long, 8 tall, 10 wide, bottom at y = 6 (legs are 6). Pitch about the rear-bottom edge.
     // Squash keeps the feet on the ground: the body scales about its bottom, hips move with it.
     double sy = r.scaleY, sxz = r.scaleXZ;
@@ -901,7 +947,7 @@ inline HeadPos render(cairo_t* cr, const Frame& f, const Rig& rig, double cx, do
 
     if (rig.shadow > 0.02) {  // soft ground shadow, under everything; shrinks as the pig lifts off
         cairo_new_path(cr);
-        Xf w = Xf::rotY(-f.yaw);
+        Xf w = Xf::rotY(-(f.yaw + rig.yaw));
         double k = 1 / (1 + rig.lift * 0.12);
         for (int i = 0; i < 16; ++i) {
             double a = i * 2 * M_PI / 16, sx, sy;
