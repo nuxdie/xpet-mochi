@@ -36,6 +36,12 @@ It also installs `dist/mochi-mail.timer` (pull mail every ten minutes for `mochi
 enable it with `systemctl --user enable --now mochi-mail.timer` once isync and notmuch are set up.
 `systemctl --user start xpet` brings it back, and deleting the autostart file turns autostart off.
 
+**Google Tasks** has no CalDAV and takes no app passwords, so `mochi-tasks` needs an OAuth client of your own, once:
+in the Google Cloud console make a project, enable the Google Tasks API, set up the OAuth consent screen (External,
+add yourself as a test user, then **Publish app**: in Testing, Google expires the refresh token after 7 days), and
+create an OAuth client ID of type *Desktop app*. Save its JSON as `~/.config/mochi/google-oauth-client.json` and run
+`mochi-tasks auth`; Google warns that the app is unverified (it is yours: Advanced → continue).
+
 `dist/mochi-archive.timer` runs `mochi-archive sync` every hour: your interactive Claude Code sessions and your
 conversations with Mochi (chats, requests, its questions and your answers, from its transcripts plus the relay's
 `comms.jsonl`) go into the self-hosted LLM chat archive on sff as two providers, `claudecode` and `mochi`, over ssh
@@ -82,7 +88,8 @@ summaries, its own notes), and ends with a small JSON block. That block is the o
 
 The relay decides *when*, never *what*. It also enforces *which tools* a run may use, because safety should not live
 in a prompt: a round gets read-only tools, mail drafts and sends through `mochi-mail` (msmtp; the brief says when it may send on
-its own and when it must ask first, and every send is logged), and writes inside `memory/`, `journal/` and `reports/`;
+its own and when it must ask first, and every send is logged), your Google Tasks through `mochi-tasks` (read freely,
+changed under the same consent rule, every change logged, no delete), and writes inside `memory/`, `journal/` and `reports/`;
 a run you asked for or approved may also edit files and run commands; and a deny list no level can override (no
 `sudo`, no deleting mail or sending through the Gmail connector, no force-push, no `rm -rf`, no sharing Drive files). Rounds use Sonnet; things
 you ask for use the default model. Constants at the top of the script: cadence, daily cap, models.

@@ -17,6 +17,7 @@
  "youtube": {"channel": "@yourhandle or UC… channel id"},
  "telegram": {"token_file": "~/.config/mochi/telegram.token", "owner_id": 0},
  "browser": {"chrome": "google-chrome", "port": 9333},
+ "tasks": {"client_file": "~/.config/mochi/google-oauth-client.json", "token_file": "~/.config/mochi/google-tasks.token.json"},
  "mail": {
   "maildir": "~/Mail",
   "name": "Your Name",

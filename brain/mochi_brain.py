@@ -159,6 +159,9 @@ DRAFT_TOOLS = ["mcp__claude_ai_Gmail__create_draft", "mcp__claude_ai_Gmail__upda
 # request; CLAUDE.md says when a round may send on its own and when it must ask first. The Gmail connector's
 # own send/reply/forward stay in NEVER so the only way out is the one that logs.
 SEND_TOOLS = ["Bash(mochi-mail:*)", "Bash(msmtp:*)"]
+# Their Google Tasks (brain/mochi_tasks.py). Reading and writing go through the one command, which logs every change
+# and cannot delete; CLAUDE.md "Their tasks" says when a round may add or tick off on its own.
+TASK_TOOLS = ["Bash(mochi-tasks:*)"]
 # Mochi's own Chrome (brain/mochi_browser.py → chrome-devtools-mcp, server name "chrome"). A round may look: open
 # pages, read them (snapshot), screenshot, click around. Typing into forms, uploads and running scripts on a page
 # change things in the world, so they wait for a YES or a chat.
@@ -187,10 +190,10 @@ WORKSHOP_TOOLS = ["Edit(workshop/xpet/src/**)", "Write(workshop/xpet/src/**)", "
                   "Write(workshop/xpet/tests/**)", "Bash(mochi-workshop build:*)", "Bash(mochi-workshop test:*)",
                   "Bash(mochi-workshop preview:*)", "Bash(mochi-workshop diff:*)", "Bash(mochi-workshop status:*)"]
 LEVELS = {
-    "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + BROWSE_TOOLS,
+    "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + BROWSE_TOOLS,
     "dream": READ_TOOLS + OWN_FILES,  # reads and rewrites its own notes; no mail, no browser
     "workshop": READ_TOOLS + OWN_FILES + WORKSHOP_TOOLS,  # its notes and its own body; nothing else
-    "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS,
+    "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS,
 }
 
 BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}\n```'

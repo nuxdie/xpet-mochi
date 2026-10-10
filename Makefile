@@ -13,6 +13,7 @@ install: xpet
 	install -Dm755 brain/mochi_brain.py $(PREFIX)/bin/mochi-brain
 	install -Dm755 brain/mochi_sense.py $(PREFIX)/bin/mochi-sense
 	install -Dm755 brain/mochi_mail.py $(PREFIX)/bin/mochi-mail
+	install -Dm755 brain/mochi_tasks.py $(PREFIX)/bin/mochi-tasks
 	install -Dm755 brain/mochi_telegram.py $(PREFIX)/bin/mochi-telegram
 	install -Dm755 brain/mochi_browser.py $(PREFIX)/bin/mochi-browser
 	install -Dm755 brain/mochi_archive.py $(PREFIX)/bin/mochi-archive
