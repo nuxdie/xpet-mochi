@@ -82,6 +82,8 @@ class Flow(unittest.TestCase):
         self.tabs = [{"url": "https://github.com/login", "webSocketDebuggerUrl": "ws://x/1"},
                      {"url": "https://news.example/", "webSocketDebuggerUrl": "ws://x/2"}]
         mv.pages = lambda: self.tabs
+        mv.frames = lambda t: [(t["url"], t["webSocketDebuggerUrl"], None)]
+        mv.probe = lambda f: True
         mv.fill_page = lambda t, host, it, submit=True: (self.filled.append((host, it["id"])) or
                                                           {"ok": True, "filled": ["username", "password"], "how": "button"})
         self.answer = None  # (choice, pid) the fake phone answers with

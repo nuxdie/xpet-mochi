@@ -177,12 +177,40 @@ def chrome_port():
         return 9333
 
 
-def pages():
+def targets():
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{chrome_port()}/json/list", timeout=3) as r:
-            return [t for t in json.load(r) if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+            return [t for t in json.load(r) if t.get("webSocketDebuggerUrl")]
     except (OSError, ValueError):
         return None
+
+
+def pages():
+    ts = targets()
+    return None if ts is None else [t for t in ts if t.get("type") == "page"]
+
+
+def frames(target):
+    """Everywhere on a tab a login form could be: (url, websocket, frame id) for the page itself (frame id None),
+    each frame in the page's own process (by frame id), and each frame Chrome runs as a target of its own (a frame
+    from another site: its own websocket). Logins often sit in one (Apple's sign-in is a frame on idmsa)."""
+    out = [(target.get("url", ""), target["webSocketDebuggerUrl"], None)]
+    own = {t["id"]: t for t in targets() or [] if t.get("type") == "iframe"}  # a frame target's id is its frame id
+    c = CDP(target["webSocketDebuggerUrl"])
+    try:
+        tree = c.call("Page.getFrameTree").get("frameTree") or {}
+    finally:
+        c.close()
+
+    def walk(node):
+        for ch in node.get("childFrames") or []:
+            f = ch.get("frame") or {}
+            t = own.pop(f.get("id"), None)
+            out.append((t["url"], t["webSocketDebuggerUrl"], None) if t else (f.get("url", ""), target["webSocketDebuggerUrl"], f.get("id")))
+            walk(ch)
+    walk(tree)
+    out += [(t["url"], t["webSocketDebuggerUrl"], None) for t in own.values() if t.get("parentId") == target.get("id")]
+    return out
 
 
 class CDP:
@@ -267,7 +295,9 @@ FILL_JS = r"""(function (a) {
   if (location.hostname !== a.host) return {ok: false, error: "the page is on " + location.hostname + " now"};
   const shown = e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
   const usable = e => shown(e) && !e.disabled && !e.readOnly && e.type !== "hidden";
-  const inputs = [...document.querySelectorAll("input")].filter(usable);
+  const deep = (root, sel, out = []) => { root.querySelectorAll(sel).forEach(e => out.push(e));
+    root.querySelectorAll("*").forEach(el => el.shadowRoot && deep(el.shadowRoot, sel, out)); return out; };
+  const inputs = deep(document, "input").filter(usable);
   const label = e => [e.name, e.id, e.placeholder, e.getAttribute("aria-label"), e.autocomplete].join(" ");
   const texty = e => ["text", "email", "tel", "number", ""].includes(e.type);
   const pw = inputs.find(e => e.type === "password") || null;
@@ -277,6 +307,7 @@ FILL_JS = r"""(function (a) {
   if (!user && pw) user = inputs.slice(0, inputs.indexOf(pw)).filter(e => texty(e) && e !== otp).pop() || null;
   if (!user && !pw) user = inputs.find(e => texty(e) && e !== otp &&
     (e.type === "email" || /user|login|email|e-?mail|account|identifier/i.test(label(e)))) || null;
+  if (a.probe) return {ok: true, has: !!(pw || otp || user)};
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
   const set = (e, v) => { e.focus(); setter.call(e, v);
     e.dispatchEvent(new Event("input", {bubbles: true})); e.dispatchEvent(new Event("change", {bubbles: true})); };
@@ -296,23 +327,47 @@ FILL_JS = r"""(function (a) {
   if (!a.submit) return {ok: true, filled, how: "not submitted"};
   const go = /sign.?in|log.?in|next|continue|submit|verify|weiter|anmelden|войти|далее|продолжить/i;
   const text = b => [b.textContent, b.value, b.getAttribute("aria-label")].join(" ");
-  const scope = last.form || document;
   const btn = (last.form && [...last.form.querySelectorAll("button[type=submit],input[type=submit]")].find(shown)) ||
-    [...scope.querySelectorAll("button,input[type=submit],[role=button]")].filter(shown).find(b => go.test(text(b)));
+    (last.form ? [...last.form.querySelectorAll("button,input[type=submit],[role=button]")] :
+                 deep(document, "button,input[type=submit],[role=button]")).filter(shown).find(b => go.test(text(b)));
   if (btn) { btn.click(); return {ok: true, filled, how: "button"}; }
   if (last.form && last.form.requestSubmit) { last.form.requestSubmit(); return {ok: true, filled, how: "form"}; }
   return {ok: true, filled, how: "enter"};
 })"""
 
 
-def fill_page(target, host, item, submit=True):
+def run_in(c, frame, args):
+    """FILL_JS with these args in one frame: the page's own world for the top or a frame target, an isolated world
+    (the frame's DOM, none of its scripts) for a frame inside the page's process."""
+    extra = {}
+    if frame[2]:
+        extra["contextId"] = c.call("Page.createIsolatedWorld", frameId=frame[2], worldName="mochi-vault")["executionContextId"]
+    r = c.call("Runtime.evaluate", expression=f"{FILL_JS}({json.dumps(args)})", returnByValue=True, userGesture=True,
+               awaitPromise=False, **extra)
+    return (r.get("result") or {}).get("value") or {"ok": False, "error": "the page's script failed"}
+
+
+def probe(frame):
+    """Whether a frame shows login fields (nothing is filled)."""
+    host = urlsplit(frame[0]).hostname or ""
+    try:
+        c = CDP(frame[1])
+    except OSError:
+        return False
+    try:
+        return bool(run_in(c, frame, {"host": host, "probe": True}).get("has"))
+    except OSError:
+        return False
+    finally:
+        c.close()
+
+
+def fill_page(frame, host, item, submit=True):
     args = {"host": host, "username": item.get("username") or "", "password": item.get("password") or "",
             "totp": totp(item.get("totp")) or "", "submit": submit}
-    c = CDP(target["webSocketDebuggerUrl"])
+    c = CDP(frame[1])
     try:
-        r = c.call("Runtime.evaluate", expression=f"{FILL_JS}({json.dumps(args)})", returnByValue=True,
-                   userGesture=True, awaitPromise=False)
-        res = (r.get("result") or {}).get("value") or {"ok": False, "error": "the page's script failed"}
+        res = run_in(c, frame, args)
         if res.get("ok") and res.get("how") == "enter":
             for t in ("keyDown", "char", "keyUp"):
                 c.call("Input.dispatchKeyEvent", type=t, key="Enter", code="Enter", windowsVirtualKeyCode=13,
@@ -505,10 +560,19 @@ class Vault:
             return False, (f"{len(cands)} tabs match; name the tab with --page (part of its address)" if cands else
                            "no open tab " + (f"matching {page!r}" if page else "is on a site they have a login for"))
         target = cands[0]
-        url = target.get("url", "")
+        try:
+            places = [f for f in frames(target) if safe_page(f[0]) and matching(self.items, f[0])]
+        except OSError as e:
+            return False, f"couldn't reach the page: {e}"
+        if not places:
+            url = target.get("url", "")
+            if not safe_page(url):
+                return False, f"not signing in on {url.split('?')[0]}: only https (or plain http on the local network)"
+            return False, f"no login of theirs is saved for {urlsplit(url).hostname}"
+        # the page itself first, then its frames: the first that shows login fields (else the page, to say so)
+        frame = next((f for f in places if probe(f)), places[0])
+        url = frame[0]
         host = urlsplit(url).hostname or ""
-        if not safe_page(url):
-            return False, f"not signing in on {url.split('?')[0]}: only https (or plain http on the local network)"
         items = matching(self.items, url)
         if account:
             items = [it for it in items if account.lower() in (it["name"] + " " + it["username"]).lower()]
@@ -524,7 +588,7 @@ class Vault:
         with self.lock:
             self.leases[(host, item["id"])] = time.time() + LEASE_MINUTES * 60
         try:
-            res = fill_page(target, host, item, submit)
+            res = fill_page(frame, host, item, submit)
         except OSError as e:
             return False, f"couldn't reach the page: {e}"
         if not res.get("ok"):
