@@ -144,7 +144,7 @@ inline const RGB PINK = rgb(0xF0A5A2), SNOUT = rgb(0xD97F7D), DARK = rgb(0x4A262
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -159,12 +159,15 @@ inline const ActionInfo ACTIONS[] = {
     {"nuzzle", Action::Nuzzle, 1.3},   {"headshake", Action::HeadShake, 0.9}, {"land", Action::Land, 0.7},
     {"jump", Action::Jump, 0.45},      {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 1.6},         {"snuffle", Action::Snuffle, 1.4},
-    {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},
+    {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
 };
 // Rouse keeps its eyes shut through the yawn: the first this much of it (the pet closes them, the rig can't).
 constexpr double ROUSE_YAWN = 0.4;
 // Bedtime shuts them once the head goes down, from this far in.
 constexpr double BEDTIME_EYES = 0.74;
+// Perk: the head is up and it has turned to look by here (the pet points the eyes at you from then on), and from
+// PERK_GLAD it has recognised you (happy eyes, the wag starts in the rig at the same moment).
+constexpr double PERK_LOOK = 0.1, PERK_GLAD = 0.3;
 inline const ActionInfo* actionNamed(const std::string& name) {
     for (const ActionInfo& a : ACTIONS)
         if (name == a.name) return &a;
@@ -536,6 +539,23 @@ inline Rig actionRig(Action a, double p, double t) {
             r.scaleY = 1 - 0.12 * plop + 0.07 * sigh;  // lands heavy, then one long breath out
             r.scaleXZ = 1 + 0.06 * plop;
             r.tail = 25 * std::sin(step) * turning + 30 * std::sin(p * 40) * env((p - 0.8) / 0.15);
+            break;
+        }
+        case Action::Perk: {  // "oh, you're back": startled up out of a doze, a look, then glad to see you
+            // Three beats: a quick dip (anticipation) and the head snaps up past level, the pig standing tall; a hold
+            // while it looks (the pet turns the eyes to you); then recognition: a little head tilt, the tail going.
+            // The turn toward you isn't here: it depends on which way the pig faces, so the pet does it (lookKind 2).
+            double dip = env(p / 0.1);
+            double up = smoothstep((p - 0.08) / 0.12) * smoothstep((1 - p) / 0.25);  // up fast, held, let go slowly
+            double over = env((p - 0.14) / 0.16);                                      // past level, then settles
+            double glad = smoothstep((p - PERK_GLAD) / 0.1) * smoothstep((1 - p) / 0.2);
+            r.headPitch = 6 * dip - 22 * up - 8 * over;
+            r.bodyY = -0.3 * dip + 0.3 * std::fabs(std::sin(t * 7)) * glad;  // the small happy bounce
+            r.scaleY = 1 + 0.06 * up;    // up on its toes
+            r.scaleXZ = 1 - 0.02 * up;
+            r.bodyPitch = -4 * up;       // leaning forward, eager
+            r.headRoll = 9 * env((p - PERK_GLAD) / 0.45);  // the quizzical tilt, then straight again
+            r.tail = 42 * std::sin(t * 17) * glad;
             break;
         }
         case Action::Scratch:  // hind leg scratching behind the "ear"

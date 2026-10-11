@@ -848,6 +848,7 @@ public:
         if (e.xany.window != win) return;
         switch (e.type) {
             case ButtonPress:
+                seenAt = now();
                 if (e.xbutton.button == 1) {
                     pressed = true;
                     dragging = false;
@@ -912,7 +913,7 @@ public:
         if (shouldHide != hidden) {
             hidden = shouldHide;
             if (hidden) { menu.close(); XUnmapWindow(dpy, win); }
-            else { XMapRaised(dpy, win); }
+            else { XMapRaised(dpy, win); seenAt = now(); }  // it couldn't see you meanwhile: a film is not a break
         }
         if (st == St::Away) {
             if ((awayLeft -= dt) <= 0) { dropInAtPointer(); say("I'm back"); }
@@ -1017,7 +1018,10 @@ public:
         if (tick % 4 == 0 && !hidden) {  // pointer, sampled a few times a second (it's a round trip)
             int rx, ry;
             pointer(rx, ry);
-            if (std::abs(rx - ptrX) > 2 || std::abs(ry - ptrY) > 2) ptrMovedAt = t;
+            if (std::abs(rx - ptrX) > 2 || std::abs(ry - ptrY) > 2) {
+                if (t - seenAt > BREAK_SECS) welcomeBack();  // the first stir after a long still: you're back
+                ptrMovedAt = seenAt = t;
+            }
             ptrX = rx;
             ptrY = ry;
         }
@@ -1052,7 +1056,8 @@ public:
             snuffleAt = t;
             anim.start(art3d::Action::Snuffle, 1.4);
         }
-        bool talkingToYou = bubbleLeft > 0 || happyLeft > 0 || askHop > 0 || (closeupOn() && closeT < CLOSE_IN + CLOSE_STARE);
+        bool perking = anim.action == art3d::Action::Perk && anim.actionT > anim.actionLen * art3d::PERK_LOOK;  // looking round at you
+        bool talkingToYou = bubbleLeft > 0 || happyLeft > 0 || askHop > 0 || perking || (closeupOn() && closeT < CLOSE_IN + CLOSE_STARE);
         double ptrD = std::hypot(ptrX - headX, ptrY - headY);
         bool ptrFresh = t - ptrMovedAt < 0.5 && ptrD > 90 && ptrD < 1100;
         bool winFresh = activeWin && t - winActivityAt < 1.0 && std::hypot(activeCx - headX, activeCy - headY) < 1800;
@@ -1097,6 +1102,7 @@ public:
         if (happyLeft > 0 || st == St::Play || (working && shown == Act::Done)) eyes = art::Eyes::Happy;
         if (blink > 0 || (st == St::Eat && (tick / 8) % 2)) eyes = art::Eyes::Closed;
         if (anim.action == art3d::Action::Rouse && anim.actionT < anim.actionLen * art3d::ROUSE_YAWN) eyes = art::Eyes::Closed;
+        if (anim.action == art3d::Action::Perk && anim.actionT > anim.actionLen * art3d::PERK_GLAD) eyes = art::Eyes::Happy;  // it's you!
         if (lyingDown() && anim.actionT > anim.actionLen * art3d::BEDTIME_EYES) eyes = art::Eyes::Closed;
         bool mirror = dir < 0;
         art::Prop prop = art::Prop::Nothing;
@@ -1227,6 +1233,9 @@ private:
     double bubX = -1, bubY = -1;           // where the bubble hangs: eased toward the head so it doesn't jiggle
     double previewUntil = 0, nextBlink = 3, snuffleAt = 0;
     double winFocusAt = 0, lastVisit = 0;
+    // the last moment it knew you were there (the pointer moved, a click, or it was just unhidden and couldn't tell)
+    double seenAt = now();
+    static constexpr double BREAK_SECS = 20 * 60;  // this long without a stir counts as you having been away
     // the close-up: ignored while it needs you, it comes up to the glass and stares, then goes back
     double closeT = -1, attentionSince = 0, lastCloseup = 0, approach = 0;
     static constexpr double CLOSE_IN = 2.0, CLOSE_STARE = 4.5, CLOSE_OUT = 2.0;
@@ -1581,6 +1590,14 @@ private:
         set(St::Sleep, 20 * 60);
     }
     bool lyingDown() const { return anim.action == art3d::Action::Bedtime; }
+
+    // You come back after a break (the pointer stirs after twenty still minutes): it perks up, looks round at you,
+    // glad, and that's all. No bubble, no hop, no coming over: an answer to you being back, not a demand. Asleep it
+    // sleeps on; walking or playing it misses you; at its desk it looks up from the work.
+    void welcomeBack() {
+        bool settled = st == St::Idle || st == St::Sit || st == St::Work;
+        if (settled && grounded() && !anim.busy() && !menu.open && !closeupOn()) anim.start(art3d::Action::Perk, 2.2);
+    }
 
     // Waking up on its own, rested: it gets up with a yawn, a stretch and a shake rather than just standing up.
     // (Woken by you it only grumbles: that's in onPet and the socket.)
