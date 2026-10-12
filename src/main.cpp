@@ -1230,6 +1230,8 @@ private:
     double interestUntil = 0, nextInterestAt = 0;  // it only looks sometimes: a few seconds, then loses interest
     Window visitWin = 0;  // a window it is on its way to (to sit on the one you're working in)
     double placedAt = 0, stayUntil = 0;   // put down by hand: it stays there a while
+    bool launching = false;                // crouched to jump: launchVx/Vy wait for the crouch to finish (tryJump)
+    double launchVx = 0, launchVy = 0;
     double bubX = -1, bubY = -1;           // where the bubble hangs: eased toward the head so it doesn't jiggle
     double previewUntil = 0, nextBlink = 3, snuffleAt = 0;
     double winFocusAt = 0, lastVisit = 0;
@@ -1611,6 +1613,7 @@ private:
 
     void set(St n, double secs = 0) {
         if (n != St::Walk) edgeDecided = walkOff = false;
+        launching = false;  // anything else that happens to it mid-crouch (picked up, called to work) calls the jump off
         if (n == St::Air || n == St::Drag || n == St::Away) plat = 0;
         st = n;
         stLeft = secs;
@@ -1664,12 +1667,21 @@ private:
         double vy0 = -std::sqrt(2 * GRAVITY * h);
         double dy = t->y - py;
         double time = (-vy0 + std::sqrt(vy0 * vy0 + 2 * GRAVITY * dy)) / GRAVITY;
-        vx = (tx - px) / std::max(time, 1.0);
-        vy = vy0;
-        dir = vx >= 0 ? 1 : -1;
-        anim.start(art3d::Action::Jump, 0.45);
-        set(St::Air);
+        launchVx = (tx - px) / std::max(time, 1.0);
+        launchVy = vy0;
+        dir = launchVx >= 0 ? 1 : -1;
+        vx = 0;
+        set(St::Idle, 5);  // crouching on the spot; set() calls off any earlier launch, so this goes first
+        launching = true;
+        anim.start(art3d::Action::Jump, art3d::JUMP_SECS);
         return true;
+    }
+
+    // The crouch is done: spring. (groundStep calls this once the Jump action reaches JUMP_CROUCH.)
+    void launch() {
+        vx = launchVx;
+        vy = launchVy;
+        set(St::Air);
     }
 
     void land(const Seg& sg) {
@@ -1731,6 +1743,11 @@ private:
         const Seg* sg = D.segAt(plat, px, py);
         if (!sg) { fall(); return; }
         if (menu.open || closeupOn()) return;  // a panel is up, or it's at the glass: no wandering off
+        if (launching) {  // crouched for a jump: spring once the wind-up is done; if something cut in, let it go
+            if (anim.action != art3d::Action::Jump) launching = false;
+            else if (anim.actionT >= anim.actionLen * art3d::JUMP_CROUCH) { launch(); return; }
+            else return;
+        }
 
         jumpCooldown -= dt;
         bool busy = shown != Act::Off;

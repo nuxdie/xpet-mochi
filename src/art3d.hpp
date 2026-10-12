@@ -157,7 +157,7 @@ inline const ActionInfo ACTIONS[] = {
     {"sniff", Action::Sniff, 1.7},     {"stretch", Action::Stretch, 2.2},     {"shake", Action::Shake, 0.9},
     {"lookaround", Action::LookAround, 2.4}, {"hop", Action::Hop, 0.55},   {"struggle", Action::Struggle, 1.1},
     {"nuzzle", Action::Nuzzle, 1.3},   {"headshake", Action::HeadShake, 0.9}, {"land", Action::Land, 0.7},
-    {"jump", Action::Jump, 0.45},      {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
+    {"jump", Action::Jump, 0.75},     {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 1.6},         {"snuffle", Action::Snuffle, 1.4},
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
 };
@@ -168,6 +168,8 @@ constexpr double BEDTIME_EYES = 0.74;
 // Perk: the head is up and it has turned to look by here (the pet points the eyes at you from then on), and from
 // PERK_GLAD it has recognised you (happy eyes, the wag starts in the rig at the same moment).
 constexpr double PERK_LOOK = 0.1, PERK_GLAD = 0.3;
+// Jump starts with a crouch on the ground: it leaves the floor this far in (0.3 s of the 0.75).
+constexpr double JUMP_CROUCH = 0.4, JUMP_SECS = 0.75;
 inline const ActionInfo* actionNamed(const std::string& name) {
     for (const ActionInfo& a : ACTIONS)
         if (name == a.name) return &a;
@@ -448,13 +450,25 @@ inline Rig actionRig(Action a, double p, double t) {
             r.tail = 30 * std::sin(p * 22) * std::exp(-3 * p) * fade;
             break;
         }
-        case Action::Jump:  // stretch on take-off
-            r.scaleY = 1 + 0.16 * e;
-            r.scaleXZ = 1 - 0.07 * e;
-            r.leg[2] = r.leg[3] = 25 * e;
-            r.leg[0] = r.leg[1] = -20 * e;
-            r.headPitch = -10 * e;
+        case Action::Jump: {  // wind up, then spring: a crouch on the ground, a stretch on take-off
+            // Up to JUMP_CROUCH it is still on the ground (the pet holds the take-off till then): it sinks low, eyes
+            // up at where it's going, and a little rump wiggle while it gathers. Then the crouch lets go at once and
+            // the stretch snaps in as it leaves, held through the climb and eased out in the air.
+            constexpr double c = JUMP_CROUCH;
+            double crouch = smoothstep(p / (0.75 * c)) * (1 - smoothstep((p - c) / 0.07));
+            double gather = smoothstep((p - 0.45 * c) / (0.3 * c)) * (1 - smoothstep((p - c) / 0.05));
+            double s = smoothstep((p - c) / 0.06) * smoothstep((1 - p) / (0.5 * (1 - c)));
+            r.scaleY = 1 - 0.22 * crouch + 0.2 * s;
+            r.scaleXZ = 1 + 0.1 * crouch - 0.08 * s;
+            r.bodyY = -0.9 * crouch;
+            for (double& sp : r.splay) sp = 10 * crouch;
+            r.bodyRoll = 3 * std::sin(t * 26) * gather;
+            r.leg[2] = r.leg[3] = 25 * s;
+            r.leg[0] = r.leg[1] = -20 * s;
+            r.headPitch = -8 * crouch - 12 * s;
+            r.tail = 25 * crouch + 15 * std::sin(t * 26) * gather;
             break;
+        }
         case Action::Wiggle:  // a happy butt wiggle
             r.bodyRoll = 7 * std::sin(t * 18) * e;
             r.bodyX = 0.4 * std::sin(t * 18) * e;
