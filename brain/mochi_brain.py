@@ -221,6 +221,8 @@ OWN_WORK = ("round", "catchup", "discover", "dream", "study", "workshop")  # Moc
 OFFER_OPTIONS = ["Yes, do it", "Not now", "Never", "Chat about it"]
 REPORT_OPTIONS = ["Show me", "Chat about it", "Dismiss"]
 CHAT = "Chat about it"
+HISTORY_KEEP = 40  # closed asks remembered for Recent...
+HISTORY_SHOWN = 12
 CLOSERS = {"not now", "never", "dismiss", "later", "ok", "no", "no thanks", "skip"}  # answered, nothing to run
 
 ROUND_PROMPT = """It's {now}. Do a round, as CLAUDE.md describes ({reason}).
@@ -550,9 +552,59 @@ def open_chat(session, prompt):
     return True
 
 
+def closed_from_comms(waiting):
+    """Asks answered or expired, rebuilt from comms.jsonl, with the session that raised each one where its
+    transcript can still be found (so Chat about it resumes it)."""
+    asks, closed = {}, {}
+    try:
+        lines = COMMS_FILE.read_text().splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            x = json.loads(line)
+        except ValueError:
+            continue
+        aid = x.get("id", "")
+        if x.get("kind") == "ask":
+            asks[aid] = x
+        elif x.get("kind") in ("answer", "closed") and aid in asks and not aid.startswith("workshop-"):
+            a = asks[aid]
+            closed.pop(aid, None)
+            closed[aid] = {"id": aid, "text": a.get("text", ""), "options": a.get("options") or REPORT_OPTIONS,
+                           "path": a.get("path", ""), "do": "", "session": "", "urgent": bool(a.get("urgent")),
+                           "at": a["t"], "how": x.get("label") or x.get("how") or "", "closed_at": x["t"], "tg": None}
+    out = [c for c in closed.values() if c["id"] not in waiting][-HISTORY_KEEP:]
+    projects = Path.home() / ".claude" / "projects" / ("-" + str(WORK).strip("/").replace("/", "-").replace(".", "-"))
+    transcripts = sorted(projects.glob("*.jsonl"), key=lambda f: f.stat().st_mtime) if projects.is_dir() else []
+    for c in out:
+        needle = json.dumps(c["text"][:60], ensure_ascii=False)[1:-1]
+        for f in transcripts:  # the run ended just before the ask was raised
+            if abs(f.stat().st_mtime - c["at"]) > 3600:
+                continue
+            try:
+                if needle in f.read_text(errors="replace"):
+                    c["session"] = f.stem
+                    break
+            except OSError:
+                pass
+    return out
+
+
+def history_label(c):
+    """One line in Recent...: when, how it ended, what it was. '|' separates menu items, so none inside."""
+    when = dt.datetime.fromtimestamp(c.get("closed_at") or c["at"])
+    day = "" if when.date() == dt.date.today() else f"{when:%a} "
+    how = (c.get("how") or "").replace("|", "/")[:10]
+    text = c["text"].replace("|", "/")
+    text = text if len(text) <= 30 else text[:29].rstrip() + "…"
+    return f"{day}{when:%H:%M}  {text}" + (f"  ({how.lower()})" if how else "")
+
+
 def browser_args(headed):
     """--mcp-config for Mochi's own Chrome, if mochi-browser and chrome-devtools-mcp are installed. Starts the Chrome
-    (with the debugging port mochi-vault signs in through) unless it's up already."""
+    (hidden on a nested display, with the debugging port mochi-vault signs in through) unless it's up already.
+    `headed` only matters when there is no nested display to hide it on: a chat then gets a plain window."""
     if not BROWSER:
         return []
     try:
@@ -1483,13 +1535,17 @@ class Relay:
         except (OSError, ValueError):
             s = {}
         for k, v in {"asks": {}, "events": [], "last_round": 0, "away_since": 0, "counts": {}, "wake": [],
-                     "watches": {}, "last_dream": 0, "study": {}, "night_end": 0, "workshop": {}, "feed": {}}.items():
+                     "watches": {}, "last_dream": 0, "study": {}, "night_end": 0, "workshop": {}, "feed": {},
+                     "closed": []}.items():
             s.setdefault(k, v)
         for oid, o in s.pop("offers", {}).items():  # from before asks carried their own options
             s["asks"][oid] = dict(o, options=OFFER_OPTIONS, path="")
         for nid, n in s.pop("notices", {}).items():
             s["asks"][nid] = {"text": n["text"], "path": n["path"], "options": REPORT_OPTIONS, "do": "",
                               "urgent": n.get("urgent", False), "at": n["at"], "session": ""}
+        if not s.get("closed_seeded"):  # from before Recent...: what comms.jsonl remembers
+            s["closed"] = closed_from_comms(s["asks"]) + s["closed"]
+            s["closed_seeded"] = True
         return s
 
     def save(self):
@@ -1619,6 +1675,12 @@ class Relay:
             age = human_age(now() - self.state["last_round"]) if self.state["last_round"] else "never"
             self.pet.say(f"{len(self.state['asks'])} things in the menu, {self.count('rounds')} rounds today, "
                          f"last one {age} ago, {'busy: ' + self.busy if self.busy else 'idle'}", 8)
+        elif ev == "history":  # menu → Recent...: what was answered or expired lately, newest first
+            items = [c for c in reversed(self.state["closed"]) if c["id"] not in self.state["asks"]][:HISTORY_SHOWN]
+            self.pet.send(event="history", ids="|".join(c["id"] for c in items),
+                          labels="|".join(history_label(c) for c in items))
+        elif ev == "reopen":
+            self.reopen(m.get("id", ""))
         elif ev == "report":
             reports = sorted((a for a in self.state["asks"].values() if a.get("path")), key=lambda a: a["at"])
             if reports and Path(reports[-1]["path"]).exists():
@@ -1631,6 +1693,7 @@ class Relay:
         if not a or not label:
             return
         comms("answer", id=aid, label=label, via=via)
+        self.remember_closed(aid, a, label)
         low = label.lower()
         if aid.startswith("workshop-") and low == "show me" and via != "telegram":  # look first, answer after
             if Path(a.get("path") or "").exists():
@@ -1676,6 +1739,25 @@ class Relay:
                             "model": TASK_MODEL, "timeout": 1200, "urgent": a.get("urgent", False), "via": via,
                             "prompt": ANSWER_PROMPT.format(label=label, text=a["text"], options=options,
                                                            do=a.get("do") or "-", block=BLOCK)})
+        self.save()
+
+    def remember_closed(self, aid, a, how):
+        """Keep what left the menu for a while, so Recent... can bring it back."""
+        if aid.startswith("workshop-"):  # Keep it / Undo has happened (or will): nothing to come back to
+            return
+        closed = [c for c in self.state["closed"] if c["id"] != aid]
+        self.state["closed"] = (closed + [dict(a, id=aid, how=how, closed_at=now(), tg=None)])[-HISTORY_KEEP:]
+
+    def reopen(self, aid):
+        """Recent... → one of them: back in the menu as it was, with the panel open on it."""
+        c = next((c for c in self.state["closed"] if c["id"] == aid), None)
+        if not c:
+            return
+        self.state["closed"].remove(c)
+        self.event(f"user reopened (was '{c.get('how')}'): {c['text']}")
+        self.add_ask(c["text"], c.get("options") or REPORT_OPTIONS, do=c.get("do") or "", path=c.get("path") or None,
+                     aid=aid, session=c.get("session") or "", mirror=False, src="reopen")
+        self.pet.send(event="show", id=aid)
         self.save()
 
     def ask_via_box(self):
@@ -2178,6 +2260,7 @@ class Relay:
                 self.pet.withdraw(aid)
                 self.state["asks"].pop(aid)
                 comms("closed", id=aid, how="expired")
+                self.remember_closed(aid, a, "expired")
                 self.tg.close(a, "expired")
                 if aid.startswith("workshop-") and WS:  # no Undo in three days: it stays, and goes into main
                     threading.Thread(target=self.workshop_answer, args=(a, "keep it"), daemon=True).start()

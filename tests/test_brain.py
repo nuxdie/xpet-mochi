@@ -532,5 +532,57 @@ class Workshop(unittest.TestCase):
         self.assertTrue((WS.TREE / "src" / "b.hpp").exists())
 
 
+class Pig:
+    """Records what the relay sends to the pig."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, **msg):
+        self.sent.append(msg)
+
+    def ask(self, aid, text, options, urgent=False):
+        self.sent.append({"event": "ask", "id": aid, "text": text})
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+class History(unittest.TestCase):
+    def relay(self):
+        r = type("R", (), {})()
+        r.state = {"asks": {}, "events": [], "closed": []}
+        r.pet, r.tg, r.tasks = Pig(), type("T", (), {"__getattr__": lambda s, n: lambda *a, **k: None})(), queue.Queue()
+        r.away, r.save = (lambda: False), (lambda: None)
+        r.event = lambda text: r.state["events"].append(text)
+        for name in ("add_ask", "remember_closed", "reopen", "on_answer", "on_message"):
+            setattr(r, name, getattr(mb.Relay, name).__get__(r))
+        return r
+
+    def test_dismissed_comes_back_with_its_chat(self):
+        r = self.relay()
+        r.add_ask("the gas bill | went up 30%", mb.REPORT_OPTIONS, path="/x.md", aid="gas", session="sess-1")
+        r.add_ask("workshop: a hat", ["Keep it", "Undo"], aid="workshop-1")
+        r.on_answer("gas", "Dismiss")
+        self.assertNotIn("gas", r.state["asks"])
+        r.on_message({"event": "history"})
+        h = r.pet.sent[-1]
+        self.assertEqual(h["ids"], "gas")
+        self.assertNotIn("|", h["labels"])
+        self.assertIn("(dismiss)", h["labels"])
+        r.on_message({"event": "reopen", "id": "gas"})
+        a = r.state["asks"]["gas"]
+        self.assertEqual((a["session"], a["path"]), ("sess-1", "/x.md"))
+        self.assertEqual(a["options"].count(mb.CHAT), 1)
+        self.assertEqual(r.pet.sent[-1], {"event": "show", "id": "gas"})
+        self.assertEqual(r.state["closed"], [])
+        self.assertIn("reopened (was 'Dismiss')", r.state["events"][-1])
+        r.on_message({"event": "reopen", "id": "nope"})  # unknown: nothing happens
+        self.assertEqual(r.pet.sent[-1]["event"], "show")
+        for i in range(mb.HISTORY_KEEP + 5):
+            r.remember_closed(f"a{i}", {"text": "t", "at": time.time()}, "ok")
+        self.assertEqual(len(r.state["closed"]), mb.HISTORY_KEEP)
+
+
 if __name__ == "__main__":
     unittest.main()

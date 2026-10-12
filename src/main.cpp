@@ -412,19 +412,25 @@ public:
         heading = std::move(title);
         hover = -1;
         W = heading.empty() ? 210 : 290;
-        // Measure the header on a scratch surface so the window can be sized to it.
+        // Measure on a scratch surface so the window can be sized to the labels and the header.
         bodyLines.clear();
         headerH = 0;
+        cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 4, 4);
+        cairo_t* cr = cairo_create(tmp);
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, 13);
+        for (const auto& l : labels) {
+            cairo_text_extents_t te;
+            cairo_text_extents(cr, l.c_str(), &te);
+            W = std::max(W, std::min(460, (int)te.x_advance + 2 * PAD_X + (hasIcon(l) ? 24 : 0)));
+        }
         if (!heading.empty()) {
-            cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 4, 4);
-            cairo_t* cr = cairo_create(tmp);
             cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-            cairo_set_font_size(cr, 13);
             bodyLines = wrap(cr, body, W - 2 * PAD_X, 6);
-            cairo_destroy(cr);
-            cairo_surface_destroy(tmp);
             headerH = 10 + 16 + (bodyLines.empty() ? 0 : 6 + 17 * (int)bodyLines.size()) + 10;
         }
+        cairo_destroy(cr);
+        cairo_surface_destroy(tmp);
         int h = headerH + PAD * 2 + ITEM_H * (int)labels.size();
         // Placement: beside the pig, bottom edge level with its feet.
         int x = pig.x + pig.w + 8, y = pig.y + pig.h - h;
@@ -519,7 +525,7 @@ private:
 
     static bool hasIcon(const std::string& l) {
         return l.find("for you") != std::string::npos || l.rfind("Give me", 0) == 0 || l.rfind("Open a chat", 0) == 0 ||
-               l.rfind("Shoo", 0) == 0 || l == "Quit";
+               l.rfind("Recent", 0) == 0 || l.rfind("Shoo", 0) == 0 || l == "Quit";
     }
 
     // Tiny vector icons, drawn in the current colour, centred on (cx, cy), about 14 px.
@@ -557,6 +563,14 @@ private:
             cairo_line_to(cr, cx - 3.5, cy + 4);
             cairo_arc(cr, cx - 3, cy + 1, 3, 0.5 * M_PI, M_PI);
             cairo_close_path(cr);
+            cairo_stroke(cr);
+        } else if (l.rfind("Recent", 0) == 0) {  // a clock
+            cairo_new_sub_path(cr);
+            cairo_arc(cr, cx, cy, 6, 0, 2 * M_PI);
+            cairo_stroke(cr);
+            cairo_move_to(cr, cx, cy - 3.5);
+            cairo_line_to(cr, cx, cy);
+            cairo_line_to(cr, cx + 2.5, cy + 1.5);
             cairo_stroke(cr);
         } else if (l.rfind("Shoo", 0) == 0) {  // out the door
             cairo_move_to(cr, cx + 1, cy - 6);
@@ -776,6 +790,26 @@ public:
             }
             return;
         }
+        if (ev == "history") {  // the answer to Recent...: what left the menu lately, newest first
+            histIds.clear();
+            std::vector<std::string> labels;
+            std::stringstream si(get("ids")), sl(get("labels"));
+            for (std::string i, l; std::getline(si, i, '|') && std::getline(sl, l, '|');) {
+                histIds.push_back(i);
+                labels.push_back(l);
+            }
+            if (labels.empty()) { say("nothing lately", 3); return; }
+            histLabels = labels;
+            labels.push_back("Cancel");
+            histMenu = true;
+            menu.show(labels, D.monitorNear(px, py - 60), pigRect(), "Lately", "pick one to bring it back");
+            return;
+        }
+        if (ev == "show") {  // a reopened ask: straight into its panel
+            for (size_t i = 0; i < asks.size(); ++i)
+                if (asks[i].id == get("id")) { askIndex = i; openAskMenu(0, 0); }
+            return;
+        }
         std::string id = get("session");
         if (id.empty()) id = get("src").empty() ? "anon" : get("src");
         double t = now();
@@ -839,9 +873,11 @@ public:
         if (menu.open) {
             std::string choice = menu.handle(e);
             if (!menu.open) {
-                bool wasAsk = askMenu;
-                askMenu = false;
-                if (!choice.empty()) wasAsk ? answerAsk(choice) : act(choice);
+                bool wasAsk = askMenu, wasHist = histMenu;
+                askMenu = histMenu = false;
+                if (choice.empty()) return;
+                if (wasHist) reopen(choice);
+                else wasAsk ? answerAsk(choice) : act(choice);
             }
             return;
         }
@@ -1259,6 +1295,8 @@ private:
     std::vector<Ask> asks;
     double askHop = 0;
     bool askMenu = false;  // the open menu is answering asks[askIndex], not the normal one
+    bool histMenu = false;  // the open menu is Recent...: its items are histIds, in order
+    std::vector<std::string> histIds, histLabels;
     size_t askIndex = 0;   // which question the panel shows; Next/Previous move it
     int menuX = 0, menuY = 0;
 
@@ -1497,7 +1535,7 @@ private:
         std::vector<std::string> items;
         if (!asks.empty())
             items.push_back(asks.size() == 1 ? "1 question for you" : std::to_string(asks.size()) + " questions for you");
-        for (const char* s : {"Give me a task...", "Open a chat", "Shoo for 10 min", "Quit"})
+        for (const char* s : {"Give me a task...", "Open a chat", "Recent...", "Shoo for 10 min", "Quit"})
             items.push_back(s);
         menu.show(items, D.monitorNear(px, py - 60), pigRect());
     }
@@ -1543,6 +1581,17 @@ private:
         if (!asks.empty()) openAskMenu(0, 0);  // the next one, in the same place
     }
 
+    // Recent... → one of them: the brain puts it back in the menu and tells us to show it.
+    void reopen(const std::string& label) {
+        if (label == "Cancel") return;
+        for (size_t i = 0; i < histIds.size() && i < histLabels.size(); ++i)
+            if (histLabels[i] == label) {
+                if (!ipc::send(json::object({{"event", "reopen"}, {"id", histIds[i]}}), ipc::brainPath()))
+                    say("my brain isn't running", 3);
+                return;
+            }
+    }
+
     bool grounded() const { return st != St::Air && st != St::Drag && st != St::Away; }
 
     void act(const std::string& what) {
@@ -1554,6 +1603,10 @@ private:
         if (what == "Open a chat") {
             if (ipc::send(json::object({{"event", "chat"}}), ipc::brainPath())) say("let's talk", 3);
             else say("my brain isn't running", 3);
+            return;
+        }
+        if (what == "Recent...") {  // the brain answers with a "history" message, which opens the list
+            if (!ipc::send(json::object({{"event", "history"}}), ipc::brainPath())) say("my brain isn't running", 3);
             return;
         }
         if (what == "Give me a task...") {

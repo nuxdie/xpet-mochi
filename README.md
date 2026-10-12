@@ -80,6 +80,9 @@ summaries, its own notes), and ends with a small JSON block. That block is the o
 - **Chat about it** is on every ask: it opens a terminal with Mochi in it, resumed from the very run that raised
   the question, so it remembers why. There you talk normally; chats run in bypass-permissions mode, with the relay's never-list still denied. **Open a chat** in
   the pig's menu (or `mochi-brain --chat`) opens a fresh chat any time.
+- **Recent...** in the menu lists the last dozen asks that were answered, dismissed or expired (on the pig or the
+  phone). Picking one puts it back behind the dot as it was and opens it, so "Chat about it" resumes that run's
+  session, or you can give a different answer this time. Mochi hears that you reopened it.
 - **report**: a file worth reading (the morning brief), also behind the dot.
 - **say** with **urgent**: the pig speaks and hops. Reserved for what cannot wait an hour. If you ignore an urgent
   question (or a Claude session stuck on a permission) for half a minute, it walks right up to the screen, big head at
