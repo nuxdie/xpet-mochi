@@ -20,6 +20,7 @@ install: xpet
 	install -Dm755 brain/mochi_workshop.py $(PREFIX)/bin/mochi-workshop
 	install -Dm755 brain/mochi_view.py $(PREFIX)/bin/mochi-view
 	install -Dm755 brain/mochi_vault.py $(PREFIX)/bin/mochi-vault
+	install -Dm755 brain/mochi_sms.py $(PREFIX)/bin/mochi-sms
 	install -Dm644 brain/CLAUDE.md $(MOCHI_HOME)/CLAUDE.md
 	mkdir -p $(HOME)/.config/mochi && echo "$(CURDIR)" > $(HOME)/.config/mochi/xpet-repo  # where mochi-workshop finds the repo
 

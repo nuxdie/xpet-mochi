@@ -89,7 +89,8 @@ summaries, its own notes), and ends with a small JSON block. That block is the o
 The relay decides *when*, never *what*. It also enforces *which tools* a run may use, because safety should not live
 in a prompt: a round gets read-only tools, mail drafts and sends through `mochi-mail` (msmtp; the brief says when it may send on
 its own and when it must ask first, and every send is logged), your Google Tasks through `mochi-tasks` (read freely,
-changed under the same consent rule, every change logged, no delete), and writes inside `memory/`, `journal/` and `reports/`;
+changed under the same consent rule, every change logged, no delete), the SMS on your phone through `mochi-sms` (Google Messages for Web in Mochi's Chrome, and KDE Connect
+over the LAN: read freely, a text sent only under the mail rule, every send logged), and writes inside `memory/`, `journal/` and `reports/`;
 a run you asked for or approved may also edit files and run commands; and a deny list no level can override (no
 `sudo`, no deleting mail or sending through the Gmail connector, no force-push, no `rm -rf`, no sharing Drive files). Rounds use Sonnet; things
 you ask for use the default model. Constants at the top of the script: cadence, daily cap, models.
@@ -202,10 +203,13 @@ the relay finds it on PATH or in an fnm/nvm install). The relay writes the MCP s
 passes it with `--mcp-config`, so the `mcp__chrome__*` tools (navigate, snapshot, screenshot, click, fill, ...) are
 there in every round, task and chat:
 
-- background runs get a headless Chrome that lives only as long as the run; a chat gets a visible window;
-- `mochi-browser open [URL]` opens Mochi's Chrome on your screen with a localhost-only debugging port, and every run
-  attaches to that window while it's open: you can watch it work, and it's how you log Mochi into something (Mochi
-  never types your passwords);
+- the Chrome is an ordinary headed one on a nested X display (Xephyr) whose window the relay keeps hidden, off the
+  screen and off the panel (wmctrl): a headless Chrome can't be shown later and sites treat it with suspicion, this
+  one is a real browser that just isn't on your desk. Runs and chats both use it; it's closed after a run unless it's
+  on your screen or a chat still has it. Without Xephyr/wmctrl, runs fall back to a headless Chrome;
+- `mochi-browser show` brings that window to the front and `hide` takes it back. Mochi does this when a page needs
+  you (a captcha, a code, a login it may not do itself); `mochi-browser open [URL]` is the same for you, e.g. to log
+  Mochi into something (Mochi never types your passwords), with a localhost-only debugging port;
 - a round may look and click; typing into forms, uploads and `evaluate_script` are only in runs you approved or chats;
 - screenshots can only be written under `reports/` in its workspace. `mochi-browser status` shows the whole chain.
 

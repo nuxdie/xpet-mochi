@@ -145,6 +145,10 @@ READ_TOOLS = [
     "Bash(dirname:*)", "Bash(realpath:*)", "Bash(test:*)", "Bash(true)", "Bash(pwd)", "Bash(env)", "Bash(id)",
     "Bash(mochi-sense:*)", "Bash(ping:*)", "Bash(tailscale status:*)", "Bash(kdeconnect-cli -l:*)",
     "Bash(getent hosts:*)", "Bash(avahi-browse:*)",
+    # their text messages through KDE Connect (brain/mochi_sms.py): reading never changes anything on the phone
+    "Bash(mochi-sms status)", "Bash(mochi-sms threads:*)", "Bash(mochi-sms read:*)", "Bash(mochi-sms recent:*)",
+    "Bash(mochi-sms unread)", "Bash(mochi-sms search:*)", "Bash(mochi-sms sync:*)", "Bash(mochi-sms contacts:*)",
+    "Bash(mochi-sms log:*)",
     "mcp__claude_ai_Gmail__search_threads", "mcp__claude_ai_Gmail__get_thread",
     "mcp__claude_ai_Gmail__get_message", "mcp__claude_ai_Gmail__list_labels",
     "mcp__claude_ai_Gmail__list_drafts", "mcp__claude_ai_Gmail__get_draft",
@@ -165,12 +169,17 @@ SEND_TOOLS = ["Bash(mochi-mail:*)", "Bash(msmtp:*)"]
 # Their Google Tasks (brain/mochi_tasks.py). Reading and writing go through the one command, which logs every change
 # and cannot delete; CLAUDE.md "Their tasks" says when a round may add or tick off on its own.
 TASK_TOOLS = ["Bash(mochi-tasks:*)"]
+# A text message from their phone (brain/mochi_sms.py → kdeconnect-cli --send-sms). Same footing as mail: allowed in
+# every run, CLAUDE.md "Their texts" says when a round may send on its own, every send is logged (mochi-sms log).
+SMS_SEND_TOOLS = ["Bash(mochi-sms send:*)"]
 # Mochi's own Chrome (brain/mochi_browser.py → chrome-devtools-mcp, server name "chrome"). A round may look: open
 # pages, read them (snapshot), screenshot, click around. Typing into forms, uploads and running scripts on a page
 # change things in the world, so they wait for a YES or a chat.
 BROWSE_TOOLS = ["mcp__chrome__" + t for t in (
     "navigate_page", "new_page", "list_pages", "select_page", "close_page", "take_snapshot", "take_screenshot",
-    "wait_for", "click", "hover", "press_key", "list_console_messages", "get_console_message")]
+    "wait_for", "click", "hover", "press_key", "list_console_messages", "get_console_message")] + [
+    # The Chrome runs hidden (a nested X display); these put it on their screen when a page needs them and take it off.
+    "Bash(mochi-browser show:*)", "Bash(mochi-browser hide)", "Bash(mochi-browser status)"]
 BROWSE_ACT_TOOLS = ["mcp__chrome__" + t for t in (
     "fill", "fill_form", "type_text", "upload_file", "drag", "handle_dialog", "evaluate_script", "get_css_styles",
     "lighthouse_audit")]
@@ -198,10 +207,10 @@ WORKSHOP_TOOLS = ["Edit(workshop/xpet/src/**)", "Write(workshop/xpet/src/**)", "
                   "Write(workshop/xpet/tests/**)", "Bash(mochi-workshop build:*)", "Bash(mochi-workshop test:*)",
                   "Bash(mochi-workshop preview:*)", "Bash(mochi-workshop diff:*)", "Bash(mochi-workshop status:*)"]
 LEVELS = {
-    "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + BROWSE_TOOLS,
+    "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + BROWSE_TOOLS,
     "dream": READ_TOOLS + OWN_FILES,  # reads and rewrites its own notes; no mail, no browser
     "workshop": READ_TOOLS + OWN_FILES + WORKSHOP_TOOLS,  # its notes and its own body; nothing else
-    "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS
+    "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS
                 + VAULT_TOOLS,
 }
 
@@ -1823,8 +1832,10 @@ class Relay:
             "you": dict(self.activity.summary(60), away=self.away(),
                         away_for=human_age(now() - self.state["away_since"]) if self.away() and self.state["away_since"] else ""),
             "browser": (("your own Chrome is available as the mcp__chrome__* tools" +
-                         (" and is open on their screen right now (runs attach to that window)" if BROWSER.running()
-                          else " (headless, yours alone, logins persist in your profile)")) if BROWSER and BROWSER.server()
+                         (" and is on their screen right now (they see what you do; `mochi-browser hide` takes it off)"
+                          if BROWSER.shown() else
+                          " (hidden, yours alone, logins persist in your profile; `mochi-browser show` puts it on "
+                          "their screen when a page needs them)")) if BROWSER and BROWSER.server()
                         else "not available (mochi-browser needs chrome-devtools-mcp)"),
             "telegram": ("connected: while they're away your asks and reports go to their phone as messages with buttons, "
                          "and they can message you back; keep what crosses the wire short and vague (it passes through "
@@ -2206,7 +2217,7 @@ def claude_run(prompt, level, model=None, timeout=900):
         return {"ok": False, "text": "", "error": str(e), "secs": now() - t0, "cost": 0}
     finally:
         if BROWSER:
-            BROWSER.stop()  # the run's headless Chrome; a visible window stays
+            BROWSER.stop()  # the run's hidden Chrome; one on their screen, or one a chat is using, stays
     try:
         j = json.loads(p.stdout)
     except ValueError:

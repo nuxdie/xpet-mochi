@@ -1647,6 +1647,21 @@ def sense_tasks(args):
         return f"{head}\n_not available: {(p.stderr or p.stdout).strip()[-300:]}_"
     return f"{head}\n{p.stdout.strip()}\n_Dig: `mochi-tasks list [--list L] [--all]` · `mochi-tasks lists`_"
 
+SMS_CMD = shutil.which("mochi-sms") or str(HOME / ".local/bin/mochi-sms")
+
+
+def sense_sms(args):
+    """Their text messages: mochi-sms reads Google Messages for Web and KDE Connect; this only frames its digest."""
+    head = "## SMS (their phone)"
+    try:
+        p = subprocess.run([SMS_CMD, "recent", *args], capture_output=True, text=True, timeout=40)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"{head}\n_not available: {e}_"
+    if p.returncode != 0:
+        return f"{head}\n_not available: {(p.stderr or p.stdout).strip()[-300:]}_"
+    return p.stdout.strip()
+
+
 # ---- Home Assistant -----------------------------------------------------------------------------------
 
 def ha_token():
@@ -1823,12 +1838,13 @@ SENSORS = {
     "network": (sense_network, "hosts up/down, web services, tailscale, kde connect, mDNS"),
     "calendar": (sense_calendar, "their Google calendars (CalDAV): upcoming [--days N] | feed (JSON)"),
     "tasks": (sense_tasks, "their Google Tasks: open tasks, overdue and due soon first (mochi-tasks does the rest)"),
+    "sms": (sense_sms, "their text messages (Messages for Web + KDE Connect): what came in lately, unread  [--hours H] (mochi-sms does the rest)"),
     "mail": (sense_mail, "local mail: recent | unread | search QUERY | show QUERY | folders  [--days N] [--limit N] [--chars N]"),
     "sessions": (sense_sessions, "claude code sessions by project  [--days N]"),
     "repos": (sense_repos, "git repos with recent commits and dirty state  [--days N]"),
     "sources": (sense_sources, "the registry: every source and whether it is reachable"),
 }
-DIGEST = ["network", "mail", "calendar", "tasks", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "home", "hosts"]
+DIGEST = ["network", "mail", "calendar", "tasks", "sms", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "home", "hosts"]
 
 
 def sense_all(args):
