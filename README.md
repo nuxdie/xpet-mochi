@@ -219,6 +219,12 @@ service) opens them into `~/.local/share/mochi/phone/`; `mochi-sense phone` is t
 where|now|notifs|calls|sms|usage` the detail, and the relay's live feed starts catch-ups for missed calls, texts and
 messages from people. The rules for using it are in `brain/CLAUDE.md`, "Their phone".
 
+### This machine's eyes and ears
+
+`mochi-desk photo | audio --seconds N | screen [--monitor N]` are the desk's twin of the phone's captures: a still
+from the webcam, a clip from the microphone (transcribed), what's on a monitor. Same rule as the phone: only in a
+run they asked for. `mochi-desk media` lists what was taken; files live in `~/.local/share/mochi/desk/media/`.
+
 ### Its own browser
 
 `brain/mochi_browser.py` (installed as `mochi-browser`) gives Mochi a Chrome of its own: a separate profile in
