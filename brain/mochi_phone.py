@@ -19,6 +19,9 @@ sender's static key mixed in (the receiver knows who sealed it). The relay token
   mochi-phone status             the line, the keys, the last word from the phone
   mochi-phone events [--hours N] the raw events lately
   mochi-phone send locate | buzz "TEXT" | ask "TEXT" --options "A,B,C" [--id ID]   (to the phone)
+  mochi-phone send photo [--front] [--wait S] | send audio [--seconds N] [--wait S]   a still, a clip (then transcribed)
+  mochi-phone media [--days N]   the pictures and clips that came back, with transcripts
+  mochi-phone transcribe FILE    (what `serve` does for clips: faster-whisper in Mochi's tools venv)
   mochi-phone log                what was sent
   mochi-phone place NAME [--here | LAT LON] [--radius M] | place --list   named places ("home" first): the zones
 
@@ -48,6 +51,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 CONFIG = Path(os.environ.get("MOCHI_PHONE_CONFIG", Path.home() / ".config/mochi/phone.json"))
 WORK = Path(os.environ.get("MOCHI_HOME", Path.home() / ".local/share/mochi"))
 DATA = WORK / "phone"
+MEDIA = DATA / "media"
+WHISPER = Path.home() / ".local/share/mochi-tools/bin/python"
 LATEST, EVENTS, SENT, GEOCACHE, STATE = DATA / "latest.json", DATA / "events.jsonl", DATA / "sent.log", DATA / "geocache.json", DATA / "state.json"
 MAGIC = b"M1"
 INFO = b"mochi-phone-v1"
@@ -130,7 +135,7 @@ def relay(cfg, method, path, body=None, timeout=60):
 def push(cfg, msg):
     """Seal a message for the phone and leave it in the relay. Returns the relay id."""
     priv, phone_pub = keys(cfg)
-    msg = {"id": secrets.token_hex(6), "t": int(time.time()), **msg}
+    msg = {"id": msg.get("id") or secrets.token_hex(6), "t": int(time.time()), **msg}
     rid = relay(cfg, "POST", "/v1/push/phone", seal(json.dumps(msg).encode(), priv, phone_pub), timeout=20)["id"]
     DATA.mkdir(parents=True, exist_ok=True)
     with SENT.open("a") as f:
@@ -207,7 +212,7 @@ def apply_events(cfg, events, latest, state):
     with EVENTS.open("a") as f:
         for ev in events:
             ev.setdefault("rx", int(time.time()))
-            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            f.write(json.dumps({k: v for k, v in ev.items() if k != "b64"}, ensure_ascii=False) + "\n")
             kind = ev.get("type")
             if kind == "loc":
                 lat, lon, acc = ev.get("lat"), ev.get("lon"), ev.get("acc")
@@ -235,6 +240,12 @@ def apply_events(cfg, events, latest, state):
                 del ring[:-(200 if kind == "notif" else 60)]
             elif kind == "media":
                 latest["media"] = {k: v for k, v in ev.items() if k not in ("type", "rx")}
+            elif kind in ("photo", "audio"):
+                cap = save_capture(ev)
+                if cap:
+                    caps = latest.setdefault("captures", [])
+                    caps.append(cap)
+                    del caps[:-100]
             elif kind == "usage":
                 latest.setdefault("usage", {})[ev.get("day", "")] = ev.get("apps") or {}
                 for day in sorted(latest["usage"])[:-14]:
@@ -256,6 +267,72 @@ def apply_events(cfg, events, latest, state):
     for n in news:
         log(n)
         trigger(n)
+
+
+def save_capture(ev):
+    """A picture or a clip from the phone: to phone/media/, a clip transcribed. Returns the record for latest.json."""
+    MEDIA.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.fromtimestamp(ev.get("t", time.time())).strftime("%Y%m%d-%H%M%S")
+    rec = {"t": ev.get("t"), "kind": ev["type"], "req": ev.get("req"), "error": ev.get("error")}
+    if ev.get("error") or not ev.get("b64"):
+        log(f"{ev['type']} from the phone failed: {ev.get('error')}")
+        return rec
+    ext = ".jpg" if ev["type"] == "photo" else ".m4a"
+    path = MEDIA / f"{stamp}-{ev['type']}{'-' + ev['cam'] if ev.get('cam') else ''}{ext}"
+    path.write_bytes(unb64(ev["b64"]))
+    rec["path"] = str(path)
+    if ev.get("cam"):
+        rec["cam"] = ev["cam"]
+    if ev["type"] == "audio":
+        rec["seconds"] = ev.get("seconds")
+        text = transcribe_file(path)
+        if text is not None:
+            path.with_suffix(".txt").write_text(text)
+            rec["text"] = text[:2000]
+    log(f"{ev['type']} from the phone: {path.name} ({len(ev['b64']) * 3 // 4} bytes)")
+    return rec
+
+
+def transcribe_file(path):
+    if not WHISPER.exists():
+        return None
+    # ffmpeg decodes (faster-whisper's own decoder, PyAV, breaks across versions); whisper gets raw 16 kHz samples
+    code = ("import sys, subprocess, numpy as np\nfrom faster_whisper import WhisperModel\n"
+            "raw = subprocess.run(['ffmpeg', '-v', 'quiet', '-i', sys.argv[1], '-f', 'f32le', '-ac', '1', '-ar', '16000', '-'],"
+            " capture_output=True, check=True).stdout\n"
+            "audio = np.frombuffer(raw, dtype=np.float32)\n"
+            "m = WhisperModel('small', device='cpu', compute_type='int8')\n"
+            "segs, info = m.transcribe(audio, vad_filter=True)\n"
+            "print(f'[{info.language}] ' + ' '.join(s.text.strip() for s in segs))")
+    try:
+        p = subprocess.run([str(WHISPER), "-c", code, str(path)], capture_output=True, text=True, timeout=600)
+        return p.stdout.strip() if p.returncode == 0 else f"(transcription failed: {p.stderr.strip()[-200:]})"
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"(transcription failed: {e})"
+
+
+def transcribe(args):
+    pos = positional(args)
+    if not pos:
+        sys.exit("transcribe FILE")
+    print(transcribe_file(Path(pos[0])))
+
+
+def media(args):
+    days = int(opt(args, "--days") or 2)
+    since = time.time() - days * 86400
+    caps = [c for c in (jload(LATEST, {}).get("captures") or []) if (c.get("t") or 0) >= since]
+    if not caps:
+        return f"_nothing captured in the last {days} day(s)_"
+    out = []
+    for c in caps:
+        line = f"{dt.datetime.fromtimestamp(c['t']):%a %H:%M} {c['kind']}" + (f" ({c['cam']})" if c.get("cam") else "") + \
+               (f" {c['seconds']}s" if c.get("seconds") else "")
+        line += f": {c['path']}" if c.get("path") else f": failed ({c.get('error')})"
+        if c.get("text"):
+            line += f"\n    {c['text'][:300]}"
+        out.append(line)
+    return "\n".join(out)
 
 
 def serve(_args):
@@ -575,9 +652,31 @@ def send(args):
     elif kind == "ask":
         opts = [o.strip() for o in (opt(args, "--options") or "Yes,Not now").split(",") if o.strip()][:3]
         msg = {"type": "ask", "ask_id": opt(args, "--id") or secrets.token_hex(3), "text": " ".join(pos[1:])[:300], "options": opts}
+    elif kind == "photo":
+        msg = {"type": "photo", "cam": "front" if "--front" in args else "back"}
+    elif kind == "audio":
+        msg = {"type": "audio", "seconds": int(opt(args, "--seconds") or 10)}
     else:
         sys.exit(f"unknown: {kind}")
-    print(push(cfg, msg))
+    msg["id"] = secrets.token_hex(6)
+    push(cfg, msg)
+    wait = int(opt(args, "--wait") or 0)
+    if not wait:
+        print(msg["id"])
+        return
+    # wait for the capture to come back through serve (which writes latest.json), then say where it landed
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        for c in (jload(LATEST, {}).get("captures") or [])[::-1]:
+            if c.get("req") == msg["id"]:
+                if c.get("path"):
+                    print(c["path"])
+                    if c.get("text"):
+                        print(c["text"])
+                    return
+                sys.exit(f"the phone couldn't: {c.get('error')}")
+        time.sleep(2)
+    sys.exit(f"no {kind} back within {wait}s (is the phone online? `mochi-phone status`); it may still arrive: `mochi-phone media`")
 
 
 def pair(args):
@@ -686,7 +785,7 @@ def positional(args):
             skip = False
             continue
         if a.startswith("--"):
-            skip = a in ("--options", "--id", "--days", "--hours", "--radius", "--app")
+            skip = a in ("--options", "--id", "--days", "--hours", "--radius", "--app", "--seconds", "--wait")
             continue
         out.append(a)
     return out
@@ -695,6 +794,7 @@ def positional(args):
 def main(argv):
     cmds = {"pair": pair, "serve": serve, "where": where, "status": status, "events": events, "send": send, "place": place,
             "now": now, "notifs": notifs, "calls": calls, "sms": sms, "usage": usage, "digest": digest, "feed": feed,
+            "media": media, "transcribe": transcribe,
             "log": lambda a: print(SENT.read_text() if SENT.exists() else "nothing sent yet")}
     if len(argv) < 2 or argv[1] not in cmds:
         print(__doc__.strip())

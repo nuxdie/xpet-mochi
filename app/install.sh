@@ -10,11 +10,11 @@ sh build.sh
 adb install -r -g build/mochi.apk
 # runtime permissions -g doesn't cover, and the background allowances that keep a location service alive
 for p in ACCESS_BACKGROUND_LOCATION ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION POST_NOTIFICATIONS ACTIVITY_RECOGNITION NEARBY_WIFI_DEVICES \
-         READ_CALL_LOG READ_PHONE_STATE READ_CONTACTS READ_SMS RECEIVE_SMS BLUETOOTH_CONNECT; do
+         READ_CALL_LOG READ_PHONE_STATE READ_CONTACTS READ_SMS RECEIVE_SMS BLUETOOTH_CONNECT CAMERA RECORD_AUDIO; do
     adb shell pm grant $PKG android.permission.$p 2>/dev/null || true
 done
 for op in RUN_IN_BACKGROUND RUN_ANY_IN_BACKGROUND COARSE_LOCATION FINE_LOCATION MONITOR_LOCATION MONITOR_HIGH_POWER_LOCATION ACTIVITY_RECOGNITION \
-          GET_USAGE_STATS READ_CALL_LOG READ_SMS READ_CONTACTS; do
+          GET_USAGE_STATS READ_CALL_LOG READ_SMS READ_CONTACTS CAMERA RECORD_AUDIO; do
     adb shell cmd appops set $PKG $op allow 2>/dev/null || true
 done
 adb shell dumpsys deviceidle whitelist +$PKG >/dev/null

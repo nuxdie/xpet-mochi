@@ -189,3 +189,38 @@ class PhoneSenses(unittest.TestCase):
         d = mp.digest([])
         for part in ("## Their phone", "missed Mom", "from DHL", "WhatsApp 2 (Nastya)", "On the phone today", "Chrome 60m"):
             self.assertIn(part, d)
+
+
+class Captures(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        for name in ("LATEST", "EVENTS", "SENT", "GEOCACHE", "STATE"):
+            setattr(mp, name, d / f"{name.lower()}.json")
+        mp.DATA, mp.MEDIA = d, d / "media"
+        self.p1 = mock.patch.object(mp, "trigger")
+        self.p2 = mock.patch.object(mp, "transcribe_file", return_value="[en] hello there")
+        self.p1.start(); self.p2.start()
+
+    def tearDown(self):
+        self.p1.stop(); self.p2.stop()
+        self.tmp.cleanup()
+
+    def test_photo_and_clip_land_in_media(self):
+        latest, state = {}, {}
+        now = int(time.time())
+        mp.apply_events({}, [{"type": "photo", "req": "r1", "cam": "front", "b64": mp.b64(b"JPEGDATA"), "bytes": 8, "t": now},
+                             {"type": "audio", "req": "r2", "seconds": 5, "b64": mp.b64(b"M4ADATA"), "bytes": 7, "t": now + 1},
+                             {"type": "photo", "req": "r3", "error": "camera timed out", "t": now + 2}], latest, state)
+        caps = latest["captures"]
+        self.assertEqual([c["kind"] for c in caps], ["photo", "audio", "photo"])
+        self.assertEqual(Path(caps[0]["path"]).read_bytes(), b"JPEGDATA")
+        self.assertTrue(caps[0]["path"].endswith("-photo-front.jpg"))
+        self.assertEqual(caps[1]["text"], "[en] hello there")
+        self.assertEqual(Path(caps[1]["path"]).with_suffix(".txt").read_text(), "[en] hello there")
+        self.assertEqual(caps[2]["error"], "camera timed out")
+        self.assertNotIn("b64", mp.EVENTS.read_text())  # the payload stays out of the events log
+        m = mp.media([])
+        self.assertIn("photo (front)", m)
+        self.assertIn("hello there", m)
+        self.assertIn("failed (camera timed out)", m)

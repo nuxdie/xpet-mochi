@@ -210,7 +210,8 @@ reply to one of Mochi's questions, it arrives as that answer. The other way, a r
 the SDK alone, `app/install.sh` installs and pairs it over adb and grants it everything). It runs as a foreground
 service and reports location, battery, network, screen, steps, every notification (messages with sender and text,
 mail, deliveries, alerts), what's playing, where the sound goes, calls, texts and app usage; the desk can send it
-`locate`, a `buzz`, or an ask with buttons. Everything travels through `relay/` (a blind mailbox on mc.tsatsin.com,
+`locate`, a `buzz`, an ask with buttons, and (only in a run they asked for) take a picture with either camera or
+record a clip from the microphone, which comes back transcribed (faster-whisper in Mochi's tools venv). Everything travels through `relay/` (a blind mailbox on mc.tsatsin.com,
 `relay/deploy.sh`) sealed end to end with X25519 + HKDF + AES-256-GCM, a fresh ephemeral key per message; the relay
 holds only ciphertext and keeps nothing after delivery. If the relay is out of reach for half an hour the phone mails
 the same sealed blobs through Gmail to an address mbsync already pulls. On the desk `mochi-phone serve` (a user

@@ -152,7 +152,7 @@ READ_TOOLS = [
     # their phone (mochi-phone): where they are, and a fresh fix on request
     "Bash(mochi-phone where:*)", "Bash(mochi-phone status)", "Bash(mochi-phone events:*)", "Bash(mochi-phone log)",
     "Bash(mochi-phone send locate)", "Bash(mochi-phone now)", "Bash(mochi-phone notifs:*)", "Bash(mochi-phone calls:*)",
-    "Bash(mochi-phone sms:*)", "Bash(mochi-phone usage:*)", "Bash(mochi-phone digest)",
+    "Bash(mochi-phone sms:*)", "Bash(mochi-phone usage:*)", "Bash(mochi-phone digest)", "Bash(mochi-phone media:*)",
     # their Google Drive, Docs and Sheets in both accounts (brain/mochi_drive.py): reading changes nothing; download
     # writes only into the workspace's drive/
     "Bash(mochi-drive accounts)", "Bash(mochi-drive search:*)", "Bash(mochi-drive recent:*)", "Bash(mochi-drive ls:*)",
@@ -188,6 +188,9 @@ DRIVE_CHANGE_TOOLS = ["Bash(mochi-drive:*)", "Bash(mochi-calendar:*)"]  # and th
 # A text message from their phone (brain/mochi_sms.py → kdeconnect-cli --send-sms). Same footing as mail: allowed in
 # every run, CLAUDE.md "Their texts" says when a round may send on its own, every send is logged (mochi-sms log).
 SMS_SEND_TOOLS = ["Bash(mochi-sms send:*)", "Bash(mochi-phone send buzz:*)"]  # and a buzz on their phone: the urgent bar
+
+# The phone's camera and microphone: a still or a clip, only in a run they asked for (CLAUDE.md "Their phone").
+PHONE_CAPTURE_TOOLS = ["Bash(mochi-phone send photo:*)", "Bash(mochi-phone send audio:*)"]
 # Mochi's own Chrome (brain/mochi_browser.py → chrome-devtools-mcp, server name "chrome"). A round may look: open
 # pages, read them (snapshot), screenshot, click around. Typing into forms, uploads and running scripts on a page
 # change things in the world, so they wait for a YES or a chat.
@@ -227,6 +230,7 @@ LEVELS = {
     "dream": READ_TOOLS + OWN_FILES,  # reads and rewrites its own notes; no mail, no browser
     "workshop": READ_TOOLS + OWN_FILES + WORKSHOP_TOOLS,  # its notes and its own body; nothing else
     "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS
+                + PHONE_CAPTURE_TOOLS
                 + VAULT_TOOLS + DRIVE_CHANGE_TOOLS,
 }
 

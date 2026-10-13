@@ -55,7 +55,7 @@ public class AgentService extends Service {
     static final String ACTION_MAILTEST = "app.mochi.agent.MAILTEST";  // from adb: mail the outbox now, to prove the fallback
     static final String CH_ONGOING = "mochi", CH_ASKS = "mochi-asks";
     static final int NOTE_ONGOING = 1;
-    static final String VERSION = "0.2";
+    static final String VERSION = "0.3";
 
     // when to bother the radio
     static final long FLUSH_COALESCE_MS = 20_000;
@@ -456,9 +456,48 @@ public class AgentService extends Service {
             case "ask":
                 ask(msg.optString("ask_id"), msg.optString("text"), msg.optJSONArray("options"));
                 break;
+            case "photo":
+                io.post(() -> capture("photo", msg));
+                break;
+            case "audio":
+                io.post(() -> capture("audio", msg));
+                break;
             default:
                 Log.w(TAG, "unknown message type " + type);
         }
+    }
+
+    /** A still or a clip, on the desk's request. The service takes the camera/microphone foreground types for the
+     *  duration (Android shows its green dot meanwhile, as it should) and gives them back after. */
+    private void capture(String what, JSONObject msg) {
+        String req = msg.optString("id");
+        JSONObject ev = ev(what);
+        wake.acquire(150_000);
+        try {
+            int types = ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                    | (what.equals("photo") ? ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA : ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+            startForeground(NOTE_ONGOING, ongoing(what.equals("photo") ? "taking a picture for Mochi" : "listening for Mochi"), types);
+            byte[] data;
+            if (what.equals("photo")) {
+                boolean front = "front".equals(msg.optString("cam"));
+                data = Capture.photo(this, front, io);
+                ev.put("cam", front ? "front" : "back");
+            } else {
+                int secs = Math.max(1, Math.min(msg.optInt("seconds", 10), 120));
+                data = Capture.audio(this, secs);
+                ev.put("seconds", secs);
+            }
+            ev.put("req", req).put("b64", android.util.Base64.encodeToString(data, android.util.Base64.NO_WRAP)).put("bytes", data.length);
+            Log.i(TAG, what + ": " + data.length + " bytes");
+        } catch (Exception e) {
+            Log.w(TAG, what + " failed: " + e);
+            try { ev.put("req", req).put("error", String.valueOf(e)); } catch (Exception ignored) { }
+        } finally {
+            try { startForeground(NOTE_ONGOING, ongoing("with you"), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION); } catch (Exception ignored) { }
+            if (wake.isHeld()) wake.release();
+        }
+        store.enqueue(ev);
+        scheduleFlush(0);
     }
 
     private void locateNow() {
