@@ -586,3 +586,31 @@ class History(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PhoneFeed(unittest.TestCase):
+    """The phone as a feed source: new items become catch-up items; Telegram ones only while the archive is down."""
+
+    def feed(self):
+        fired = []
+        return mb.Feed({}, lambda *a: fired.append(a)), fired
+
+    def test_phone_items_new_since_last_poll(self):
+        f, _ = self.feed()
+        items = {"phone:call:1": {"line": "phone: missed call from Mom at 10:00", "at": 1},
+                 "phone:notif:Telegram:Denis:1": {"line": "phone: 1 message(s) from Denis in Telegram", "at": 2}}
+        f.take({"ok": True, "items": items}, t=10, src="phone")      # the first look is a baseline
+        self.assertEqual(f.state["items"], {})
+        items["phone:sms:2"] = {"line": "phone: a text from DHL at 10:05", "at": 3}
+        items["phone:notif:Telegram:Denis:2"] = {"line": "phone: 2 message(s) from Denis in Telegram", "at": 4}
+        items["phone:notif:WhatsApp:Nastya:2"] = {"line": "phone: 1 message(s) from Nastya in WhatsApp", "at": 5}
+        f.take({"ok": True, "items": items}, t=20, src="phone")
+        self.assertEqual(sorted(f.state["items"]), ["phone:notif:WhatsApp:Nastya:2", "phone:sms:2"])  # Telegram: the archive's job
+
+    def test_telegram_through_the_phone_when_the_archive_is_down(self):
+        f, _ = self.feed()
+        f.take({"ok": True, "items": {}}, t=10, src="phone")
+        f.state["down"]["telegram"] = {"since": 5, "told": False}
+        f.take({"ok": True, "items": {"phone:notif:Telegram:Denis:2": {"line": "phone: 2 message(s) from Denis in Telegram", "at": 4}}},
+               t=20, src="phone")
+        self.assertEqual(list(f.state["items"]), ["phone:notif:Telegram:Denis:2"])

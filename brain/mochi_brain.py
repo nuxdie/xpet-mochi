@@ -149,6 +149,10 @@ READ_TOOLS = [
     "Bash(mochi-sms status)", "Bash(mochi-sms threads:*)", "Bash(mochi-sms read:*)", "Bash(mochi-sms recent:*)",
     "Bash(mochi-sms unread)", "Bash(mochi-sms search:*)", "Bash(mochi-sms sync:*)", "Bash(mochi-sms contacts:*)",
     "Bash(mochi-sms log:*)",
+    # their phone (mochi-phone): where they are, and a fresh fix on request
+    "Bash(mochi-phone where:*)", "Bash(mochi-phone status)", "Bash(mochi-phone events:*)", "Bash(mochi-phone log)",
+    "Bash(mochi-phone send locate)", "Bash(mochi-phone now)", "Bash(mochi-phone notifs:*)", "Bash(mochi-phone calls:*)",
+    "Bash(mochi-phone sms:*)", "Bash(mochi-phone usage:*)", "Bash(mochi-phone digest)",
     # their Google Drive, Docs and Sheets in both accounts (brain/mochi_drive.py): reading changes nothing; download
     # writes only into the workspace's drive/
     "Bash(mochi-drive accounts)", "Bash(mochi-drive search:*)", "Bash(mochi-drive recent:*)", "Bash(mochi-drive ls:*)",
@@ -183,7 +187,7 @@ TASK_TOOLS = ["Bash(mochi-tasks:*)"]
 DRIVE_CHANGE_TOOLS = ["Bash(mochi-drive:*)", "Bash(mochi-calendar:*)"]  # and their calendars: add, edit, respond
 # A text message from their phone (brain/mochi_sms.py → kdeconnect-cli --send-sms). Same footing as mail: allowed in
 # every run, CLAUDE.md "Their texts" says when a round may send on its own, every send is logged (mochi-sms log).
-SMS_SEND_TOOLS = ["Bash(mochi-sms send:*)"]
+SMS_SEND_TOOLS = ["Bash(mochi-sms send:*)", "Bash(mochi-phone send buzz:*)"]  # and a buzz on their phone: the urgent bar
 # Mochi's own Chrome (brain/mochi_browser.py → chrome-devtools-mcp, server name "chrome"). A round may look: open
 # pages, read them (snapshot), screenshot, click around. Typing into forms, uploads and running scripts on a page
 # change things in the world, so they wait for a YES or a chat.
@@ -1057,12 +1061,13 @@ class Feed:
     unreadable for FEED_DOWN_AFTER wakes Mochi once (and again when it's back). state is relay.json's "feed"."""
 
     LABELS = {"telegram": "their Telegram archive", "mail": "their local mail index",
-              "calls": "the recorded-calls folder on the NAS", "calendar": "their Google calendars (CalDAV)"}
+              "calls": "the recorded-calls folder on the NAS", "calendar": "their Google calendars (CalDAV)",
+              "phone": "their phone (mochi-phone)"}
 
     def __init__(self, state, fire):
         self.state, self.fire = state, fire
         for k, v in {"counts": {}, "new": {}, "items": {}, "down": {}, "last_poll": 0, "last_catchup": 0,
-                     "mail_seen": None, "calls": None, "cal": None}.items():
+                     "mail_seen": None, "calls": None, "cal": None, "phone_seen": None}.items():
             state.setdefault(k, v)
         for k in ("down_since", "told_down"):  # from before the feed had more than Telegram
             state.pop(k, None)
@@ -1077,7 +1082,7 @@ class Feed:
             return set()
 
     COMMANDS = {"telegram": ["telegram", "counts"], "mail": ["mail", "feed"], "calls": ["calls", "feed"],
-                "calendar": ["calendar", "feed"]}
+                "calendar": ["calendar", "feed"], "phone": ["phone", "feed"]}
 
     def poll_async(self, src):
         if src in self.polling:
@@ -1160,6 +1165,22 @@ class Feed:
                 self.item(f"mail:{mid}", f"mail ({m.get('account', '?')}), {who}: “{m.get('subject', '')}”; read: "
                                          f"`mochi-sense mail show id:{mid}`", t)
         self.state["mail_seen"] = list(msgs)
+
+    def take_phone(self, data, t):
+        """Missed calls, texts in, messages from people in messaging apps, as mochi-phone keys them (a message group
+        per sender per hour keeps a chatty evening to one item). Telegram messages arrive here too, as a backup: they
+        count only while the archive is unreadable; otherwise the archive's own feed raises the chat."""
+        items, seen = data.get("items") or {}, self.state["phone_seen"]
+        tg_down = bool(self.state["down"].get("telegram", {}).get("since"))
+        if seen is not None:
+            seen = set(seen)
+            for key, it in items.items():
+                if key in seen:
+                    continue
+                if key.startswith("phone:notif:Telegram") and not tg_down:
+                    continue
+                self.item(key, it["line"], t)
+        self.state["phone_seen"] = list(items)
 
     def take_calls(self, data, t):
         calls, old = data.get("calls") or {}, self.state["calls"]
@@ -1631,6 +1652,7 @@ class Relay:
                 if due("feed-slow", SLOW_FEED_EVERY):
                     self.feed.poll_async("calls")
                     self.feed.poll_async("calendar")
+                    self.feed.poll_async("phone")
                 if due("feed-mail", 60) and self.mail_pulled():
                     self.feed.poll_async("mail")
                 self.feed.drain()
@@ -1652,7 +1674,7 @@ class Relay:
         if m.get("src") == "claude":
             self.sessions.on_event(m)
         elif ev == "answer":
-            self.on_answer(m.get("id", ""), (m.get("answer") or "").strip())
+            self.on_answer(m.get("id", ""), (m.get("answer") or "").strip(), via=m.get("via") or "pig")
         elif ev == "chat":
             self.event("user opened a chat with you from the menu")
             open_chat(None, CHAT_PROMPT)
@@ -2368,6 +2390,11 @@ def main(argv):
             return 0 if send_brain(event="ask", text=" ".join(argv[2:])) else 1
         if a in ("--round", "--status", "--report", "--chat", "--discover", "--dream", "--study", "--workshop"):
             return 0 if send_brain(event=a[2:]) else 1
+        if a == "--answer":  # an answer to an ask from somewhere else (mochi-phone: a button on their phone's notification)
+            if len(argv) < 4:
+                print("usage: mochi-brain --answer ASK_ID LABEL", file=sys.stderr)
+                return 1
+            return 0 if send_brain(event="answer", id=argv[2], answer=" ".join(argv[3:]), via="phone") else 1
         if a == "--trigger":
             text = " ".join(x for x in argv[2:] if x != "--urgent").strip()
             if not text:

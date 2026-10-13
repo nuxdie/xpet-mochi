@@ -25,6 +25,7 @@ install: xpet
 	install -Dm755 brain/mochi_view.py $(PREFIX)/bin/mochi-view
 	install -Dm755 brain/mochi_vault.py $(PREFIX)/bin/mochi-vault
 	install -Dm755 brain/mochi_sms.py $(PREFIX)/bin/mochi-sms
+	install -Dm755 brain/mochi_phone.py $(PREFIX)/bin/mochi-phone
 	install -Dm644 brain/CLAUDE.md $(MOCHI_HOME)/CLAUDE.md
 	mkdir -p $(HOME)/.config/mochi && echo "$(CURDIR)" > $(HOME)/.config/mochi/xpet-repo  # where mochi-workshop finds the repo
 
@@ -38,7 +39,7 @@ tools:
 install-autostart: install
 	install -Dm644 dist/xpet.service dist/mochi-brain.service dist/mochi-mail.service dist/mochi-mail.timer \
 		dist/mochi-archive.service dist/mochi-archive.timer \
-		dist/mochi-nas-index.service dist/mochi-nas-index.timer dist/mochi-vault.service -t $(HOME)/.config/systemd/user
+		dist/mochi-nas-index.service dist/mochi-nas-index.timer dist/mochi-vault.service dist/mochi-phone.service -t $(HOME)/.config/systemd/user
 	install -Dm644 dist/xpet.desktop -t $(HOME)/.config/autostart
 	systemctl --user daemon-reload
 

@@ -204,6 +204,20 @@ reply to one of Mochi's questions, it arrives as that answer. The other way, a r
 "Show me" delivers them, on screen or to the phone. A report can be a PDF or a picture too. From a shell or a chat:
 `mochi-telegram file PATH... [--caption TEXT] [--photo]`. Limits are Telegram's: 50 MB out, 20 MB in.
 
+### Your phone (the app)
+
+`app/` is Mochi on the phone: a plain-Java Android app (no Gradle, no third-party code; `app/build.sh` builds it from
+the SDK alone, `app/install.sh` installs and pairs it over adb and grants it everything). It runs as a foreground
+service and reports location, battery, network, screen, steps, every notification (messages with sender and text,
+mail, deliveries, alerts), what's playing, where the sound goes, calls, texts and app usage; the desk can send it
+`locate`, a `buzz`, or an ask with buttons. Everything travels through `relay/` (a blind mailbox on mc.tsatsin.com,
+`relay/deploy.sh`) sealed end to end with X25519 + HKDF + AES-256-GCM, a fresh ephemeral key per message; the relay
+holds only ciphertext and keeps nothing after delivery. If the relay is out of reach for half an hour the phone mails
+the same sealed blobs through Gmail to an address mbsync already pulls. On the desk `mochi-phone serve` (a user
+service) opens them into `~/.local/share/mochi/phone/`; `mochi-sense phone` is the digest's view, `mochi-phone
+where|now|notifs|calls|sms|usage` the detail, and the relay's live feed starts catch-ups for missed calls, texts and
+messages from people. The rules for using it are in `brain/CLAUDE.md`, "Their phone".
+
 ### Its own browser
 
 `brain/mochi_browser.py` (installed as `mochi-browser`) gives Mochi a Chrome of its own: a separate profile in

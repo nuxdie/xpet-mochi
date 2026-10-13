@@ -1759,6 +1759,27 @@ def sense_home(args):
     return "\n".join(out)
 
 
+def sense_phone(args):
+    """Their phone, through Mochi's own app there (mochi-phone): where, what it's doing, what came in; `feed` is JSON
+    for the relay's live feed."""
+    if args[:1] == ["feed"]:
+        code, out, err = run(["mochi-phone", "feed"], timeout=40)
+        return out.strip() if code == 0 else json.dumps({"ok": False, "error": (err or out).strip()[-200:]})
+    code, out, err = run(["mochi-phone", "digest"], timeout=60)
+    if code != 0:
+        return "## Their phone\n_mochi-phone failed: " + (err or out).strip()[-200:] + "_"
+    return out.strip()
+
+
+def sense_where(args):
+    """Where they are, from Mochi on their phone (mochi-phone: location, battery, network, the day's stays)."""
+    cmd = ["mochi-phone", "where"] + (["--days", opt(args, "--days")] if opt(args, "--days") else [])
+    code, out, err = run(cmd, timeout=40)
+    if code != 0:
+        return "## Where they are (their phone)\n_mochi-phone failed: " + (err or out).strip()[-200:] + "_"
+    return out.strip()
+
+
 # ---- hosts over ssh ------------------------------------------------------------------------------------
 
 SSH_REPORT = ("echo HOST $(hostname); uptime; echo DISK; df -h -x tmpfs -x devtmpfs -x overlay 2>/dev/null | tail -n +2; "
@@ -1840,6 +1861,9 @@ def sense_sources(args):
     rows.append(("nas", CFG["nas"]["share"], "ok" if code == 0 else f"NO ACCESS: {(err or o).strip()[:80]}"))
     rows.append(("photos (immich)", CFG["immich"]["url"], "api key" if CFG["immich"].get("api_key") else ("browser session" if firefox_cookie(host_of(CFG["immich"]["url"]), CFG["immich"]["cookie_name"]) else "no access")))
     rows.append(("home assistant", CFG["home_assistant"]["url"], "token set" if ha_token() else "no token (home_assistant.token in sources.json)"))
+    pcode, pout, _ = run(["mochi-phone", "status"], timeout=20)
+    rows.append(("their phone", "mochi-phone (relay mc.tsatsin.com)",
+                 " / ".join(l.split(None, 1)[1] for l in pout.splitlines() if l.startswith(("relay", "phone"))) if pcode == 0 else "NO ACCESS: mochi-phone status failed"))
     for name, target in CFG["ssh"]["hosts"].items():
         code, _, err = ssh_run(target, "true", timeout=10)
         rows.append((f"ssh {name}", target, "ok" if code == 0 else "NO ACCESS (install Mochi's key: ssh-copy-id -i ~/.ssh/mochi_ed25519.pub " + target + ")"))
@@ -1877,6 +1901,8 @@ SENSORS = {
     "calls": (sense_calls, "recorded calls on the NAS (Videos/Zoom): list [FOLDER] | read FOLDER/CALL [--part N] [--chars N] | summary FOLDER/CALL"),
     "photos": (sense_photos, "immich: counts and newest uploads"),
     "home": (sense_home, "home assistant: people, what's on, vacuums, climate, recent changes  [--grep REGEX | WORD]"),
+    "where": (sense_where, "where they are: their phone's location, address, battery, the day's stays (mochi-phone)  [--days N]"),
+    "phone": (sense_phone, "their phone: where, what it's doing, calls, texts, notifications, app use (mochi-phone) | feed (JSON)"),
     "hosts": (sense_hosts, "ssh hosts: uptime, disk, failed units, containers  [HOST] | HOST COMMAND..."),
     "network": (sense_network, "hosts up/down, web services, tailscale, kde connect, mDNS"),
     "calendar": (sense_calendar, "their Google calendars (CalDAV): upcoming [--days N] | feed (JSON)"),
@@ -1889,7 +1915,7 @@ SENSORS = {
     "repos": (sense_repos, "git repos with recent commits and dirty state  [--days N]"),
     "sources": (sense_sources, "the registry: every source and whether it is reachable"),
 }
-DIGEST = ["network", "mail", "calendar", "birthdays", "tasks", "drive", "sms", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "home", "hosts"]
+DIGEST = ["network", "mail", "calendar", "birthdays", "tasks", "drive", "sms", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "phone", "home", "hosts"]
 
 
 def sense_all(args):
