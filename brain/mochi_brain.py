@@ -149,6 +149,11 @@ READ_TOOLS = [
     "Bash(mochi-sms status)", "Bash(mochi-sms threads:*)", "Bash(mochi-sms read:*)", "Bash(mochi-sms recent:*)",
     "Bash(mochi-sms unread)", "Bash(mochi-sms search:*)", "Bash(mochi-sms sync:*)", "Bash(mochi-sms contacts:*)",
     "Bash(mochi-sms log:*)",
+    # their Google Drive, Docs and Sheets in both accounts (brain/mochi_drive.py): reading changes nothing; download
+    # writes only into the workspace's drive/
+    "Bash(mochi-drive accounts)", "Bash(mochi-drive search:*)", "Bash(mochi-drive recent:*)", "Bash(mochi-drive ls:*)",
+    "Bash(mochi-drive info:*)", "Bash(mochi-drive read:*)", "Bash(mochi-drive sheet:*)", "Bash(mochi-drive download:*)",
+    "Bash(mochi-drive log:*)",
     "mcp__claude_ai_Gmail__search_threads", "mcp__claude_ai_Gmail__get_thread",
     "mcp__claude_ai_Gmail__get_message", "mcp__claude_ai_Gmail__list_labels",
     "mcp__claude_ai_Gmail__list_drafts", "mcp__claude_ai_Gmail__get_draft",
@@ -169,6 +174,9 @@ SEND_TOOLS = ["Bash(mochi-mail:*)", "Bash(msmtp:*)"]
 # Their Google Tasks (brain/mochi_tasks.py). Reading and writing go through the one command, which logs every change
 # and cannot delete; CLAUDE.md "Their tasks" says when a round may add or tick off on its own.
 TASK_TOOLS = ["Bash(mochi-tasks:*)"]
+# Changing their Drive (create, append, replace, write cells, rename, move) through mochi-drive, which logs every change
+# and cannot trash, delete or share. Their documents are their work: only runs they asked for or approved.
+DRIVE_CHANGE_TOOLS = ["Bash(mochi-drive:*)"]
 # A text message from their phone (brain/mochi_sms.py → kdeconnect-cli --send-sms). Same footing as mail: allowed in
 # every run, CLAUDE.md "Their texts" says when a round may send on its own, every send is logged (mochi-sms log).
 SMS_SEND_TOOLS = ["Bash(mochi-sms send:*)"]
@@ -211,7 +219,7 @@ LEVELS = {
     "dream": READ_TOOLS + OWN_FILES,  # reads and rewrites its own notes; no mail, no browser
     "workshop": READ_TOOLS + OWN_FILES + WORKSHOP_TOOLS,  # its notes and its own body; nothing else
     "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS
-                + VAULT_TOOLS,
+                + VAULT_TOOLS + DRIVE_CHANGE_TOOLS,
 }
 
 BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}\n```'

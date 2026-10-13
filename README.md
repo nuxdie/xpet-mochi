@@ -42,6 +42,10 @@ add yourself as a test user, then **Publish app**: in Testing, Google expires th
 create an OAuth client ID of type *Desktop app*. Save its JSON as `~/.config/mochi/google-oauth-client.json` and run
 `mochi-tasks auth`; Google warns that the app is unverified (it is yours: Advanced → continue).
 
+**Google Drive, Docs and Sheets** go through `mochi-drive`, on the same OAuth client: enable the Google Drive, Docs
+and Sheets APIs in that project, then `mochi-drive auth ACCOUNT` once per Google account (accounts are named as in
+`mail.accounts` in sources.json; each gets its own token). App passwords don't work here either.
+
 `dist/mochi-archive.timer` runs `mochi-archive sync` every hour: your interactive Claude Code sessions and your
 conversations with Mochi (chats, requests, its questions and your answers, from its transcripts plus the relay's
 `comms.jsonl`) go into the self-hosted LLM chat archive on sff as two providers, `claudecode` and `mochi`, over ssh
@@ -92,7 +96,8 @@ summaries, its own notes), and ends with a small JSON block. That block is the o
 The relay decides *when*, never *what*. It also enforces *which tools* a run may use, because safety should not live
 in a prompt: a round gets read-only tools, mail drafts and sends through `mochi-mail` (msmtp; the brief says when it may send on
 its own and when it must ask first, and every send is logged), your Google Tasks through `mochi-tasks` (read freely,
-changed under the same consent rule, every change logged, no delete), the SMS on your phone through `mochi-sms` (Google Messages for Web in Mochi's Chrome, and KDE Connect
+changed under the same consent rule, every change logged, no delete), your Google Drive, Docs and Sheets in every signed-in account through `mochi-drive` (read in rounds; created or edited only in runs you
+asked for or approved, every change logged, nothing trashed or shared), the SMS on your phone through `mochi-sms` (Google Messages for Web in Mochi's Chrome, and KDE Connect
 over the LAN: read freely, a text sent only under the mail rule, every send logged), and writes inside `memory/`, `journal/` and `reports/`;
 a run you asked for or approved may also edit files and run commands; and a deny list no level can override (no
 `sudo`, no deleting mail or sending through the Gmail connector, no force-push, no `rm -rf`, no sharing Drive files). Rounds use Sonnet; things

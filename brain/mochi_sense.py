@@ -1647,6 +1647,24 @@ def sense_tasks(args):
         return f"{head}\n_not available: {(p.stderr or p.stdout).strip()[-300:]}_"
     return f"{head}\n{p.stdout.strip()}\n_Dig: `mochi-tasks list [--list L] [--all]` · `mochi-tasks lists`_"
 
+# ---- drive (Google Drive, Docs and Sheets, through mochi-drive) ------------------------------------------------
+
+DRIVE_CMD = shutil.which("mochi-drive") or str(HOME / ".local/bin/mochi-drive")
+
+
+def sense_drive(args):
+    """What changed lately in their Drives (both accounts): mochi-drive holds the tokens and does the API."""
+    days = days_arg(args, 2)
+    head = f"## Drive (changed in the last {days} days)"
+    try:
+        p = subprocess.run([DRIVE_CMD, "recent", "--days", str(days), "--limit", "20"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"{head}\n_not available: {e}_"
+    if p.returncode != 0:
+        return f"{head}\n_not available: {(p.stderr or p.stdout).strip()[-300:]}_"
+    return f"{head}\n{p.stdout.strip()}\n_Dig: `mochi-drive read ID` · `mochi-drive search WORDS` · `mochi-drive sheet ID [RANGE]`_"
+
 SMS_CMD = shutil.which("mochi-sms") or str(HOME / ".local/bin/mochi-sms")
 
 
@@ -1817,7 +1835,12 @@ def sense_sources(args):
     p = subprocess.run([TASKS_CMD, "lists"], capture_output=True, text=True, timeout=30) if os.path.exists(TASKS_CMD) else None
     rows.append(("google tasks", "mochi-tasks (Tasks API, OAuth)", f"ok, {len(p.stdout.splitlines())} lists" if p and p.returncode == 0
                  else "NO ACCESS: " + ((p.stderr.strip()[-100:]) if p else "mochi-tasks not installed")))
-    rows.append(("gmail drafts / drive / calendar", "claude.ai connectors", "see tools available in the run"))
+    p = subprocess.run([DRIVE_CMD, "accounts"], capture_output=True, text=True, timeout=60) if os.path.exists(DRIVE_CMD) else None
+    accs = [l[2:].split(" (")[0] + (" ok" if "): ok" in l else " NO ACCESS: " + l.split("): ", 1)[-1][:60])
+            for l in p.stdout.splitlines()] if p and p.returncode == 0 else []
+    rows.append(("google drive/docs/sheets", "mochi-drive (Drive API, OAuth)", ", ".join(accs) if accs
+                 else "NO ACCESS: " + ((p.stderr.strip()[-100:]) if p else "mochi-drive not installed")))
+    rows.append(("gmail drafts / calendar", "claude.ai connectors", "see tools available in the run"))
     out.append(md_table(rows, ["source", "where", "state"]))
     return "\n".join(out)
 
@@ -1838,13 +1861,14 @@ SENSORS = {
     "network": (sense_network, "hosts up/down, web services, tailscale, kde connect, mDNS"),
     "calendar": (sense_calendar, "their Google calendars (CalDAV): upcoming [--days N] | feed (JSON)"),
     "tasks": (sense_tasks, "their Google Tasks: open tasks, overdue and due soon first (mochi-tasks does the rest)"),
+    "drive": (sense_drive, "their Google Drive in both accounts: files changed lately  [--days N] (mochi-drive does the rest)"),
     "sms": (sense_sms, "their text messages (Messages for Web + KDE Connect): what came in lately, unread  [--hours H] (mochi-sms does the rest)"),
     "mail": (sense_mail, "local mail: recent | unread | search QUERY | show QUERY | folders  [--days N] [--limit N] [--chars N]"),
     "sessions": (sense_sessions, "claude code sessions by project  [--days N]"),
     "repos": (sense_repos, "git repos with recent commits and dirty state  [--days N]"),
     "sources": (sense_sources, "the registry: every source and whether it is reachable"),
 }
-DIGEST = ["network", "mail", "calendar", "tasks", "sms", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "home", "hosts"]
+DIGEST = ["network", "mail", "calendar", "tasks", "drive", "sms", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "home", "hosts"]
 
 
 def sense_all(args):
