@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """mochi-drive — their Google Drive, Docs and Sheets, through the Google APIs (OAuth, scope drive).
 
-    mochi-drive auth ACCOUNT [--no-browser]   once per account: sign in as them in a browser, keeps a refresh token
-    mochi-drive accounts                      which accounts are signed in, as whom, how full
+    mochi-drive accounts                      which accounts are signed in, as whom (mochi-google auth ACCOUNT signs one in)
     mochi-drive search WORDS [--type T] [--name] [--in FOLDER] [--limit N] [-a ACCOUNT]
     mochi-drive recent [--days N] [--limit N] [-a ACCOUNT]    what changed lately, newest first
     mochi-drive ls [FOLDER] [-a ACCOUNT]      a folder (default: My Drive)
@@ -24,20 +23,13 @@
     mochi-drive rename FILE NAME  |  move FILE FOLDER
 
 FILE and FOLDER are an id or a docs.google.com / drive.google.com link. Without -a, reading commands look in every
-signed-in account and a FILE is found in whichever account has it. Accounts are named as in mail.accounts in
-~/.config/mochi/sources.json (artem, nuxdie), or drive.accounts if that is set.
-
-App passwords only open IMAP/SMTP/CalDAV; Drive, Docs and Sheets need OAuth. This uses the same OAuth client as
-mochi-tasks (the "Mochi" project in Google Cloud, with the Drive, Docs and Sheets APIs on), one token per account
-in ~/.config/mochi/google-drive.ACCOUNT.token.json (mode 600).
+signed-in account and a FILE is found in whichever account has it. Accounts and their sign-in are mochi-google's
+(App passwords only open IMAP/SMTP/CalDAV; Drive, Docs and Sheets need OAuth.)
 """
 
 import argparse
-import base64
 import csv
 import datetime as dt
-import hashlib
-import http.server
 import io
 import json
 import os
@@ -45,25 +37,17 @@ import re
 import secrets
 import subprocess
 import sys
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 HOME = Path.home()
 WORK = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share") / "mochi"
 LOG = WORK / "drive.log"
 DOWNLOADS = WORK / "drive"
-CONF_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "mochi"
-CONFIG = CONF_DIR / "sources.json"
 DRIVE = "https://www.googleapis.com/drive/v3"
 UPLOAD = "https://www.googleapis.com/upload/drive/v3"
 DOCS = "https://docs.googleapis.com/v1"
 SHEETS = "https://sheets.googleapis.com/v4"
-SCOPE = "https://www.googleapis.com/auth/drive"  # Docs and Sheets APIs accept it too
-AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_URL = "https://oauth2.googleapis.com/token"
 FIELDS = "id,name,mimeType,modifiedTime,size,webViewLink,parents,owners(emailAddress),lastModifyingUser(displayName,me)"
 G = "application/vnd.google-apps."
 TYPES = {"doc": G + "document", "sheet": G + "spreadsheet", "slides": G + "presentation", "folder": G + "folder",
@@ -75,118 +59,31 @@ EXPORTS = {"pdf": "application/pdf", "txt": "text/plain", "md": "text/markdown",
            "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}
 
 
-class ApiError(Exception):
-    def __init__(self, code, msg):
-        super().__init__(f"HTTP {code} {msg}")
-        self.code = code
+def _google():
+    """The shared Google sign-in (brain/mochi_google.py; installed beside this as mochi-google)."""
+    import importlib.machinery
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    path = next((here / n for n in ("mochi_google.py", "mochi-google") if (here / n).exists()), None)
+    if not path:
+        sys.exit(f"mochi-drive: mochi-google is not installed beside {here}")
+    spec = importlib.util.spec_from_loader("mochi_google", importlib.machinery.SourceFileLoader("mochi_google", str(path)))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.PROG = "mochi-drive"
+    return mod
 
 
-def die(msg):
-    sys.exit(f"mochi-drive: {msg}")
+google = _google()
+ApiError, die, human = google.ApiError, google.die, google.human
 
 
-# ---- config and tokens ------------------------------------------------------------------------------------
-
-def conf():
-    try:
-        c = json.loads(CONFIG.read_text())
-    except (OSError, ValueError):
-        c = {}
-    d = c.get("drive", {})
-    accounts = d.get("accounts") or c.get("mail", {}).get("accounts") or {}
-    client = d.get("client_file") or c.get("tasks", {}).get("client_file") or CONF_DIR / "google-oauth-client.json"
-    return accounts, Path(os.path.expanduser(client))
-
-
-def token_path(account):
-    return CONF_DIR / f"google-drive.{account}.token.json"
-
-
-def signed_in():
-    return [a for a in conf()[0] if token_path(a).exists()]
-
-
-def client():
-    path = conf()[1]
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        die(f"no OAuth client at {path} (see `mochi-drive --help`)")
-    c = data.get("installed") or data.get("web") or data
-    if not c.get("client_id"):
-        die(f"{path} has no client_id")
-    return c
-
-
-def post_form(url, fields):
-    req = urllib.request.Request(url, data=urllib.parse.urlencode(fields).encode(),
-                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        try:
-            err = json.loads(body)
-        except ValueError:
-            err = {"error": body[:200]}
-        return {"_error": err.get("error"), "_detail": err.get("error_description", "")}
-
-
-def save_token(account, tok):
-    path = token_path(account)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(tok, f)
-
-
-def access_token(account):
-    try:
-        tok = json.loads(token_path(account).read_text())
-    except (OSError, ValueError):
-        die(f"{account} is not signed in (they run `mochi-drive auth {account}` once)")
-    if tok.get("access_token") and tok.get("expires_at", 0) > time.time() + 60:
-        return tok["access_token"]
-    c = client()
-    r = post_form(TOKEN_URL, {"client_id": c["client_id"], "client_secret": c.get("client_secret", ""),
-                              "refresh_token": tok.get("refresh_token", ""), "grant_type": "refresh_token"})
-    if r.get("_error"):
-        hint = f" — the sign-in expired or was revoked; they run `mochi-drive auth {account}` again" if r["_error"] == "invalid_grant" else ""
-        die(f"{account}: token refresh failed: {r['_error']} {r['_detail']}{hint}")
-    tok.update(access_token=r["access_token"], expires_at=time.time() + int(r.get("expires_in", 3600)))
-    save_token(account, tok)
-    return tok["access_token"]
-
-
-def request(account, method, url, body=None, params=None, raw=None, ctype="application/json"):
-    """One API call as ACCOUNT. body is JSON; raw is bytes sent as is. Returns parsed JSON, or bytes for media."""
-    if params:
-        url += "?" + urllib.parse.urlencode(params, doseq=True)
-    data = raw if raw is not None else json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, method=method, data=data,
-                                 headers={"Authorization": "Bearer " + access_token(account), "Content-Type": ctype})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            out = r.read()
-            if "json" in r.headers.get("Content-Type", ""):
-                return json.loads(out) if out else {}
-            return out
-    except urllib.error.HTTPError as e:
-        try:
-            msg = json.loads(e.read()).get("error", {}).get("message", "")
-        except ValueError:
-            msg = ""
-        raise ApiError(e.code, msg) from None
-    except urllib.error.URLError as e:
-        die(str(e.reason))
+def request(account, method, url, **kw):
+    return google.request(account, method, url, scope=google.DRIVE, **kw)
 
 
 def call(account, method, url, **kw):
-    try:
-        return request(account, method, url, **kw)
-    except ApiError as e:
-        die(f"{account}: {method} {url.split('googleapis.com')[-1]}: {e}")
+    return google.call(account, method, url, scope=google.DRIVE, **kw)
 
 
 # ---- files ------------------------------------------------------------------------------------------------
@@ -198,15 +95,7 @@ def file_id(s):
 
 
 def accounts_for(a):
-    have = signed_in()
-    if getattr(a, "account", None):
-        if a.account not in conf()[0]:
-            die(f"no account {a.account!r} (have: {', '.join(conf()[0]) or 'none in sources.json'})")
-        return [a.account]
-    if not have:
-        die("no account is signed in (they run `mochi-drive auth ACCOUNT` once; accounts: "
-            + ", ".join(conf()[0]) + ")")
-    return have
+    return google.accounts_for(getattr(a, "account", None), google.DRIVE)
 
 
 def find(a, ref, fields=FIELDS):
@@ -236,13 +125,6 @@ def line(f, account=None, today=None):
         parts.append(account)
     parts.append(f"id={f['id']}")
     return " · ".join(parts)
-
-
-def human(n):
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024 or unit == "TB":
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
 
 
 def quote(s):
@@ -594,90 +476,6 @@ def cmd_log(a):
         print("nothing changed yet")
 
 
-# ---- auth -------------------------------------------------------------------------------------------------
-
-def cmd_auth(a):
-    accounts = conf()[0]
-    if a.account not in accounts:
-        die(f"no account {a.account!r}; name one of: {', '.join(accounts) or '(none: add drive.accounts to sources.json)'}")
-    email = accounts[a.account]
-    c = client()
-    verifier = secrets.token_urlsafe(64)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    state = secrets.token_urlsafe(16)
-    got = {}
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query))
-            if q.get("state") != state:
-                self.send_response(400)
-                self.end_headers()
-                return
-            got.update(q)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(f"Mochi can open {email}'s Drive now. You can close this tab.".encode() if "code" in q
-                             else f"Not signed in: {q.get('error')}".encode())
-
-        def log_message(self, *_):
-            pass
-
-    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    redirect = f"http://127.0.0.1:{srv.server_port}"
-    url = AUTH_URL + "?" + urllib.parse.urlencode({
-        "client_id": c["client_id"], "redirect_uri": redirect, "response_type": "code", "scope": SCOPE,
-        "access_type": "offline", "prompt": "consent", "state": state, "login_hint": email,
-        "code_challenge": challenge, "code_challenge_method": "S256"})
-    print(f"Open this in a browser where {email} is signed in to Google:\n\n{url}\n", flush=True)
-    if not a.no_browser:
-        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    srv.timeout = 10
-    deadline = time.time() + 600
-    while not got and time.time() < deadline:
-        srv.handle_request()
-    if "code" not in got:
-        die(f"sign-in failed: {got.get('error', 'no answer')}")
-    r = post_form(TOKEN_URL, {"client_id": c["client_id"], "client_secret": c.get("client_secret", ""),
-                              "code": got["code"], "code_verifier": verifier, "redirect_uri": redirect,
-                              "grant_type": "authorization_code"})
-    if r.get("_error"):
-        die(f"token exchange failed: {r['_error']} {r['_detail']}")
-    if not r.get("refresh_token"):
-        die("Google returned no refresh token; remove Mochi's access at myaccount.google.com/permissions and run auth again")
-    if SCOPE not in r.get("scope", "").split():
-        die("Drive access was not granted (tick the Drive box on Google's consent page)")
-    old = token_path(a.account).read_bytes() if token_path(a.account).exists() else None
-    save_token(a.account, {"refresh_token": r["refresh_token"], "access_token": r["access_token"],
-                           "expires_at": time.time() + int(r.get("expires_in", 3600))})
-    me = call(a.account, "GET", f"{DRIVE}/about", params={"fields": "user(emailAddress)"})["user"]["emailAddress"]
-    if me.lower() != email.lower():
-        if old:
-            token_path(a.account).write_bytes(old)
-        else:
-            token_path(a.account).unlink()
-        die(f"signed in as {me}, not {email}; run it again and pick {email}")
-    print(f"signed in as {me}")
-    cmd_accounts(a)
-
-
-def cmd_accounts(a):
-    for acc, email in conf()[0].items():
-        if not token_path(acc).exists():
-            print(f"- {acc} ({email}): not signed in — `mochi-drive auth {acc}`")
-            continue
-        try:
-            r = request(acc, "GET", f"{DRIVE}/about", params={"fields": "user(emailAddress),storageQuota"})
-        except ApiError as e:
-            print(f"- {acc} ({email}): {e}")
-            continue
-        q = r.get("storageQuota", {})
-        used = human(int(q.get("usage", 0)))
-        print(f"- {acc} ({r['user']['emailAddress']}): ok, {used} used"
-              + (f" of {human(int(q['limit']))}" if q.get("limit") else ""))
-
-
 def main():
     ap = argparse.ArgumentParser(prog="mochi-drive", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -689,9 +487,6 @@ def main():
             s.add_argument(x)
         return s
 
-    s = sub.add_parser("auth")
-    s.add_argument("account")
-    s.add_argument("--no-browser", action="store_true")
     sub.add_parser("accounts")
     s = p("search")
     s.add_argument("words", nargs="*")
@@ -737,7 +532,7 @@ def main():
     s = sub.add_parser("log")
     s.add_argument("n", nargs="?", type=int, default=20)
     a = ap.parse_args()
-    {"auth": cmd_auth, "accounts": cmd_accounts, "search": cmd_search, "recent": cmd_recent, "ls": cmd_ls,
+    {"accounts": google.cmd_accounts, "search": cmd_search, "recent": cmd_recent, "ls": cmd_ls,
      "info": cmd_info, "read": cmd_read, "sheet": cmd_sheet, "download": cmd_download,
      "create-doc": cmd_create_doc, "create-sheet": cmd_create_sheet, "upload": cmd_upload, "mkdir": cmd_mkdir,
      "doc-append": cmd_doc_append, "doc-replace": cmd_doc_replace,

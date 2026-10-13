@@ -154,6 +154,10 @@ READ_TOOLS = [
     "Bash(mochi-drive accounts)", "Bash(mochi-drive search:*)", "Bash(mochi-drive recent:*)", "Bash(mochi-drive ls:*)",
     "Bash(mochi-drive info:*)", "Bash(mochi-drive read:*)", "Bash(mochi-drive sheet:*)", "Bash(mochi-drive download:*)",
     "Bash(mochi-drive log:*)",
+    # their calendars (brain/mochi_calendar.py: reading only here) and contacts (brain/mochi_contacts.py: read-only;
+    # its cache lives in the workspace), in both Google accounts
+    "Bash(mochi-calendar calendars:*)", "Bash(mochi-calendar agenda:*)", "Bash(mochi-calendar search:*)",
+    "Bash(mochi-calendar show:*)", "Bash(mochi-calendar log:*)", "Bash(mochi-contacts:*)", "Bash(mochi-google accounts)",
     "mcp__claude_ai_Gmail__search_threads", "mcp__claude_ai_Gmail__get_thread",
     "mcp__claude_ai_Gmail__get_message", "mcp__claude_ai_Gmail__list_labels",
     "mcp__claude_ai_Gmail__list_drafts", "mcp__claude_ai_Gmail__get_draft",
@@ -175,8 +179,8 @@ SEND_TOOLS = ["Bash(mochi-mail:*)", "Bash(msmtp:*)"]
 # and cannot delete; CLAUDE.md "Their tasks" says when a round may add or tick off on its own.
 TASK_TOOLS = ["Bash(mochi-tasks:*)"]
 # Changing their Drive (create, append, replace, write cells, rename, move) through mochi-drive, which logs every change
-# and cannot trash, delete or share. Their documents are their work: only runs they asked for or approved.
-DRIVE_CHANGE_TOOLS = ["Bash(mochi-drive:*)"]
+# and cannot trash, delete or share; likewise their calendars through mochi-calendar (no delete). Their documents are their work: only runs they asked for or approved.
+DRIVE_CHANGE_TOOLS = ["Bash(mochi-drive:*)", "Bash(mochi-calendar:*)"]  # and their calendars: add, edit, respond
 # A text message from their phone (brain/mochi_sms.py → kdeconnect-cli --send-sms). Same footing as mail: allowed in
 # every run, CLAUDE.md "Their texts" says when a round may send on its own, every send is logged (mochi-sms log).
 SMS_SEND_TOOLS = ["Bash(mochi-sms send:*)"]

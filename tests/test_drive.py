@@ -4,7 +4,6 @@ Run: python3 -m unittest discover -s tests   (or `make test`)."""
 
 import importlib.machinery
 import importlib.util
-import json
 import os
 import tempfile
 import unittest
@@ -73,25 +72,7 @@ class Lines(unittest.TestCase):
         self.assertEqual(md.tab_range("Bob's tab"), "'Bob''s tab'")
 
 
-class Accounts(unittest.TestCase):
-    def setUp(self):
-        md.CONFIG.parent.mkdir(parents=True, exist_ok=True)
-
-    def test_from_mail_accounts(self):
-        md.CONFIG.write_text(json.dumps({"mail": {"accounts": {"artem": "a@x", "nuxdie": "n@y"}}}))
-        accounts, client = md.conf()
-        self.assertEqual(accounts, {"artem": "a@x", "nuxdie": "n@y"})
-        self.assertEqual(client, md.CONF_DIR / "google-oauth-client.json")
-        self.assertEqual(md.signed_in(), [])
-        md.token_path("nuxdie").write_text("{}")
-        self.assertEqual(md.signed_in(), ["nuxdie"])
-        md.token_path("nuxdie").unlink()
-
-    def test_drive_overrides(self):
-        md.CONFIG.write_text(json.dumps({"mail": {"accounts": {"artem": "a@x"}},
-                                         "drive": {"accounts": {"work": "w@z"}, "client_file": "/tmp/c.json"}}))
-        self.assertEqual(md.conf(), ({"work": "w@z"}, Path("/tmp/c.json")))
-
+class Rows(unittest.TestCase):
     def test_rows_arg(self):
         class A:
             csv = None
