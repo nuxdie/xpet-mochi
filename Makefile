@@ -27,6 +27,7 @@ install: xpet
 	install -Dm755 brain/mochi_sms.py $(PREFIX)/bin/mochi-sms
 	install -Dm755 brain/mochi_phone.py $(PREFIX)/bin/mochi-phone
 	install -Dm755 brain/mochi_desk.py $(PREFIX)/bin/mochi-desk
+	install -Dm755 brain/mochi_tg.py $(PREFIX)/bin/mochi-tg
 	install -Dm644 brain/CLAUDE.md $(MOCHI_HOME)/CLAUDE.md
 	mkdir -p $(HOME)/.config/mochi && echo "$(CURDIR)" > $(HOME)/.config/mochi/xpet-repo  # where mochi-workshop finds the repo
 
@@ -34,7 +35,7 @@ install: xpet
 TOOLS ?= $(HOME)/.local/share/mochi-tools
 tools:
 	python3 -m venv $(TOOLS)
-	$(TOOLS)/bin/pip install -q -U yt-dlp faster-whisper  # and the transcriber for the phone's and the desk's clips
+	$(TOOLS)/bin/pip install -q -U yt-dlp faster-whisper telethon  # the transcriber for the phone's and the desk's clips; Telegram as them (mochi-tg)
 
 # Start at login and keep running (see README).
 install-autostart: install

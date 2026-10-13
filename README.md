@@ -117,7 +117,25 @@ mochi-brain --status      # the pig says what it's up to
 mochi-brain --seen        # Mochi's journal for the last two days
 mochi-brain --report      # open the latest report
 mochi-brain --log         # the relay's recent log
+mochi-brain --denials     # tools Mochi's runs reached for and were refused (the allow-list audit, kept by the relay)
+mochi-brain --week        # the relay's numbers for last week (what the week note is built on)
 ```
+
+**Results are one line.** When you ask Mochi for something, or say yes to an offer, the answer is one line in the
+pig's bubble (and a message on your phone if you're away or asked from there); the full write-up is filed under
+`reports/` and listed in the menu's **Recent...**, where "Show me" and "Chat about it" still work. There is no
+"done" question to dismiss any more: a finished task raises an ask only when a real next step needs you.
+
+**Nights.** While you're away between 02:00 and 10:00 nothing starts on the clock: no light rounds, no catch-ups (new
+messages wait for the morning round), no plain triggers. Mochi's own watches still wake it, as do urgent triggers and
+the night's own runs (dream, workshop, study). The morning brief is written in the first round at or after 09:00.
+Presence comes from real input (XInput2 raw key, button and pointer events), not from X's screensaver counter, which
+any player or game resets with XResetScreenSaver: that kept the relay believing you were at the desk all night on
+2026-10-12/13 and cost 15 empty rounds. When the two disagree the relay logs it once an hour, so the culprit can be found.
+
+**The week note.** In the first dream after a week ends, Mochi writes `reports/week-YYYY-Www.md`, a short letter: what
+it took off your plate, what it got wrong, what it is carrying for you, what it would need to do more, and the relay's
+numbers for the week. It waits behind the dot like a brief. It is the one report a dream may raise.
 
 Everything the relay does is appended to `~/.local/share/mochi/actions.log`; everything Mochi thought is in its
 journal and in the Claude Code transcripts for that directory.
@@ -203,6 +221,23 @@ reply to one of Mochi's questions, it arrives as that answer. The other way, a r
 `files` to its answer and they reach your phone at once; a round cannot push files, its files wait behind the dot and
 "Show me" delivers them, on screen or to the phone. A report can be a PDF or a picture too. From a shell or a chat:
 `mochi-telegram file PATH... [--caption TEXT] [--photo]`. Limits are Telegram's: 50 MB out, 20 MB in.
+
+### Telegram as you (mochi-tg)
+
+The bot is Mochi's own voice. `brain/mochi_tg.py` (installed as `mochi-tg`) is yours: it sends a Telegram message
+from *your* account, in your name, after you allow that one message on your phone (the bot shows the recipient and the
+text with **Send it** / **Deny**; no tap, no message). It exists because for a week Mochi could only hand you lines to
+paste ("ask Nastya where the contract is"). Setup once: your API id and hash in `~/.config/mochi/telegram-api.json`
+(the Telegram archive's own pair was copied there), Telethon in the tools venv (`make tools`), then `mochi-tg auth`:
+your phone number, the code Telegram sends you, your two-step password if you have one. The session lives in
+`~/.config/mochi/telegram-user.session`.
+
+`mochi-tg status`, `mochi-tg dialogs [QUERY]` (your chats with the archive's ids), `mochi-tg send WHO "TEXT" [--why
+TEXT] [--reply-to ID] [--dry-run]`, `mochi-tg log`. The relay allows `send` only in runs you asked for or approved,
+rations the questions (15 a day), and the brief's rule is the mail rule: only what you asked for, in your voice, never
+money or commitments, never to a channel or a bot. `auth` and `logout` are on the never-list. The same trade as the
+vault's "remember": the session file is readable by anything running as you, so the tap guards against mistakes, not
+against a run set on getting around it.
 
 ### Your phone (the app)
 
