@@ -23,6 +23,7 @@ sender's static key mixed in (the receiver knows who sealed it). The relay token
   mochi-phone media [--days N]   the pictures and clips that came back, with transcripts
   mochi-phone transcribe FILE    (what `serve` does for clips: faster-whisper in Mochi's tools venv)
   mochi-phone log                what was sent
+  mochi-phone tracks [--dry-run] each finished outing as a GPX into wanderer on sff (Uber Eats shifts as Biking)
   mochi-phone place NAME [--here | LAT LON] [--radius M] | place --list   named places ("home" first): the zones
 
 Config: ~/.config/mochi/phone.json (relay, tokens, keys, home). Data: ~/.local/share/mochi/phone/.
@@ -791,10 +792,130 @@ def positional(args):
     return out
 
 
+# ---- tracks: every outing as a GPX in their wanderer on sff ("fill in all my movements", 2026-10-14) -----------
+
+TRACKS = DATA / "tracks"                  # the GPX files as written, kept here too
+TRACKS_STATE = DATA / "tracks.json"       # {"sent": [outing ids]}
+TRACKS_DROP = "n@sff.local:wanderer/phone-drop/"  # wanderer's watched upload folder for their account (token-named)
+TRACKS_KEY = Path.home() / ".ssh/mochi_ed25519"
+TRACK_MAX_ACC = 150                       # metres; a rougher fix is noise on a map
+TRACK_MIN_LEN = 300                       # metres; shorter is the bins, or GPS drifting at the door
+
+
+def outings(cfg):
+    """Each trip out of home and back, as a list of fixes from the last one at home to the first one home again.
+    Only finished trips: one still under way waits for the next run."""
+    fixes = []
+    for line in EVENTS.open() if EVENTS.exists() else []:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "loc" and ev.get("lat") is not None and (ev.get("acc") or 0) <= TRACK_MAX_ACC:
+            fixes.append(ev)
+    fixes.sort(key=lambda e: e.get("t", 0))
+    trips, cur, last_home = [], None, None
+    for ev in fixes:
+        home = zone_of(cfg, ev["lat"], ev["lon"], ev.get("acc")) == "home"
+        if cur is None:
+            if home:
+                last_home = ev
+            else:
+                cur = ([last_home] if last_home else []) + [ev]
+        elif home:
+            cur.append(ev)
+            trips.append(cur)
+            cur, last_home = None, ev
+        else:
+            cur.append(ev)
+    return [t for t in trips if sum(distance_m(a["lat"], a["lon"], b["lat"], b["lon"]) for a, b in zip(t, t[1:]))
+            >= TRACK_MIN_LEN]
+
+
+def gpx(trip, name):
+    def iso(t):
+        return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pts = "\n".join(f'      <trkpt lat="{e["lat"]:.6f}" lon="{e["lon"]:.6f}">'
+                    + (f'<ele>{e["alt"]:.0f}</ele>' if e.get("alt") is not None else "")
+                    + f'<time>{iso(e["t"])}</time></trkpt>' for e in trip)
+    return (f'<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="mochi-phone" '
+            f'xmlns="http://www.topografix.com/GPX/1/1">\n  <metadata><name>{name}</name><time>{iso(trip[0]["t"])}'
+            f'</time></metadata>\n  <trk><name>{name}</name><type>walking</type>\n    <trkseg>\n{pts}\n    </trkseg>\n'
+            f'  </trk>\n</gpx>\n')
+
+
+UBER_APP = "com.ubercab.driver"          # a notification from it during an outing: the outing was a courier shift
+TRACKS_FIX = ["ssh", "-i", str(TRACKS_KEY), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=10",
+              "n@sff.local", "wanderer/fix-trails.sh"]  # names and categories after import (the upload can't set them)
+
+
+def uber_times():
+    out = []
+    for line in EVENTS.open() if EVENTS.exists() else []:
+        if UBER_APP in line:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") == "notif" and ev.get("app") == UBER_APP:
+                out.append(ev.get("t", 0))
+    return out
+
+
+def tracks(args):
+    """mochi-phone tracks [--dry-run]: write each finished outing not sent yet as a GPX and copy it into wanderer's
+    upload folder on sff, which imports it as a trail of theirs; then name and categorise what was imported (an
+    Uber Eats shift is Biking, the rest Walking). Run by mochi-tracks.timer."""
+    dry = "--dry-run" in args
+    st = jload(TRACKS_STATE, {"sent": []})
+    st.setdefault("fix", [])
+    uber = uber_times()
+    new = []
+    for trip in outings(load_config()):
+        oid = str(trip[0]["t"])
+        if oid in st["sent"]:
+            continue
+        t0, t1 = trip[0]["t"], trip[-1]["t"]
+        shift = any(t0 - 3600 <= u <= t1 for u in uber)  # the check-in reminder comes an hour before the shift
+        start = dt.datetime.fromtimestamp(t0)
+        name = (f"{'Uber Eats shift' if shift else 'Out'} {start:%a %-d %b %H:%M}"
+                f"–{dt.datetime.fromtimestamp(t1):%H:%M}")
+        TRACKS.mkdir(parents=True, exist_ok=True)
+        path = TRACKS / f"{start:%Y%m%d-%H%M}.gpx"
+        path.write_text(gpx(trip, name))
+        new.append((oid, path, name, len(trip), "Biking" if shift else "Walking"))
+    if dry:
+        return "\n".join(f"would send {p.name}: {n} ({k} fixes, {c})" for _, p, n, k, c in new) or "no new outings"
+    lines = []
+    if new:
+        p = subprocess.run(["scp", "-q", "-i", str(TRACKS_KEY), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+                            "-o", "ConnectTimeout=10"] + [str(x[1]) for x in new] + [TRACKS_DROP],
+                           capture_output=True, text=True, timeout=120)
+        if p.returncode:
+            return f"couldn't reach sff ({p.stderr.strip()[:200]}); {len(new)} outings wait for the next run"
+        st["sent"] = (st["sent"] + [x[0] for x in new])[-5000:]
+        st["fix"] += [[n, n, c, int(time.time())] for _, _, n, _, c in new]
+        jsave(TRACKS_STATE, st)
+        lines += [f"sent {pth.name}: {n} ({k} fixes, {c})" for _, pth, n, k, c in new]
+        time.sleep(15)  # the watcher waits for the file to settle, then imports
+    if st["fix"]:
+        try:
+            p = subprocess.run(TRACKS_FIX, input=json.dumps([f[:3] for f in st["fix"]]), capture_output=True, text=True,
+                               timeout=120)
+            r = json.loads(p.stdout.strip().splitlines()[-1])
+            # not imported yet: try again next run, for a day
+            st["fix"] = [f for f in st["fix"] if f[0] in r.get("missing", []) and time.time() - f[3] < 86400]
+            jsave(TRACKS_STATE, st)
+            lines.append(f"named {r.get('done', 0)}" + (f", {len(st['fix'])} not imported yet" if st["fix"] else ""))
+        except (OSError, subprocess.TimeoutExpired, ValueError, IndexError) as e:
+            lines.append(f"naming waits for the next run ({str(e)[:120]})")
+    return "\n".join(lines) or "no new outings"
+
+
 def main(argv):
     cmds = {"pair": pair, "serve": serve, "where": where, "status": status, "events": events, "send": send, "place": place,
             "now": now, "notifs": notifs, "calls": calls, "sms": sms, "usage": usage, "digest": digest, "feed": feed,
-            "media": media, "transcribe": transcribe,
+            "media": media, "transcribe": transcribe, "tracks": tracks,
             "log": lambda a: print(SENT.read_text() if SENT.exists() else "nothing sent yet")}
     if len(argv) < 2 or argv[1] not in cmds:
         print(__doc__.strip())

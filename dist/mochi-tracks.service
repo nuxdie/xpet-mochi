@@ -1,0 +1,8 @@
+[Unit]
+Description=Mochi tracks: each finished outing from their phone as a GPX into wanderer on sff
+
+[Service]
+Type=oneshot
+Nice=10
+TimeoutStartSec=5min
+ExecStart=%h/.local/bin/mochi-phone tracks

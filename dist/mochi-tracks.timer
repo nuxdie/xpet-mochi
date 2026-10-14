@@ -1,0 +1,11 @@
+[Unit]
+Description=Send finished outings to wanderer on sff every half hour
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+RandomizedDelaySec=2min
+Unit=mochi-tracks.service
+
+[Install]
+WantedBy=timers.target
