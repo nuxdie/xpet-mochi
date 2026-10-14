@@ -1,0 +1,11 @@
+[Unit]
+Description=Mochi's box (peppy): its Chrome's debugging port on localhost:9334 and its screen on localhost:5934
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -N -i %h/.ssh/mochi_ed25519 -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -L 127.0.0.1:9334:127.0.0.1:9334 -L 127.0.0.1:5934:127.0.0.1:5900 mochi@peppy.local
+Restart=always
+RestartSec=20
+
+[Install]
+WantedBy=default.target

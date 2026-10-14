@@ -42,7 +42,7 @@ tools:
 install-autostart: install
 	install -Dm644 dist/xpet.service dist/mochi-brain.service dist/mochi-mail.service dist/mochi-mail.timer \
 		dist/mochi-archive.service dist/mochi-archive.timer \
-		dist/mochi-nas-index.service dist/mochi-nas-index.timer dist/mochi-vault.service dist/mochi-phone.service -t $(HOME)/.config/systemd/user
+		dist/mochi-nas-index.service dist/mochi-nas-index.timer dist/mochi-vault.service dist/mochi-phone.service dist/mochi-box-tunnel.service -t $(HOME)/.config/systemd/user
 	install -Dm644 dist/xpet.desktop -t $(HOME)/.config/autostart
 	systemctl --user daemon-reload
 

@@ -12,6 +12,14 @@
   mochi-box get REMOTE [PATH]           copy a file or folder from there into the workspace (default box/files/)
   mochi-box status                      up or not, uptime, load, memory, disk, battery
   mochi-box log [N]                     the last N commands sent (default 20)
+  mochi-box browser                     its Chrome: reachable or not, the open tabs, on their screen or not
+  mochi-box show [URL]                  put the box's screen on theirs (a VNC window), e.g. for a captcha; URL opens a tab
+  mochi-box hide                        take it off their screen again
+
+The box's Chrome (its own profile, ~/.local/share/mochi-chrome there) runs on its real screen as the user service
+mochi-chrome, its debugging port on the box's localhost:9334; x11vnc (mochi-vnc) shares that screen on the box's
+localhost:5900. mochi-box-tunnel.service on this machine forwards both to localhost:9334 and localhost:5934, and the
+relay hands runs a second chrome-devtools-mcp server, "peppy", attached to it (mcp__peppy__* tools).
 
 Everything sent is logged in ~/.local/share/mochi/box/log.jsonl. Config (optional): ~/.config/mochi/box.json
 {"host": "mochi@peppy.local", "key": "~/.ssh/mochi_ed25519"}. The box holds none of their keys or passwords:
@@ -32,6 +40,10 @@ DATA = WORK / "box"
 LOG = DATA / "log.jsonl"
 FILES = DATA / "files"
 DEFAULT_TIMEOUT = 540  # under the Bash tool's 10-minute ceiling; longer work is a spawn
+BROWSER_PORT = 9334  # the box's Chrome, forwarded here by mochi-box-tunnel.service
+VNC_PORT = 5934      # the box's screen, likewise
+VIEWER = DATA / "viewer.pid"
+MCP_FILE = WORK / "mcp-peppy.json"
 
 
 def cfg():
@@ -94,6 +106,50 @@ def inside(path, root):
         return True
     except ValueError:
         return False
+
+
+def cdp(path, method="GET"):
+    """The box's Chrome's HTTP endpoint (through the tunnel); parsed JSON or None."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{BROWSER_PORT}{path}", method=method)
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return json.loads(r.read() or b"null")
+    except (OSError, ValueError):
+        return None
+
+
+def browser_up():
+    return cdp("/json/version") is not None
+
+
+def write_mcp_config(chrome_entry):
+    """Given the desk Chrome's MCP server entry (mochi-browser's), write one for the box's Chrome as server "peppy" and
+    return the path; None when the box's Chrome isn't reachable (off, away, tunnel down) so a run doesn't wait on it."""
+    if not chrome_entry or not browser_up():
+        return None
+    args, out, i = chrome_entry.get("args", []), [], 0
+    while i < len(args):  # drop how the desk one is reached and its viewport: the box's window is a real one
+        if args[i] in ("--browser-url", "--user-data-dir", "--executable-path", "--viewport"):
+            i += 2
+            continue
+        if args[i] != "--headless":
+            out.append(args[i])
+        i += 1
+    entry = dict(chrome_entry, args=["--browser-url", f"http://127.0.0.1:{BROWSER_PORT}"] + out)
+    tmp = MCP_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"mcpServers": {"peppy": entry}}, indent=1))
+    tmp.replace(MCP_FILE)
+    return MCP_FILE
+
+
+def viewer_pid():
+    try:
+        pid = int(VIEWER.read_text())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
 
 
 def main():
@@ -194,6 +250,46 @@ def main():
             e = json.loads(ln)
             print(time.strftime("%m-%d %H:%M", time.localtime(e["t"])), e["kind"], f"rc={e['rc']}",
                   f"{e['s']}s", e["cmd"][:200])
+        return 0
+
+    if verb == "browser":
+        v = cdp("/json/version")
+        if not v:
+            print(f"the box's Chrome isn't reachable on localhost:{BROWSER_PORT} "
+                  "(box off or away, mochi-box-tunnel not running, or mochi-chrome down there)")
+            return 1
+        tabs = [t for t in cdp("/json/list") or [] if t.get("type") == "page"]
+        print(f"{v.get('Browser')} on the box's screen; {'on their screen' if viewer_pid() else 'not on their screen'}")
+        for t in tabs:
+            print(f"  {t.get('title', '')[:60]}  {t.get('url', '')[:100]}")
+        return 0
+
+    if verb == "show":
+        if args:
+            from urllib.parse import quote
+            if cdp("/json/new?" + quote(args[0], safe=":/?&=%#+@,;~"), method="PUT") is None:
+                sys.exit("the box's Chrome isn't reachable (mochi-box browser)")
+            log("show", args[0], 0, 0)
+        if viewer_pid():
+            return 0
+        if not os.environ.get("DISPLAY"):
+            sys.exit("no DISPLAY here to show the box's screen on")
+        DATA.mkdir(parents=True, exist_ok=True)
+        p = subprocess.Popen(["vncviewer", "-Shared", "-RemoteResize=0", "-SecurityTypes", "None",
+                              f"127.0.0.1::{VNC_PORT}"], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2)
+        if p.poll() is not None:
+            sys.exit(f"the viewer didn't stay up (is mochi-vnc running on the box and the tunnel up?)")
+        VIEWER.write_text(str(p.pid))
+        print("the box's screen is on theirs (mochi-box hide takes it off)")
+        return 0
+
+    if verb == "hide":
+        pid = viewer_pid()
+        if pid:
+            os.kill(pid, 15)
+        VIEWER.unlink(missing_ok=True)
         return 0
 
     sys.exit(f"unknown: {verb} (mochi-box help)")

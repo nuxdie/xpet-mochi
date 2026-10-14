@@ -216,6 +216,10 @@ BROWSE_TOOLS = ["mcp__chrome__" + t for t in (
 BROWSE_ACT_TOOLS = ["mcp__chrome__" + t for t in (
     "fill", "fill_form", "type_text", "upload_file", "drag", "handle_dialog", "evaluate_script", "get_css_styles",
     "lighthouse_audit")]
+# The second Chrome, on Mochi's box (peppy's real screen and GPU; sites that turn the desk one away let this one in).
+# Same split: a round looks and clicks, typing waits for a yes. mochi-box show/hide come with BOX_TOOLS.
+BROWSE_TOOLS += [t.replace("mcp__chrome__", "mcp__peppy__") for t in BROWSE_TOOLS if t.startswith("mcp__chrome__")]
+BROWSE_ACT_TOOLS += [t.replace("mcp__chrome__", "mcp__peppy__") for t in BROWSE_ACT_TOOLS]
 # Their Bitwarden logins, through mochi-vault (brain/mochi_vault.py): Mochi names a tab, the vault asks them on the
 # phone, fills and submits; the password never passes through the run. Only runs they asked for or approved.
 VAULT_TOOLS = ["Bash(mochi-vault fill:*)", "Bash(mochi-vault status)", "Bash(mochi-vault has:*)"]
@@ -492,6 +496,7 @@ def load_sibling(name, exe):
 TG = load_sibling("mochi_telegram", "mochi-telegram")
 WS = load_sibling("mochi_workshop", "mochi-workshop")  # Mochi's workshop: its worktree of xpet, build, deploy
 BROWSER = load_sibling("mochi_browser", "mochi-browser")  # Mochi's own Chrome, as an MCP server per run
+BOX = load_sibling("mochi_box", "mochi-box")  # Mochi's own computer; its Chrome is a second MCP server
 
 
 def now():
@@ -760,7 +765,14 @@ def browser_args(headed):
     except Exception as e:
         log(f"browser: no config ({e})")
         return []
-    return ["--mcp-config", str(path)] if path else []
+    paths = [str(path)] if path else []
+    try:  # the box's Chrome (peppy's real screen and GPU), when the box is up: mcp__peppy__*
+        box = BOX and BOX.write_mcp_config((BROWSER.mcp_config(headed) or {}).get("mcpServers", {}).get("chrome"))
+        if box:
+            paths.append(str(box))
+    except Exception as e:
+        log(f"browser: no box config ({e})")
+    return ["--mcp-config"] + paths if paths else []
 
 
 def notify(text):
