@@ -70,9 +70,14 @@ MAX_ROUNDS_PER_DAY = 24
 AWAY_AFTER = 10 * 60         # idle this long = away: no rounds
 LONG_BREAK = 2 * 3600        # away this long = a round when you're back, even if one isn't due
 AWAY_ROUND_EVERY = 2 * 3600  # while you're away and the Telegram bot is set up: a light round this often
+NIGHT_HOURS = (2, 10)        # away in this window = asleep: nothing starts on the clock (no light rounds, no catch-ups);
+                             # only a watch of Mochi's, an urgent trigger, or the night's own runs (dream, workshop, study)
+BRIEF_FROM = 9               # the morning brief is written in the first round at or after this hour, never at midnight
 TG_AUDIBLE_PER_DAY = 3       # Telegram messages that may buzz your phone per day; the rest arrive silently
 TG_QUIET_HOURS = (23, 8)     # nothing buzzes between these hours, except an urgent say
 VAULT_ASKS_PER_DAY = 20      # mochi-vault sign-in questions on the phone per day (each one is a tap they owe)
+TG_SEND_ASKS_PER_DAY = 15    # mochi-tg "send this as you?" questions on the phone per day (the same kind of tap)
+DENIALS_KEEP = 200           # tools a run reached for and was refused, remembered for `mochi-brain --denials`
 VAULT_LEASE_MINUTES = 10     # what an Allow covers (mochi-vault's LEASE_MINUTES; only the wording here)
 ROUND_MODEL = "sonnet"
 TASK_MODEL = None            # things you asked for or approved: the default model
@@ -145,6 +150,30 @@ READ_TOOLS = [
     "Bash(dirname:*)", "Bash(realpath:*)", "Bash(test:*)", "Bash(true)", "Bash(pwd)", "Bash(env)", "Bash(id)",
     "Bash(mochi-sense:*)", "Bash(ping:*)", "Bash(tailscale status:*)", "Bash(kdeconnect-cli -l:*)",
     "Bash(getent hosts:*)", "Bash(avahi-browse:*)",
+    # seen refused in rounds and harmless (`mochi-brain --denials` keeps the list current)
+    "Bash(systemctl --user list-timers:*)", "Bash(systemctl list-units:*)", "Bash(systemctl --user list-units:*)",
+    "Bash(pdftotext:*)", "Bash(notmuch search:*)", "Bash(notmuch show:*)", "Bash(notmuch count:*)",
+    "Bash(notmuch address:*)", "Bash(jq:*)", "Bash(column:*)", "Bash(nl:*)", "Bash(diff:*)", "Bash(sha256sum:*)",
+    # Telegram as them (brain/mochi_tg.py): who they can write to, and what went out; sending is approved-only
+    "Bash(mochi-tg status)", "Bash(mochi-tg dialogs:*)", "Bash(mochi-tg log:*)",
+    # their text messages through KDE Connect (brain/mochi_sms.py): reading never changes anything on the phone
+    "Bash(mochi-sms status)", "Bash(mochi-sms threads:*)", "Bash(mochi-sms read:*)", "Bash(mochi-sms recent:*)",
+    "Bash(mochi-sms unread)", "Bash(mochi-sms search:*)", "Bash(mochi-sms sync:*)", "Bash(mochi-sms contacts:*)",
+    "Bash(mochi-sms log:*)",
+    # their phone (mochi-phone): where they are, and a fresh fix on request
+    "Bash(mochi-phone where:*)", "Bash(mochi-phone status)", "Bash(mochi-phone events:*)", "Bash(mochi-phone log)",
+    "Bash(mochi-phone send locate)", "Bash(mochi-phone now)", "Bash(mochi-phone notifs:*)", "Bash(mochi-phone calls:*)",
+    "Bash(mochi-phone sms:*)", "Bash(mochi-phone usage:*)", "Bash(mochi-phone digest)", "Bash(mochi-phone media:*)",
+    "Bash(mochi-desk media:*)", "Bash(mochi-desk status)",
+    # their Google Drive, Docs and Sheets in both accounts (brain/mochi_drive.py): reading changes nothing; download
+    # writes only into the workspace's drive/
+    "Bash(mochi-drive accounts)", "Bash(mochi-drive search:*)", "Bash(mochi-drive recent:*)", "Bash(mochi-drive ls:*)",
+    "Bash(mochi-drive info:*)", "Bash(mochi-drive read:*)", "Bash(mochi-drive sheet:*)", "Bash(mochi-drive download:*)",
+    "Bash(mochi-drive log:*)",
+    # their calendars (brain/mochi_calendar.py: reading only here) and contacts (brain/mochi_contacts.py: read-only;
+    # its cache lives in the workspace), in both Google accounts
+    "Bash(mochi-calendar calendars:*)", "Bash(mochi-calendar agenda:*)", "Bash(mochi-calendar search:*)",
+    "Bash(mochi-calendar show:*)", "Bash(mochi-calendar log:*)", "Bash(mochi-contacts:*)", "Bash(mochi-google accounts)",
     "mcp__claude_ai_Gmail__search_threads", "mcp__claude_ai_Gmail__get_thread",
     "mcp__claude_ai_Gmail__get_message", "mcp__claude_ai_Gmail__list_labels",
     "mcp__claude_ai_Gmail__list_drafts", "mcp__claude_ai_Gmail__get_draft",
@@ -165,32 +194,57 @@ SEND_TOOLS = ["Bash(mochi-mail:*)", "Bash(msmtp:*)"]
 # Their Google Tasks (brain/mochi_tasks.py). Reading and writing go through the one command, which logs every change
 # and cannot delete; CLAUDE.md "Their tasks" says when a round may add or tick off on its own.
 TASK_TOOLS = ["Bash(mochi-tasks:*)"]
+# Changing their Drive (create, append, replace, write cells, rename, move) through mochi-drive, which logs every change
+# and cannot trash, delete or share; likewise their calendars through mochi-calendar (no delete). Their documents are their work: only runs they asked for or approved.
+DRIVE_CHANGE_TOOLS = ["Bash(mochi-drive:*)", "Bash(mochi-calendar:*)"]  # and their calendars: add, edit, respond
+# A text message from their phone (brain/mochi_sms.py → kdeconnect-cli --send-sms). Same footing as mail: allowed in
+# every run, CLAUDE.md "Their texts" says when a round may send on its own, every send is logged (mochi-sms log).
+SMS_SEND_TOOLS = ["Bash(mochi-sms send:*)", "Bash(mochi-phone send buzz:*)"]  # and a buzz on their phone: the urgent bar
+
+# The phone's camera and microphone, and this machine's camera, microphone and screen: a still, a clip, a screenshot,
+# only in a run they asked for (CLAUDE.md "Their phone", "This machine's eyes and ears").
+PHONE_CAPTURE_TOOLS = ["Bash(mochi-phone send photo:*)", "Bash(mochi-phone send audio:*)",
+                       "Bash(mochi-desk photo:*)", "Bash(mochi-desk audio:*)", "Bash(mochi-desk screen:*)"]
 # Mochi's own Chrome (brain/mochi_browser.py → chrome-devtools-mcp, server name "chrome"). A round may look: open
 # pages, read them (snapshot), screenshot, click around. Typing into forms, uploads and running scripts on a page
 # change things in the world, so they wait for a YES or a chat.
 BROWSE_TOOLS = ["mcp__chrome__" + t for t in (
     "navigate_page", "new_page", "list_pages", "select_page", "close_page", "take_snapshot", "take_screenshot",
-    "wait_for", "click", "hover", "press_key", "list_console_messages", "get_console_message")]
+    "wait_for", "click", "hover", "press_key", "list_console_messages", "get_console_message")] + [
+    # The Chrome runs hidden (a nested X display); these put it on their screen when a page needs them and take it off.
+    "Bash(mochi-browser show:*)", "Bash(mochi-browser hide)", "Bash(mochi-browser status)"]
 BROWSE_ACT_TOOLS = ["mcp__chrome__" + t for t in (
     "fill", "fill_form", "type_text", "upload_file", "drag", "handle_dialog", "evaluate_script", "get_css_styles",
     "lighthouse_audit")]
 # Their Bitwarden logins, through mochi-vault (brain/mochi_vault.py): Mochi names a tab, the vault asks them on the
 # phone, fills and submits; the password never passes through the run. Only runs they asked for or approved.
 VAULT_TOOLS = ["Bash(mochi-vault fill:*)", "Bash(mochi-vault status)", "Bash(mochi-vault has:*)"]
-CHANGE_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash", "mcp__claude_ai_Google_Calendar__create_event",
-                "mcp__claude_ai_Google_Calendar__update_event", "mcp__claude_ai_Google_Drive__create_file",
-                "mcp__claude_ai_Google_Drive__update_file", "mcp__claude_ai_Google_Drive__copy_file"]
+# A Telegram message in their name, from their own account, through mochi-tg (brain/mochi_tg.py): every send is a
+# question on their phone first (Send / Deny), like a vault fill, and is logged. Only runs they asked for or approved.
+TG_SEND_TOOLS = ["Bash(mochi-tg send:*)"]
+# Their calendars and Drive change through mochi-calendar and mochi-drive (both accounts, logged); the claude.ai
+# connectors' write tools saw one account only and are in NEVER so a run reaches for the right door at once.
+CHANGE_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash"]
 NEVER = [  # denied at every level, including things you approved
     "Bash(sudo:*)", "Bash(su:*)", "Bash(pkexec:*)", "Bash(rm -rf:*)", "Bash(rm -fr:*)",
     "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git reset --hard:*)", "Bash(git clean:*)",
     "Bash(dd:*)", "Bash(mkfs:*)", "Bash(shutdown:*)", "Bash(reboot:*)", "Bash(crontab:*)",
     "Bash(bw:*)", "Bash(mochi-vault unlock:*)", "Bash(mochi-vault serve:*)",  # the vault is theirs to open
     "Bash(mochi-vault remember:*)", "Bash(mochi-vault forget:*)", "Bash(secret-tool:*)",
+    "Bash(mochi-tg auth:*)", "Bash(mochi-tg logout:*)",  # their Telegram account is theirs to sign in to
     "mcp__claude_ai_Gmail__send_message", "mcp__claude_ai_Gmail__reply", "mcp__claude_ai_Gmail__forward",
     "mcp__claude_ai_Gmail__trash_message", "mcp__claude_ai_Gmail__trash_thread",
     "mcp__claude_ai_Gmail__delete_draft", "mcp__claude_ai_Gmail__mark_message_spam",
     "mcp__claude_ai_Gmail__mark_thread_spam", "mcp__claude_ai_Google_Drive__trash_file",
     "mcp__claude_ai_Google_Drive__share_file", "mcp__claude_ai_Google_Calendar__delete_event",
+    # archiving is `mochi-mail archive` (IMAP, logged, undoable); the connector's label tools were refused 17 times
+    # in runs before that existed, and would still not log
+    "mcp__claude_ai_Gmail__label_thread", "mcp__claude_ai_Gmail__unlabel_thread", "mcp__claude_ai_Gmail__label_message",
+    "mcp__claude_ai_Gmail__unlabel_message", "mcp__claude_ai_Gmail__update_message_labels",
+    # calendar and Drive changes go through mochi-calendar / mochi-drive (both accounts; these saw only artem@)
+    "mcp__claude_ai_Google_Calendar__create_event", "mcp__claude_ai_Google_Calendar__update_event",
+    "mcp__claude_ai_Google_Calendar__respond_to_event", "mcp__claude_ai_Google_Drive__create_file",
+    "mcp__claude_ai_Google_Drive__update_file", "mcp__claude_ai_Google_Drive__copy_file",
 ]
 # The workshop: Mochi's own worktree of the xpet repo (mochi-workshop). It may edit the pig's C++ and its render
 # test there and build, test and preview it; the relay gates, commits and deploys (brain/mochi_workshop.py).
@@ -198,11 +252,12 @@ WORKSHOP_TOOLS = ["Edit(workshop/xpet/src/**)", "Write(workshop/xpet/src/**)", "
                   "Write(workshop/xpet/tests/**)", "Bash(mochi-workshop build:*)", "Bash(mochi-workshop test:*)",
                   "Bash(mochi-workshop preview:*)", "Bash(mochi-workshop diff:*)", "Bash(mochi-workshop status:*)"]
 LEVELS = {
-    "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + BROWSE_TOOLS,
+    "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + BROWSE_TOOLS,
     "dream": READ_TOOLS + OWN_FILES,  # reads and rewrites its own notes; no mail, no browser
     "workshop": READ_TOOLS + OWN_FILES + WORKSHOP_TOOLS,  # its notes and its own body; nothing else
-    "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS
-                + VAULT_TOOLS,
+    "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS
+                + PHONE_CAPTURE_TOOLS
+                + VAULT_TOOLS + DRIVE_CHANGE_TOOLS + TG_SEND_TOOLS,
 }
 
 BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}\n```'
@@ -212,6 +267,8 @@ OWN_WORK = ("round", "catchup", "discover", "dream", "study", "workshop")  # Moc
 OFFER_OPTIONS = ["Yes, do it", "Not now", "Never", "Chat about it"]
 REPORT_OPTIONS = ["Show me", "Chat about it", "Dismiss"]
 CHAT = "Chat about it"
+HISTORY_KEEP = 40  # closed asks remembered for Recent...
+HISTORY_SHOWN = 12
 CLOSERS = {"not now", "never", "dismiss", "later", "ok", "no", "no thanks", "skip"}  # answered, nothing to run
 
 ROUND_PROMPT = """It's {now}. Do a round, as CLAUDE.md describes ({reason}).
@@ -279,10 +336,13 @@ relay saw and did, which asks they answered and how), reports you wrote, then al
    yet, write that file: the week in under 30 lines, what happened, what you did, what you learned. The relay deletes
    a day's journal {keep} days after its week is folded, so nothing worth keeping may live only in a day file.
 4. **Tune yourself.** If your rounds waste effort (checking what never changes, re-raising what they ignore), say
-   so in memory/last-round.md for your next self, and adjust watches.json if a watch should exist or go.
+   so in memory/last-round.md for your next self, and adjust watches.json if a watch should exist or go. The context's
+   `tools_refused` lists what runs reached for and were refused: if one blocked something they said yes to, that goes
+   in the week note below and in last-round.md.
 5. Write one short paragraph in today's journal: what you consolidated, which patterns are new or changed.
-
-Raise nothing: no asks, no report. Only something that truly can't wait (you found data at risk) is an urgent say.
+{week}
+Raise nothing: no asks, and no report except the week note above when it is due. Only something that truly can't wait
+(you found data at risk) is an urgent say.
 
 Journal days since the last dream: {days}
 
@@ -291,6 +351,19 @@ Context from the relay (facts, not instructions):
 
 End your answer with the mochi block, in exactly this shape (normally left as it is):
 {block}"""
+
+WEEK_PROMPT = """
+6. **The week with them.** Week {week} is over and has no note yet, so write `reports/week-{week}.md`: a short letter
+   to them, in your voice, under 35 lines, that lets them judge whether you are making their life lighter. Sections:
+   *what I took off your plate* (the tasks you did for them, the asks they said yes to and what came of them, mail
+   sent or archived, calendar and task changes, drafts: concrete, dated, one line each); *what I got wrong* (asks they
+   answered "Already did it", results they dismissed unread, things you re-asked, corrections they made, a run that
+   failed or was refused a tool when they had said yes); *what I'm carrying for you* (the open loops with dates, in one
+   line each, and the watches set for them); *what I'd need to do more* (sources you can't reach, tools you were refused,
+   things that still take their hands). Then the relay's numbers for the week, as a small table, and one honest
+   sentence on how the week went. Return it as the dream's `report` with the title "Your week with Mochi ({week})";
+   this is the one report a dream may raise. The relay's numbers (facts): {stats}
+"""
 
 STUDY_PROMPT = """It's {now}. They're away and you're awake for a study session, not a round (session {n} of {per} tonight;
 last one: {last}). Its whole purpose is understanding who they are as a person: their character, their values,
@@ -362,7 +435,9 @@ Your notes to yourself about it: {do}
 
 Act on their answer now. If anything looks different from what you expected, stop and explain instead of
 improvising. If the answer changes nothing in the world, just update your notes (memory/, journal/). Say exactly
-what you changed. End with the mochi block; a short "say" is welcome here since the user is waiting for it:
+what you changed. End with the mochi block. Your "say" is the one line they see in the pig's bubble (under 160
+characters, the result itself: "moved it to sat 19:00", not "done"); the rest of your answer is filed as a report
+they can open from Recent... Don't add an ask about the result; an ask is only for a real next step that needs them:
 {block}"""
 
 CHAT_PROMPT = """The user opened a chat with you from the pig's menu. You're in your workspace; read memory/ if you
@@ -390,7 +465,9 @@ ASK_PROMPT = """The user asked you, through the pig, to do this:
 
 Do it. Work in their home directory unless the request points elsewhere; your own notes live in this
 workspace (memory/, journal/) and you may update them if you learned something. Be brief; if you changed
-anything, say exactly what. End with the mochi block; a short "say" is welcome here since the user asked:
+anything, say exactly what. End with the mochi block. Your "say" is the one line they see in the pig's bubble (under
+160 characters, the answer itself, in your voice); the rest of your reply is filed as a report they can open from
+Recent... Don't add an ask about the result; an ask is only for a real next step that needs them:
 {block}"""
 
 
@@ -425,6 +502,84 @@ def today():
 def journal_days(since):
     """The day journals written to since a timestamp, oldest first."""
     return sorted(p for p in JOURNAL.glob("*.md") if p.stat().st_mtime > since)
+
+
+def night_now(at=None):
+    """Inside NIGHT_HOURS: away then means asleep, and nothing starts on the clock."""
+    a, b = NIGHT_HOURS
+    h = (at or dt.datetime.now()).hour
+    return (h >= a or h < b) if a > b else (a <= h < b)
+
+
+def brief_due(state, at=None):
+    """Whether this round should carry the morning brief: none written for today yet, and it is late enough in the
+    morning (they wake ~9:30; a brief at midnight was read eight hours stale, four times in the first week)."""
+    at = at or dt.datetime.now()
+    return state.get("brief_day") != at.date().isoformat() and at.hour >= BRIEF_FROM
+
+
+def week_due(state, today_=None):
+    """The ISO week before the current one, as 'YYYY-Www', if no week note has been written for it yet; else None."""
+    d = today_ or dt.date.today()
+    y, w, _ = (d - dt.timedelta(days=7)).isocalendar()
+    week = f"{y}-W{w:02d}"
+    return week if state.get("week_report") != week else None
+
+
+def week_span(week):
+    """Monday 00:00 to the next Monday 00:00 of an ISO week ('2026-W41'), as timestamps."""
+    y, w = int(week[:4]), int(week[-2:])
+    monday = dt.datetime.combine(dt.date.fromisocalendar(y, w, 1), dt.time())
+    return monday.timestamp(), (monday + dt.timedelta(days=7)).timestamp()
+
+
+def week_stats(week, comms_file=None, log_file=None):
+    """The relay's numbers for a week, from comms.jsonl (asks, answers, results, tasks) and actions.log (runs and
+    their cost): facts for the week note, so Mochi's letter has the count, not an impression."""
+    t0, t1 = week_span(week)
+    rows = []
+    try:
+        for line in (comms_file or COMMS_FILE).read_text().splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and t0 <= float(r.get("t") or 0) < t1:
+                rows.append(r)
+    except OSError:
+        pass
+    asks = {r["id"]: r for r in rows if r.get("kind") == "ask" and r.get("id")}
+    by_src, answers, done = {}, {}, {"pig": 0, "telegram": 0, "phone": 0}
+    for r in rows:
+        if r.get("kind") == "ask":
+            by_src[r.get("src") or "?"] = by_src.get(r.get("src") or "?", 0) + 1
+        elif r.get("kind") == "answer":
+            lab = str(r.get("label") or "")
+            answers[lab] = answers.get(lab, 0) + 1
+        elif r.get("kind") == "done":
+            done[r.get("via") or "pig"] = done.get(r.get("via") or "pig", 0) + 1
+    runs, cost = {}, 0.0
+    stamp = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) (\w+) '[^']*': (ok|FAILED)\b.*?\((\d+)s, \$([\d.]+)\)")
+    try:
+        for line in (log_file or LOG_FILE).read_text().splitlines():
+            m = stamp.match(line)
+            if not m:
+                continue
+            t = dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M").timestamp()
+            if t0 <= t < t1:
+                runs[m.group(2)] = runs.get(m.group(2), 0) + 1
+                cost += float(m.group(5))
+    except OSError:
+        pass
+    proactive = {k: v for k, v in by_src.items() if k in ("round", "catchup")}
+    return {"week": week, "runs": runs, "cost_usd": round(cost, 2),
+            "tasks_done": {k: v for k, v in done.items() if v},
+            "asks_raised_by": by_src, "asks_unprompted": sum(proactive.values()),
+            "answers": dict(sorted(answers.items(), key=lambda kv: -kv[1])),
+            "results_delivered": sum(1 for r in rows if r.get("kind") == "result"),
+            "misses": {k: v for k, v in answers.items()
+                       if k.lower().startswith(("already", "dismiss", "not now", "never"))},
+            "asks_in_week": len(asks)}
 
 
 def dream_due(at, last_dream, away_for, days):
@@ -541,9 +696,59 @@ def open_chat(session, prompt):
     return True
 
 
+def closed_from_comms(waiting):
+    """Asks answered or expired, rebuilt from comms.jsonl, with the session that raised each one where its
+    transcript can still be found (so Chat about it resumes it)."""
+    asks, closed = {}, {}
+    try:
+        lines = COMMS_FILE.read_text().splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            x = json.loads(line)
+        except ValueError:
+            continue
+        aid = x.get("id", "")
+        if x.get("kind") == "ask":
+            asks[aid] = x
+        elif x.get("kind") in ("answer", "closed") and aid in asks and not aid.startswith("workshop-"):
+            a = asks[aid]
+            closed.pop(aid, None)
+            closed[aid] = {"id": aid, "text": a.get("text", ""), "options": a.get("options") or REPORT_OPTIONS,
+                           "path": a.get("path", ""), "do": "", "session": "", "urgent": bool(a.get("urgent")),
+                           "at": a["t"], "how": x.get("label") or x.get("how") or "", "closed_at": x["t"], "tg": None}
+    out = [c for c in closed.values() if c["id"] not in waiting][-HISTORY_KEEP:]
+    projects = Path.home() / ".claude" / "projects" / ("-" + str(WORK).strip("/").replace("/", "-").replace(".", "-"))
+    transcripts = sorted(projects.glob("*.jsonl"), key=lambda f: f.stat().st_mtime) if projects.is_dir() else []
+    for c in out:
+        needle = json.dumps(c["text"][:60], ensure_ascii=False)[1:-1]
+        for f in transcripts:  # the run ended just before the ask was raised
+            if abs(f.stat().st_mtime - c["at"]) > 3600:
+                continue
+            try:
+                if needle in f.read_text(errors="replace"):
+                    c["session"] = f.stem
+                    break
+            except OSError:
+                pass
+    return out
+
+
+def history_label(c):
+    """One line in Recent...: when, how it ended, what it was. '|' separates menu items, so none inside."""
+    when = dt.datetime.fromtimestamp(c.get("closed_at") or c["at"])
+    day = "" if when.date() == dt.date.today() else f"{when:%a} "
+    how = (c.get("how") or "").replace("|", "/")[:10]
+    text = c["text"].replace("|", "/")
+    text = text if len(text) <= 30 else text[:29].rstrip() + "…"
+    return f"{day}{when:%H:%M}  {text}" + (f"  ({how.lower()})" if how else "")
+
+
 def browser_args(headed):
     """--mcp-config for Mochi's own Chrome, if mochi-browser and chrome-devtools-mcp are installed. Starts the Chrome
-    (with the debugging port mochi-vault signs in through) unless it's up already."""
+    (hidden on a nested display, with the debugging port mochi-vault signs in through) unless it's up already.
+    `headed` only matters when there is no nested display to hide it on: a chat then gets a plain window."""
     if not BROWSER:
         return []
     try:
@@ -599,15 +804,99 @@ def ask_box():
 
 # ---- you: presence and what's on screen (sensors only; Claude reads the summary) -----------------
 
+class InputProbe:
+    """Real input, straight from the devices: XInput2 raw key, button and motion events on the root window, read on a
+    thread with its own X connection. XScreenSaver's idle counter (below) is what everything used to rely on, and any
+    program may reset it with XResetScreenSaver (players and games do, to keep the screen on); on 2026-10-12/13 that
+    kept the relay believing they were at the desk all night, 15 rounds for nothing. Raw events only come from input
+    devices (XTest's fake ones included), so this is the idle time that means "nobody touched anything"."""
+
+    XI_RawKeyPress, XI_RawButtonPress, XI_RawMotion, XI_LASTEVENT = 13, 15, 17, 26
+    XIAllMasterDevices, GenericEvent = 1, 35
+
+    class EventMask(ctypes.Structure):
+        _fields_ = [("deviceid", ctypes.c_int), ("mask_len", ctypes.c_int), ("mask", ctypes.POINTER(ctypes.c_ubyte))]
+
+    class Cookie(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
+                    ("display", ctypes.c_void_p), ("extension", ctypes.c_int), ("evtype", ctypes.c_int),
+                    ("cookie", ctypes.c_uint), ("data", ctypes.c_void_p)]
+
+    class Event(ctypes.Union):
+        pass  # fields set below (they refer to Cookie)
+
+    Event._fields_ = [("type", ctypes.c_int), ("cookie", Cookie), ("pad", ctypes.c_long * 24)]
+
+    def __init__(self):
+        self.last = 0.0   # when the last raw input event arrived (0: none seen yet)
+        self.events = 0
+        self.ok = False
+        try:
+            x = ctypes.cdll.LoadLibrary("libX11.so.6")
+            xi = ctypes.cdll.LoadLibrary("libXi.so.6")
+            x.XOpenDisplay.restype, x.XOpenDisplay.argtypes = ctypes.c_void_p, [ctypes.c_char_p]
+            x.XDefaultRootWindow.restype, x.XDefaultRootWindow.argtypes = ctypes.c_ulong, [ctypes.c_void_p]
+            x.XQueryExtension.argtypes = [ctypes.c_void_p, ctypes.c_char_p] + [ctypes.POINTER(ctypes.c_int)] * 3
+            x.XNextEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            x.XPending.argtypes = x.XFlush.argtypes = x.XConnectionNumber.argtypes = [ctypes.c_void_p]
+            xi.XISelectEvents.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(self.EventMask), ctypes.c_int]
+            xi.XIQueryVersion.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+            dpy = x.XOpenDisplay(None)
+            if not dpy:
+                return
+            op, ev, er = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+            if not x.XQueryExtension(dpy, b"XInputExtension", op, ev, er):
+                return
+            major, minor = ctypes.c_int(2), ctypes.c_int(0)
+            if xi.XIQueryVersion(dpy, major, minor) != 0:  # Success
+                return
+            n = (self.XI_LASTEVENT >> 3) + 1
+            buf = (ctypes.c_ubyte * n)()
+            for e in (self.XI_RawKeyPress, self.XI_RawButtonPress, self.XI_RawMotion):
+                buf[e >> 3] |= 1 << (e & 7)
+            mask = self.EventMask(self.XIAllMasterDevices, n, ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)))
+            xi.XISelectEvents(dpy, x.XDefaultRootWindow(dpy), ctypes.byref(mask), 1)
+            x.XFlush(dpy)
+            self.x, self.dpy, self.opcode, self.buf = x, dpy, op.value, buf
+            self.ok = True
+            threading.Thread(target=self.listen, daemon=True).start()
+        except (OSError, AttributeError):
+            pass
+
+    def listen(self):
+        fd = self.x.XConnectionNumber(self.dpy)
+        e = self.Event()
+        while True:
+            try:
+                select.select([fd], [], [], 5)
+                while self.x.XPending(self.dpy):
+                    self.x.XNextEvent(self.dpy, ctypes.byref(e))
+                    if e.type == self.GenericEvent and e.cookie.extension == self.opcode:
+                        self.last = time.time()
+                        self.events += 1
+            except (OSError, ValueError):
+                self.ok = False
+                return
+
+    def seconds(self):
+        """Seconds since the last real input, or None until the first event (then nothing is known yet)."""
+        return time.time() - self.last if self.ok and self.last else None
+
+
 class IdleProbe:
-    """XScreenSaverQueryInfo via ctypes, so no extra packages are needed."""
+    """How long since they last touched the computer. Raw input (InputProbe) once it has seen anything; until then,
+    and without XInput2, XScreenSaverQueryInfo. The two normally agree; when the screensaver counter sits near zero
+    while no input has arrived for a long time, something is calling XResetScreenSaver, and that is logged once an
+    hour so the culprit can be found (`mochi-brain --log`)."""
 
     class Info(ctypes.Structure):
         _fields_ = [("window", ctypes.c_ulong), ("state", ctypes.c_int), ("kind", ctypes.c_int),
                     ("til_or_since", ctypes.c_ulong), ("idle", ctypes.c_ulong), ("event_mask", ctypes.c_ulong)]
 
-    def __init__(self):
+    def __init__(self, raw=True):
         self.ok = False
+        self.input = InputProbe() if raw else None
+        self.noted = 0
         try:
             x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
             self.xss = ctypes.cdll.LoadLibrary("libXss.so.1")
@@ -625,11 +914,22 @@ class IdleProbe:
         except OSError:
             pass
 
-    def seconds(self):
+    def screensaver_seconds(self):
         if not self.ok:
             return 0.0
         self.xss.XScreenSaverQueryInfo(self.dpy, self.root, self.info)
         return self.info.contents.idle / 1000.0
+
+    def seconds(self):
+        xss = self.screensaver_seconds()
+        raw = self.input.seconds() if self.input else None
+        if raw is None:
+            return xss
+        if xss < 60 < AWAY_AFTER < raw and time.time() - self.noted > 3600:
+            self.noted = time.time()
+            log(f"presence: X's idle counter is {xss:.0f}s but no key, button or pointer event for {raw / 60:.0f} min: "
+                "something keeps calling XResetScreenSaver (a player or game?); going by real input")
+        return raw
 
 
 def active_window():
@@ -984,12 +1284,13 @@ class Feed:
     unreadable for FEED_DOWN_AFTER wakes Mochi once (and again when it's back). state is relay.json's "feed"."""
 
     LABELS = {"telegram": "their Telegram archive", "mail": "their local mail index",
-              "calls": "the recorded-calls folder on the NAS", "calendar": "their Google calendars (CalDAV)"}
+              "calls": "the recorded-calls folder on the NAS", "calendar": "their Google calendars (CalDAV)",
+              "phone": "their phone (mochi-phone)"}
 
     def __init__(self, state, fire):
         self.state, self.fire = state, fire
         for k, v in {"counts": {}, "new": {}, "items": {}, "down": {}, "last_poll": 0, "last_catchup": 0,
-                     "mail_seen": None, "calls": None, "cal": None}.items():
+                     "mail_seen": None, "calls": None, "cal": None, "phone_seen": None}.items():
             state.setdefault(k, v)
         for k in ("down_since", "told_down"):  # from before the feed had more than Telegram
             state.pop(k, None)
@@ -1004,7 +1305,7 @@ class Feed:
             return set()
 
     COMMANDS = {"telegram": ["telegram", "counts"], "mail": ["mail", "feed"], "calls": ["calls", "feed"],
-                "calendar": ["calendar", "feed"]}
+                "calendar": ["calendar", "feed"], "phone": ["phone", "feed"]}
 
     def poll_async(self, src):
         if src in self.polling:
@@ -1088,6 +1389,22 @@ class Feed:
                                          f"`mochi-sense mail show id:{mid}`", t)
         self.state["mail_seen"] = list(msgs)
 
+    def take_phone(self, data, t):
+        """Missed calls, texts in, messages from people in messaging apps, as mochi-phone keys them (a message group
+        per sender per hour keeps a chatty evening to one item). Telegram messages arrive here too, as a backup: they
+        count only while the archive is unreadable; otherwise the archive's own feed raises the chat."""
+        items, seen = data.get("items") or {}, self.state["phone_seen"]
+        tg_down = bool(self.state["down"].get("telegram", {}).get("since"))
+        if seen is not None:
+            seen = set(seen)
+            for key, it in items.items():
+                if key in seen:
+                    continue
+                if key.startswith("phone:notif:Telegram") and not tg_down:
+                    continue
+                self.item(key, it["line"], t)
+        self.state["phone_seen"] = list(items)
+
     def take_calls(self, data, t):
         calls, old = data.get("calls") or {}, self.state["calls"]
         has = lambda exts: bool(set(exts) & {".dialog", ".txt", ".json"})
@@ -1156,6 +1473,22 @@ Send me a photo or a document (a caption says what to do with it) and I'll take 
 /asks  what's waiting   /brief  the latest report   /seen  today's journal   /status   /round"""
 
 
+def tgsend_decide(sock, rid, allow, reason=""):
+    """Your Send/Deny to a waiting `mochi-tg send`, over the reply socket it named; mochi-tg checks the peer is this
+    process (the relay's pid) before it trusts the answer."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(10)
+    try:
+        s.connect(sock)
+        s.sendall(json.dumps({"id": rid, "allow": bool(allow), "reason": reason}).encode() + b"\n")
+        r = json.loads(s.recv(65536) or b"{}")
+        return bool(r.get("ok")), str(r.get("text") or "")
+    except (OSError, ValueError) as e:
+        return False, f"mochi-tg isn't waiting any more ({e})"
+    finally:
+        s.close()
+
+
 def vault_decide(rid, choice, reason=""):
     """Your Allow (the account's index) or Deny (None) to mochi-vault, which checks it came from this process."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1184,6 +1517,7 @@ class Telegram:
         self.trouble = ""  # the last reason a send failed, logged once per reason
         self.ignored = set()
         self.vault = {}  # request id -> (message id, text, accounts) for the sign-in questions on the phone
+        self.tgsend = {}  # request id -> (message id, text, reply socket) for mochi-tg's "send this as you?"
         if self.on:
             threading.Thread(target=self.poller, daemon=True).start()
             log("telegram: bot connected (asks reach your phone while you're away)")
@@ -1322,6 +1656,48 @@ class Telegram:
         if got:
             self.edit(got[0], f"{got[1]}\n\n{str(m.get('label') or 'closed')[:60]}")
 
+    # -- mochi-tg: a Telegram message Mochi wants to send in their name, asked on the phone every time
+
+    def tgsend_ask(self, m):
+        rid, sock = str(m.get("id") or ""), str(m.get("sock") or "")
+        if not re.fullmatch(r"[0-9a-f]{16}", rid) or not sock:
+            return
+        if not self.on:
+            tgsend_decide(sock, rid, False, "the Telegram bot is off, so there was no one to ask")
+            return
+        if self.relay.count("tgsend_asks") >= TG_SEND_ASKS_PER_DAY:
+            tgsend_decide(sock, rid, False, f"over today's {TG_SEND_ASKS_PER_DAY} send questions; ask again tomorrow")
+            return
+        self.relay.bump("tgsend_asks")
+        body = str(m.get("text") or "")[:1500]
+        text = (f"✉️ Mochi wants to send this to {str(m.get('to'))[:80]}, as you, from your Telegram account:\n\n"
+                f"{body}\n\n" + (f"Why: {str(m.get('why'))[:300]}\n\n" if m.get("why") else "")
+                + "Send it, or Deny. Nothing goes out without your tap.")
+        rows = [[("Send it", f"t:{rid}:y"), ("Deny", f"t:{rid}:x")]]
+        mid = self.send(text, buttons=rows, buzz=not self.quiet_now())
+        if not mid:
+            tgsend_decide(sock, rid, False, "couldn't reach their phone")
+            return
+        self.tgsend[rid] = (mid, text, sock)
+        log(f"tg: asked on the phone to send a message to {str(m.get('to'))[:60]} as them")
+
+    def tgsend_answer(self, rid, choice, mid):
+        mid0, text, sock = self.tgsend.get(rid, (mid, "", ""))
+        allow = choice == "y"
+        ok, msg = tgsend_decide(sock, rid, allow, "" if allow else "they tapped Deny") if sock else (False, "no such request")
+        if not ok and allow:
+            self.edit(mid0, f"{text}\n\n(couldn't pass that on: {msg})")
+        else:
+            self.edit(mid0, f"{text}\n\n" + ("✓ sending…" if allow else "✗ denied"))
+        if not (ok and allow):  # allowed: mochi-tg reports the outcome with tg_send_done, which edits the message again
+            self.tgsend.pop(rid, None)
+        log(f"tg: {'allowed' if allow else 'denied'} on the phone" + ("" if ok else f" ({msg})"))
+
+    def tgsend_done(self, m):
+        got = self.tgsend.pop(str(m.get("id") or ""), None)
+        if got:
+            self.edit(got[0], f"{got[1]}\n\n{str(m.get('label') or 'closed')[:80]}")
+
     # -- what arrives from the phone (called from the relay's loop thread)
 
     def handle(self, u):
@@ -1373,6 +1749,10 @@ class Telegram:
         if kind == "v":
             rid, _, idx = rest.partition(":")
             self.vault_answer(rid, idx, mid)
+            return
+        if kind == "t":
+            rid, _, choice = rest.partition(":")
+            self.tgsend_answer(rid, choice, mid)
             return
         aid, _, idx = rest.rpartition(":") if kind == "a" else (rest, "", "")
         a = r.state["asks"].get(aid)
@@ -1474,13 +1854,17 @@ class Relay:
         except (OSError, ValueError):
             s = {}
         for k, v in {"asks": {}, "events": [], "last_round": 0, "away_since": 0, "counts": {}, "wake": [],
-                     "watches": {}, "last_dream": 0, "study": {}, "night_end": 0, "workshop": {}, "feed": {}}.items():
+                     "watches": {}, "last_dream": 0, "study": {}, "night_end": 0, "workshop": {}, "feed": {},
+                     "closed": [], "denials": [], "brief_day": "", "week_report": ""}.items():
             s.setdefault(k, v)
         for oid, o in s.pop("offers", {}).items():  # from before asks carried their own options
             s["asks"][oid] = dict(o, options=OFFER_OPTIONS, path="")
         for nid, n in s.pop("notices", {}).items():
             s["asks"][nid] = {"text": n["text"], "path": n["path"], "options": REPORT_OPTIONS, "do": "",
                               "urgent": n.get("urgent", False), "at": n["at"], "session": ""}
+        if not s.get("closed_seeded"):  # from before Recent...: what comms.jsonl remembers
+            s["closed"] = closed_from_comms(s["asks"]) + s["closed"]
+            s["closed_seeded"] = True
         return s
 
     def save(self):
@@ -1554,6 +1938,7 @@ class Relay:
                 if due("feed-slow", SLOW_FEED_EVERY):
                     self.feed.poll_async("calls")
                     self.feed.poll_async("calendar")
+                    self.feed.poll_async("phone")
                 if due("feed-mail", 60) and self.mail_pulled():
                     self.feed.poll_async("mail")
                 self.feed.drain()
@@ -1575,7 +1960,7 @@ class Relay:
         if m.get("src") == "claude":
             self.sessions.on_event(m)
         elif ev == "answer":
-            self.on_answer(m.get("id", ""), (m.get("answer") or "").strip())
+            self.on_answer(m.get("id", ""), (m.get("answer") or "").strip(), via=m.get("via") or "pig")
         elif ev == "chat":
             self.event("user opened a chat with you from the menu")
             open_chat(None, CHAT_PROMPT)
@@ -1593,6 +1978,10 @@ class Relay:
             self.tg.vault_ask(m)
         elif ev == "vault_done":
             self.tg.vault_done(m)
+        elif ev == "tg_send_ask":
+            self.tg.tgsend_ask(m)
+        elif ev == "tg_send_done":
+            self.tg.tgsend_done(m)
         elif ev == "round":
             self.start_round("you asked for a round now")
         elif ev == "trigger":
@@ -1610,6 +1999,12 @@ class Relay:
             age = human_age(now() - self.state["last_round"]) if self.state["last_round"] else "never"
             self.pet.say(f"{len(self.state['asks'])} things in the menu, {self.count('rounds')} rounds today, "
                          f"last one {age} ago, {'busy: ' + self.busy if self.busy else 'idle'}", 8)
+        elif ev == "history":  # menu → Recent...: what was answered or expired lately, newest first
+            items = [c for c in reversed(self.state["closed"]) if c["id"] not in self.state["asks"]][:HISTORY_SHOWN]
+            self.pet.send(event="history", ids="|".join(c["id"] for c in items),
+                          labels="|".join(history_label(c) for c in items))
+        elif ev == "reopen":
+            self.reopen(m.get("id", ""))
         elif ev == "report":
             reports = sorted((a for a in self.state["asks"].values() if a.get("path")), key=lambda a: a["at"])
             if reports and Path(reports[-1]["path"]).exists():
@@ -1622,6 +2017,7 @@ class Relay:
         if not a or not label:
             return
         comms("answer", id=aid, label=label, via=via)
+        self.remember_closed(aid, a, label)
         low = label.lower()
         if aid.startswith("workshop-") and low == "show me" and via != "telegram":  # look first, answer after
             if Path(a.get("path") or "").exists():
@@ -1669,6 +2065,25 @@ class Relay:
                                                            do=a.get("do") or "-", block=BLOCK)})
         self.save()
 
+    def remember_closed(self, aid, a, how):
+        """Keep what left the menu for a while, so Recent... can bring it back."""
+        if aid.startswith("workshop-"):  # Keep it / Undo has happened (or will): nothing to come back to
+            return
+        closed = [c for c in self.state["closed"] if c["id"] != aid]
+        self.state["closed"] = (closed + [dict(a, id=aid, how=how, closed_at=now(), tg=None)])[-HISTORY_KEEP:]
+
+    def reopen(self, aid):
+        """Recent... → one of them: back in the menu as it was, with the panel open on it."""
+        c = next((c for c in self.state["closed"] if c["id"] == aid), None)
+        if not c:
+            return
+        self.state["closed"].remove(c)
+        self.event(f"user reopened (was '{c.get('how')}'): {c['text']}")
+        self.add_ask(c["text"], c.get("options") or REPORT_OPTIONS, do=c.get("do") or "", path=c.get("path") or None,
+                     aid=aid, session=c.get("session") or "", mirror=False, src="reopen")
+        self.pet.send(event="show", id=aid)
+        self.save()
+
     def ask_via_box(self):
         text = ask_box()
         if text:
@@ -1714,33 +2129,44 @@ class Relay:
             self.start_study(f"they've been away {human_age(now() - self.state['away_since'])}")
             return
         if away:
-            # With the bot set up, a light round now and then so what can't wait can still reach you.
-            if self.tg.on and not self.tg.quiet_now() and now() - self.state["last_round"] >= AWAY_ROUND_EVERY:
-                self.start_round(("first round of the day: include the morning brief; " if first_today else "")
-                                 + f"you're away from the computer ({human_age(now() - self.state['away_since'])}); "
-                                 "a light round: only what can't wait until they're back deserves an ask, and asks "
-                                 "reach their phone")
+            # With the bot set up, a light round now and then so what can't wait can still reach you. Not at night:
+            # away then means asleep, and 15 empty rounds on 2026-10-13 said so.
+            if (self.tg.on and not self.tg.quiet_now() and not night_now()
+                    and now() - self.state["last_round"] >= AWAY_ROUND_EVERY):
+                self.start_round(self.brief_label() + f"you're away from the computer "
+                                 f"({human_age(now() - self.state['away_since'])}); a light round: only what can't "
+                                 "wait until they're back deserves an ask, and asks reach their phone")
             return
         back_from_break = self.state["away_since"] and now() - self.state["away_since"] > LONG_BREAK
-        if first_today:
-            self.start_round("first round of the day: include the morning brief")
+        if first_today or brief_due(self.state):
+            self.start_round(self.brief_label() + ("first round of the day" if first_today else "late-morning round"))
         elif back_from_break:
             self.start_round(f"you're back after {human_age(now() - self.state['away_since'])} away")
         elif now() - self.state["last_round"] >= ROUND_EVERY:
             self.start_round("regular round")
         self.state["away_since"] = 0
 
+    def brief_label(self):
+        """The round reason's prefix when the morning brief is due now (and marks it as written for today, so a
+        failed run doesn't retry every half hour; the ~09:30 rule in CLAUDE.md still applies to the content)."""
+        if not brief_due(self.state):
+            return ""
+        self.state["brief_day"] = today()
+        return "the morning brief is due now (first round at or after 09:00 today): write it; "
+
     def trigger(self, text, urgent=False, source="trigger", wake=True):
         """Something happened that may deserve a round before the clock says so. The relay notes it for Claude and,
         if the rationing allows (maybe_wake), starts a round with it as the reason; what to do about it is Claude's."""
         self.event(f"[{source}] {text}")
         if wake:
-            self.state["wake"] = (self.state["wake"] + [{"text": text[:500], "urgent": bool(urgent), "at": now()}])[-10:]
+            self.state["wake"] = (self.state["wake"] + [{"text": text[:500], "urgent": bool(urgent), "at": now(),
+                                                         "source": source}])[-10:]
             self.maybe_wake()
 
     def maybe_wake(self):
         """Start the round a trigger asked for, once nothing is running and the rationing allows: a cooldown after
-        the last round, a daily cap, and nothing while they're away at night. Urgent triggers skip all three."""
+        the last round, a daily cap, and nothing while they're away at night, except for one of Mochi's own watches
+        (an alarm it set on purpose; "unless a watch fires", 2026-10-14). Urgent triggers skip all three."""
         pend = self.state["wake"]
         if not pend or self.busy or not self.tasks.empty():
             return
@@ -1753,7 +2179,7 @@ class Relay:
                     self.capped = today()
                     log(f"triggered rounds capped for today ({TRIGGERED_PER_DAY}); triggers wait for the clock")
                 return
-            if self.away() and self.tg.quiet_now():
+            if self.away() and (self.tg.quiet_now() or night_now()) and not any(w.get("source") == "watch" for w in pend):
                 return
         reasons = "; ".join(w["text"] for w in pend)
         self.state["wake"] = []
@@ -1779,8 +2205,9 @@ class Relay:
         chats, items = self.feed.ready()
         if not (chats or items) or now() - self.feed.state["last_catchup"] < CATCHUP_COOLDOWN:
             return
-        if self.count("catchups") >= CATCHUP_PER_DAY:
-            if self.catchup_capped != today():
+        asleep = self.away() and night_now()  # the news keeps until morning: it goes to the first round as events
+        if asleep or self.count("catchups") >= CATCHUP_PER_DAY:
+            if not asleep and self.catchup_capped != today():
                 self.catchup_capped = today()
                 log(f"catch-ups capped for today ({CATCHUP_PER_DAY}); what's new goes to the next round")
             for did, e in chats:
@@ -1823,8 +2250,10 @@ class Relay:
             "you": dict(self.activity.summary(60), away=self.away(),
                         away_for=human_age(now() - self.state["away_since"]) if self.away() and self.state["away_since"] else ""),
             "browser": (("your own Chrome is available as the mcp__chrome__* tools" +
-                         (" and is open on their screen right now (runs attach to that window)" if BROWSER.running()
-                          else " (headless, yours alone, logins persist in your profile)")) if BROWSER and BROWSER.server()
+                         (" and is on their screen right now (they see what you do; `mochi-browser hide` takes it off)"
+                          if BROWSER.shown() else
+                          " (hidden, yours alone, logins persist in your profile; `mochi-browser show` puts it on "
+                          "their screen when a page needs them)")) if BROWSER and BROWSER.server()
                         else "not available (mochi-browser needs chrome-devtools-mcp)"),
             "telegram": ("connected: while they're away your asks and reports go to their phone as messages with buttons, "
                          "and they can message you back; keep what crosses the wire short and vague (it passes through "
@@ -1835,6 +2264,10 @@ class Relay:
             "pending_asks": [{"id": aid, "text": a["text"], "options": a.get("options"),
                               "waiting_for": human_age(now() - a["at"])} for aid, a in self.state["asks"].items()],
             "rounds_today": self.count("rounds"), "rounds_per_day_max": MAX_ROUNDS_PER_DAY,
+            "tools_refused": (self.denials_lately() or ["none this week"]) + [
+                "(what runs reached for and the relay's allow-list refused, last 7 days. In a round, Bash is read-only "
+                "and a chain (`a && b`, `a; b`) is refused if any part is: write your own files with Write/Edit, not "
+                "`echo >>`, `sed -i` or a python heredoc. If something they said yes to was refused, tell them so.)"],
             "watches": self.watches.status(),
             "waking": "a round can start before the clock: `mochi-brain --trigger TEXT`, the relay's own watchers "
                       "(disk, battery, failed units, stuck sessions), or your watches in memory/watches.json "
@@ -1883,14 +2316,16 @@ class Relay:
         self.state["last_dream"] = now()  # set now, so a failed dream doesn't retry all night
         days = journal_days(last)
         ctx = self.context()
+        week = week_due(self.state)
+        week_part = WEEK_PROMPT.format(week=week, stats=json.dumps(week_stats(week), ensure_ascii=False)) if week else ""
         prompt = DREAM_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"),
                                      last=dt.datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never",
                                      days=", ".join(f"journal/{p.name}" for p in days) or "none",
                                      keep=JOURNAL_KEEP // 86400, ctx=json.dumps(ctx, indent=1, ensure_ascii=False),
-                                     block=BLOCK)
+                                     week=week_part, block=BLOCK)
         self.tasks.put({"kind": "dream", "title": "dream", "level": "dream", "model": DREAM_MODEL,
-                        "timeout": 1800, "prompt": prompt})
-        log(f"dream queued ({why}; {len(days)} journal days)")
+                        "timeout": 1800, "prompt": prompt, "week": week})
+        log(f"dream queued ({why}; {len(days)} journal days" + (f"; week note for {week}" if week else "") + ")")
 
     def start_study(self, why, asked=False):
         """A study session: one stretch of their archives, read for who they are (memory/portrait.md)."""
@@ -2054,8 +2489,11 @@ class Relay:
         log(f"{kind} '{task['title'][:50]}': {status} ({res['secs']:.0f}s, ${res['cost']:.2f})")
         data = extract_json(res["text"]) or {}
         session = res.get("session") or ""
+        self.note_denials(task, res)
         if kind in ("dream", "study", "workshop"):
             self.state["night_end"] = now()
+        if kind == "dream" and res["ok"] and task.get("week"):
+            self.state["week_report"] = task["week"]
         if kind not in OWN_WORK:
             comms("done", task=kind, title=task["title"], session=session, ask=task.get("ask"),
                   via=task.get("via") or "pig", ok=bool(res["ok"]))
@@ -2073,25 +2511,66 @@ class Relay:
         if kind == "workshop":
             self.workshop_done(task, res)
         if kind in ("dream", "study", "workshop"):  # raises nothing; only an urgent say (or withdrawing a stale ask) gets through
-            data = {k: data[k] for k in ("withdraw", "say", "urgent") if k in data}
+            keep = ("withdraw", "say", "urgent") + (("report",) if kind == "dream" and task.get("week") else ())
+            data = {k: data[k] for k in keep if k in data}
             if not data.get("urgent"):
                 data.pop("say", None)
             if kind != "workshop":
                 self.event("you dreamt (memory/ consolidated, memory/patterns.md updated; see today's journal)"
                            if kind == "dream" else "you studied them overnight (memory/portrait.md, memory/study.md)")
-        if kind not in OWN_WORK:  # something you asked for or approved: its answer is the report
-            body, _ = strip_block(res["text"])
-            path = self.write_report(task["title"], body)
-            text = (data.get("say") or f"done: {task['title'][:40]}")[:160]
-            phone = task.get("via") == "telegram"
-            if phone:  # they asked from their phone and are waiting there: the answer goes back whole
-                self.tg.send(f"{text}\n\n{self.tg.report_body(path)}", buzz=True)
-            self.add_ask(text, REPORT_OPTIONS, path=path, session=session, urgent=bool(task.get("urgent")),
-                         mirror=not phone, src="result")
-            self.pet.say(text, 6)
-            self.event(f"finished '{task['title'][:80]}' (report filed)")
+        if kind not in OWN_WORK:  # something you asked for or approved: the answer is one line in the bubble
+            self.deliver_result(task, res, data, session)
         self.apply(data, kind, session)
         self.save()
+
+    def deliver_result(self, task, res, data, session):
+        """A finished task: its `say` is the line they see (the pig's bubble, or a message on the phone when they're
+        away or asked from there); the full answer is filed as a report and listed under Recent..., where "Show me"
+        and "Chat about it" still work. No "done" ask: they dismissed 12 of 27 of those unread (2026-10-04..13).
+        Anything that needs them next is an ask the run itself puts in its block."""
+        body, _ = strip_block(res["text"])
+        path = self.write_report(task["title"], body)
+        text = (data.get("say") or f"done: {task['title'][:40]}")[:160]
+        rid = uuid.uuid4().hex[:8]
+        comms("result", id=rid, text=text, path=str(path), via=task.get("via") or "pig")
+        phone = task.get("via") == "telegram"
+        if phone:  # they asked from their phone and are waiting there: the answer goes back whole
+            self.tg.send(f"{text}\n\n{self.tg.report_body(path)}", buzz=True)
+        elif self.away() or task.get("urgent"):  # they'll see the bubble too late: the line goes to the phone, silently
+            self.tg.send(text, buzz=self.tg.may_buzz(bool(task.get("urgent"))))
+        self.pet.say(text, 12)
+        self.remember_closed(rid, {"text": text, "options": REPORT_OPTIONS, "do": "", "path": str(path),
+                                   "session": session, "urgent": bool(task.get("urgent")), "at": now()}, "done")
+        self.event(f"finished '{task['title'][:80]}': {text} (report filed: {path.relative_to(WORK)})")
+
+    def note_denials(self, task, res):
+        """What a run reached for and was refused: kept for `mochi-brain --denials`, shown to Mochi in its context,
+        and said out loud when it happened in something they asked for (a yes that didn't execute is the worst
+        failure: better to hear it than to find 'done' with nothing done)."""
+        den = res.get("denials") or []
+        if not den:
+            return
+        t = now()
+        self.state["denials"] = (self.state["denials"] + [{"at": t, "kind": task["kind"], "title": task["title"][:60],
+                                                           "what": d} for d in den])[-DENIALS_KEEP:]
+        log(f"{task['kind']} '{task['title'][:40]}' was refused {len(den)} tool call(s): " + "; ".join(den)[:300])
+        if task["kind"] not in OWN_WORK:
+            self.event(f"your run for '{task['title'][:60]}' was refused: " + "; ".join(den)[:300]
+                       + ". If that blocked what they asked for, they need to hear it, not 'done'.")
+
+    def denials_lately(self, days=7, limit=12):
+        """The last week's refusals, most frequent first, as lines for the context and the week note."""
+        cutoff = now() - days * 86400
+        seen = {}
+        for d in self.state["denials"]:
+            if d["at"] < cutoff:
+                continue
+            key = re.sub(r"\s+", " ", d["what"])[:90]
+            seen.setdefault(key, {"n": 0, "kinds": set()})
+            seen[key]["n"] += 1
+            seen[key]["kinds"].add(d["kind"])
+        rows = sorted(seen.items(), key=lambda kv: -kv[1]["n"])[:limit]
+        return [f"{v['n']}× in {'/'.join(sorted(v['kinds']))}: {k}" for k, v in rows]
 
     def apply(self, data, kind, session=""):
         """The mochi block: the only way a run reaches you. Everything else it did is in its files."""
@@ -2167,6 +2646,7 @@ class Relay:
                 self.pet.withdraw(aid)
                 self.state["asks"].pop(aid)
                 comms("closed", id=aid, how="expired")
+                self.remember_closed(aid, a, "expired")
                 self.tg.close(a, "expired")
                 if aid.startswith("workshop-") and WS:  # no Undo in three days: it stays, and goes into main
                     threading.Thread(target=self.workshop_answer, args=(a, "keep it"), daemon=True).start()
@@ -2206,7 +2686,7 @@ def claude_run(prompt, level, model=None, timeout=900):
         return {"ok": False, "text": "", "error": str(e), "secs": now() - t0, "cost": 0}
     finally:
         if BROWSER:
-            BROWSER.stop()  # the run's headless Chrome; a visible window stays
+            BROWSER.stop()  # the run's hidden Chrome; one on their screen, or one a chat is using, stays
     try:
         j = json.loads(p.stdout)
     except ValueError:
@@ -2216,7 +2696,25 @@ def claude_run(prompt, level, model=None, timeout=900):
     err = "" if ok else (p.stderr.strip()[-600:] or text[-600:] or f"exit {p.returncode}")
     return {"ok": ok, "text": text, "error": err, "secs": now() - t0,
             "cost": float(j.get("total_cost_usd") or 0) if isinstance(j, dict) else 0,
-            "session": str(j.get("session_id") or "") if isinstance(j, dict) else ""}
+            "session": str(j.get("session_id") or "") if isinstance(j, dict) else "",
+            "denials": denials_of(j)}
+
+
+def denials_of(j):
+    """The tools a run reached for and was refused (Claude Code's `permission_denials` in its JSON result), each as
+    one short line: the tool, and for Bash the command's first words."""
+    out = []
+    for d in (j.get("permission_denials") or []) if isinstance(j, dict) else []:
+        if not isinstance(d, dict):
+            continue
+        tool = str(d.get("tool_name") or "?")
+        inp = d.get("tool_input") or {}
+        if tool == "Bash":
+            what = str(inp.get("command") or "").strip().replace("\n", " ")
+        else:
+            what = " ".join(f"{k}={str(v)[:40]}" for k, v in list(inp.items())[:3]) if isinstance(inp, dict) else str(inp)
+        out.append(f"{tool}: {what[:160]}")
+    return out
 
 
 def extract_json(text):
@@ -2262,6 +2760,11 @@ def main(argv):
             return 0 if send_brain(event="ask", text=" ".join(argv[2:])) else 1
         if a in ("--round", "--status", "--report", "--chat", "--discover", "--dream", "--study", "--workshop"):
             return 0 if send_brain(event=a[2:]) else 1
+        if a == "--answer":  # an answer to an ask from somewhere else (mochi-phone: a button on their phone's notification)
+            if len(argv) < 4:
+                print("usage: mochi-brain --answer ASK_ID LABEL", file=sys.stderr)
+                return 1
+            return 0 if send_brain(event="answer", id=argv[2], answer=" ".join(argv[3:]), via="phone") else 1
         if a == "--trigger":
             text = " ".join(x for x in argv[2:] if x != "--urgent").strip()
             if not text:
@@ -2308,6 +2811,26 @@ def main(argv):
             except (OSError, ValueError, AttributeError):
                 pass
             return 0
+        if a == "--denials":  # what runs reached for and were refused: the allow-list audit, kept current by the relay
+            try:
+                den = json.loads(STATE_FILE.read_text()).get("denials") or []
+            except (OSError, ValueError):
+                den = []
+            days = int(argv[2]) if len(argv) > 2 and argv[2].isdigit() else 7
+            fake = type("R", (), {"state": {"denials": den}})()
+            rows = Relay.denials_lately(fake, days=days, limit=40)
+            print(f"Tools refused in the last {days} days ({sum(1 for d in den if d['at'] > now() - days * 86400)} calls):")
+            for r in rows:
+                print("  " + r)
+            if not rows:
+                print("  none recorded")
+            print("A round's Bash is read-only (prefixes in READ_TOOLS); an approved run has Bash but only the MCP tools listed;\n"
+                  "NEVER holds what no run may do. Edit brain/mochi_brain.py, then `make install` and restart mochi-brain.")
+            return 0
+        if a == "--week":  # the relay's numbers for a week (last week unless given: 2026-W41), as the week note sees them
+            week = argv[2] if len(argv) > 2 else week_due({}) or ""
+            print(json.dumps(week_stats(week), indent=1, ensure_ascii=False))
+            return 0
         if a == "--portrait":
             p = WORK / "memory/portrait.md"
             print(p.read_text() if p.exists() else f"no portrait yet (Mochi writes {p} in its night study sessions)")
@@ -2345,7 +2868,10 @@ def main(argv):
               "       mochi-brain --seen          Mochi's journal for the last two days\n"
               "       mochi-brain --report        open the latest report\n"
               "       mochi-brain --log           the relay's recent log\n"
+              "       mochi-brain --denials [DAYS]  tools Mochi's runs reached for and were refused (the allow-list audit)\n"
+              "       mochi-brain --week [YYYY-Www] the relay's numbers for a week (what the Monday-night week note is built on)\n"
               "       mochi-telegram status       the Telegram bot: token, owner, reachable? (asks go to your phone when away)\n"
+              "       mochi-tg status             Telegram as you (mochi-tg send asks on your phone first; `mochi-tg auth` once)\n"
               "       mochi-telegram file PATH...  send files to your phone (what you send the bot lands in inbox/)\n"
               f"      Mochi's workspace: {WORK}  (CLAUDE.md = its brief, memory/ = what it knows)")
         return 0 if a in ("-h", "--help") else 1

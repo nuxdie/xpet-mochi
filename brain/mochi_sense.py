@@ -1647,6 +1647,54 @@ def sense_tasks(args):
         return f"{head}\n_not available: {(p.stderr or p.stdout).strip()[-300:]}_"
     return f"{head}\n{p.stdout.strip()}\n_Dig: `mochi-tasks list [--list L] [--all]` · `mochi-tasks lists`_"
 
+# ---- drive (Google Drive, Docs and Sheets, through mochi-drive) ------------------------------------------------
+
+DRIVE_CMD = shutil.which("mochi-drive") or str(HOME / ".local/bin/mochi-drive")
+
+
+def sense_drive(args):
+    """What changed lately in their Drives (both accounts): mochi-drive holds the tokens and does the API."""
+    days = days_arg(args, 2)
+    head = f"## Drive (changed in the last {days} days)"
+    try:
+        p = subprocess.run([DRIVE_CMD, "recent", "--days", str(days), "--limit", "20"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"{head}\n_not available: {e}_"
+    if p.returncode != 0:
+        return f"{head}\n_not available: {(p.stderr or p.stdout).strip()[-300:]}_"
+    return f"{head}\n{p.stdout.strip()}\n_Dig: `mochi-drive read ID` · `mochi-drive search WORDS` · `mochi-drive sheet ID [RANGE]`_"
+
+CONTACTS_CMD = shutil.which("mochi-contacts") or str(HOME / ".local/bin/mochi-contacts")
+
+
+def sense_birthdays(args):
+    """Birthdays coming up, from their Google Contacts (mochi-contacts keeps a cache, so this is cheap)."""
+    days = days_arg(args, 21)
+    head = f"## Birthdays (next {days} days, Google Contacts)"
+    try:
+        p = subprocess.run([CONTACTS_CMD, "birthdays", "--days", str(days)], capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"{head}\n_not available: {e}_"
+    if p.returncode != 0:
+        return f"{head}\n_not available: {(p.stderr or p.stdout).strip()[-300:]}_"
+    return f"{head}\n{p.stdout.strip()}\n_Dig: `mochi-contacts show NAME` · `mochi-contacts search QUERY`_"
+
+SMS_CMD = shutil.which("mochi-sms") or str(HOME / ".local/bin/mochi-sms")
+
+
+def sense_sms(args):
+    """Their text messages: mochi-sms reads Google Messages for Web and KDE Connect; this only frames its digest."""
+    head = "## SMS (their phone)"
+    try:
+        p = subprocess.run([SMS_CMD, "recent", *args], capture_output=True, text=True, timeout=40)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"{head}\n_not available: {e}_"
+    if p.returncode != 0:
+        return f"{head}\n_not available: {(p.stderr or p.stdout).strip()[-300:]}_"
+    return p.stdout.strip()
+
+
 # ---- Home Assistant -----------------------------------------------------------------------------------
 
 def ha_token():
@@ -1709,6 +1757,27 @@ def sense_home(args):
     if stale: out.append("**Unavailable**: " + ", ".join(stale[:15]))
     out.append("_Dig: `mochi-sense home vacuum`, `mochi-sense home --grep temperature`_")
     return "\n".join(out)
+
+
+def sense_phone(args):
+    """Their phone, through Mochi's own app there (mochi-phone): where, what it's doing, what came in; `feed` is JSON
+    for the relay's live feed."""
+    if args[:1] == ["feed"]:
+        code, out, err = run(["mochi-phone", "feed"], timeout=40)
+        return out.strip() if code == 0 else json.dumps({"ok": False, "error": (err or out).strip()[-200:]})
+    code, out, err = run(["mochi-phone", "digest"], timeout=60)
+    if code != 0:
+        return "## Their phone\n_mochi-phone failed: " + (err or out).strip()[-200:] + "_"
+    return out.strip()
+
+
+def sense_where(args):
+    """Where they are, from Mochi on their phone (mochi-phone: location, battery, network, the day's stays)."""
+    cmd = ["mochi-phone", "where"] + (["--days", opt(args, "--days")] if opt(args, "--days") else [])
+    code, out, err = run(cmd, timeout=40)
+    if code != 0:
+        return "## Where they are (their phone)\n_mochi-phone failed: " + (err or out).strip()[-200:] + "_"
+    return out.strip()
 
 
 # ---- hosts over ssh ------------------------------------------------------------------------------------
@@ -1792,6 +1861,9 @@ def sense_sources(args):
     rows.append(("nas", CFG["nas"]["share"], "ok" if code == 0 else f"NO ACCESS: {(err or o).strip()[:80]}"))
     rows.append(("photos (immich)", CFG["immich"]["url"], "api key" if CFG["immich"].get("api_key") else ("browser session" if firefox_cookie(host_of(CFG["immich"]["url"]), CFG["immich"]["cookie_name"]) else "no access")))
     rows.append(("home assistant", CFG["home_assistant"]["url"], "token set" if ha_token() else "no token (home_assistant.token in sources.json)"))
+    pcode, pout, _ = run(["mochi-phone", "status"], timeout=20)
+    rows.append(("their phone", "mochi-phone (relay mc.tsatsin.com)",
+                 " / ".join(l.split(None, 1)[1] for l in pout.splitlines() if l.startswith(("relay", "phone"))) if pcode == 0 else "NO ACCESS: mochi-phone status failed"))
     for name, target in CFG["ssh"]["hosts"].items():
         code, _, err = ssh_run(target, "true", timeout=10)
         rows.append((f"ssh {name}", target, "ok" if code == 0 else "NO ACCESS (install Mochi's key: ssh-copy-id -i ~/.ssh/mochi_ed25519.pub " + target + ")"))
@@ -1802,7 +1874,17 @@ def sense_sources(args):
     p = subprocess.run([TASKS_CMD, "lists"], capture_output=True, text=True, timeout=30) if os.path.exists(TASKS_CMD) else None
     rows.append(("google tasks", "mochi-tasks (Tasks API, OAuth)", f"ok, {len(p.stdout.splitlines())} lists" if p and p.returncode == 0
                  else "NO ACCESS: " + ((p.stderr.strip()[-100:]) if p else "mochi-tasks not installed")))
-    rows.append(("gmail drafts / drive / calendar", "claude.ai connectors", "see tools available in the run"))
+    p = subprocess.run([DRIVE_CMD, "accounts"], capture_output=True, text=True, timeout=60) if os.path.exists(DRIVE_CMD) else None
+    accs = [l[2:].split(" (")[0] + (" ok" if "): ok" in l else " NO ACCESS: " + l.split("): ", 1)[-1][:60])
+            for l in p.stdout.splitlines()] if p and p.returncode == 0 else []
+    rows.append(("google drive/docs/sheets", "mochi-drive (Drive API, OAuth)", ", ".join(accs) if accs
+                 else "NO ACCESS: " + ((p.stderr.strip()[-100:]) if p else "mochi-drive not installed")))
+    p = subprocess.run([shutil.which("mochi-google") or str(HOME / ".local/bin/mochi-google"), "accounts"],
+                       capture_output=True, text=True, timeout=60) if os.path.exists(DRIVE_CMD) else None
+    rows.append(("google sign-in (calendar, contacts)", "mochi-google (OAuth)", ", ".join(l[2:].split(" (")[0] + (" ok" if l.endswith("calendar, contacts, other contacts") else ": " + l.split("): ", 1)[-1])
+                           for l in p.stdout.splitlines())
+                 if p and p.returncode == 0 else "NO ACCESS: " + ((p.stderr.strip()[-100:]) if p else "mochi-google not installed")))
+    rows.append(("gmail drafts", "claude.ai connector", "see tools available in the run"))
     out.append(md_table(rows, ["source", "where", "state"]))
     return "\n".join(out)
 
@@ -1819,16 +1901,21 @@ SENSORS = {
     "calls": (sense_calls, "recorded calls on the NAS (Videos/Zoom): list [FOLDER] | read FOLDER/CALL [--part N] [--chars N] | summary FOLDER/CALL"),
     "photos": (sense_photos, "immich: counts and newest uploads"),
     "home": (sense_home, "home assistant: people, what's on, vacuums, climate, recent changes  [--grep REGEX | WORD]"),
+    "where": (sense_where, "where they are: their phone's location, address, battery, the day's stays (mochi-phone)  [--days N]"),
+    "phone": (sense_phone, "their phone: where, what it's doing, calls, texts, notifications, app use (mochi-phone) | feed (JSON)"),
     "hosts": (sense_hosts, "ssh hosts: uptime, disk, failed units, containers  [HOST] | HOST COMMAND..."),
     "network": (sense_network, "hosts up/down, web services, tailscale, kde connect, mDNS"),
     "calendar": (sense_calendar, "their Google calendars (CalDAV): upcoming [--days N] | feed (JSON)"),
     "tasks": (sense_tasks, "their Google Tasks: open tasks, overdue and due soon first (mochi-tasks does the rest)"),
+    "birthdays": (sense_birthdays, "birthdays coming up, from their Google Contacts  [--days N]"),
+    "drive": (sense_drive, "their Google Drive in both accounts: files changed lately  [--days N] (mochi-drive does the rest)"),
+    "sms": (sense_sms, "their text messages (Messages for Web + KDE Connect): what came in lately, unread  [--hours H] (mochi-sms does the rest)"),
     "mail": (sense_mail, "local mail: recent | unread | search QUERY | show QUERY | folders  [--days N] [--limit N] [--chars N]"),
     "sessions": (sense_sessions, "claude code sessions by project  [--days N]"),
     "repos": (sense_repos, "git repos with recent commits and dirty state  [--days N]"),
     "sources": (sense_sources, "the registry: every source and whether it is reachable"),
 }
-DIGEST = ["network", "mail", "calendar", "tasks", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "home", "hosts"]
+DIGEST = ["network", "mail", "calendar", "birthdays", "tasks", "drive", "sms", "browser", "telegram", "nas", "sessions", "repos", "shell", "llm", "photos", "phone", "home", "hosts"]
 
 
 def sense_all(args):

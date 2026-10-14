@@ -5,3 +5,5 @@ __pycache__/
 *.png
 !docs/*.png
 tests/render_test
+app/build/
+app/res/mipmap/

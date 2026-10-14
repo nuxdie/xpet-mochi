@@ -14,12 +14,20 @@ install: xpet
 	install -Dm755 brain/mochi_sense.py $(PREFIX)/bin/mochi-sense
 	install -Dm755 brain/mochi_mail.py $(PREFIX)/bin/mochi-mail
 	install -Dm755 brain/mochi_tasks.py $(PREFIX)/bin/mochi-tasks
+	install -Dm755 brain/mochi_google.py $(PREFIX)/bin/mochi-google
+	install -Dm755 brain/mochi_drive.py $(PREFIX)/bin/mochi-drive
+	install -Dm755 brain/mochi_calendar.py $(PREFIX)/bin/mochi-calendar
+	install -Dm755 brain/mochi_contacts.py $(PREFIX)/bin/mochi-contacts
 	install -Dm755 brain/mochi_telegram.py $(PREFIX)/bin/mochi-telegram
 	install -Dm755 brain/mochi_browser.py $(PREFIX)/bin/mochi-browser
 	install -Dm755 brain/mochi_archive.py $(PREFIX)/bin/mochi-archive
 	install -Dm755 brain/mochi_workshop.py $(PREFIX)/bin/mochi-workshop
 	install -Dm755 brain/mochi_view.py $(PREFIX)/bin/mochi-view
 	install -Dm755 brain/mochi_vault.py $(PREFIX)/bin/mochi-vault
+	install -Dm755 brain/mochi_sms.py $(PREFIX)/bin/mochi-sms
+	install -Dm755 brain/mochi_phone.py $(PREFIX)/bin/mochi-phone
+	install -Dm755 brain/mochi_desk.py $(PREFIX)/bin/mochi-desk
+	install -Dm755 brain/mochi_tg.py $(PREFIX)/bin/mochi-tg
 	install -Dm644 brain/CLAUDE.md $(MOCHI_HOME)/CLAUDE.md
 	mkdir -p $(HOME)/.config/mochi && echo "$(CURDIR)" > $(HOME)/.config/mochi/xpet-repo  # where mochi-workshop finds the repo
 
@@ -27,13 +35,13 @@ install: xpet
 TOOLS ?= $(HOME)/.local/share/mochi-tools
 tools:
 	python3 -m venv $(TOOLS)
-	$(TOOLS)/bin/pip install -q -U yt-dlp
+	$(TOOLS)/bin/pip install -q -U yt-dlp faster-whisper telethon  # the transcriber for the phone's and the desk's clips; Telegram as them (mochi-tg)
 
 # Start at login and keep running (see README).
 install-autostart: install
 	install -Dm644 dist/xpet.service dist/mochi-brain.service dist/mochi-mail.service dist/mochi-mail.timer \
 		dist/mochi-archive.service dist/mochi-archive.timer \
-		dist/mochi-nas-index.service dist/mochi-nas-index.timer dist/mochi-vault.service -t $(HOME)/.config/systemd/user
+		dist/mochi-nas-index.service dist/mochi-nas-index.timer dist/mochi-vault.service dist/mochi-phone.service -t $(HOME)/.config/systemd/user
 	install -Dm644 dist/xpet.desktop -t $(HOME)/.config/autostart
 	systemctl --user daemon-reload
 

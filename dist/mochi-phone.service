@@ -1,0 +1,11 @@
+[Unit]
+Description=mochi-phone: what Mochi on their phone reports (location, battery), through the relay
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/mochi-phone serve
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

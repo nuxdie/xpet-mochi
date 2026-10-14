@@ -42,6 +42,11 @@ add yourself as a test user, then **Publish app**: in Testing, Google expires th
 create an OAuth client ID of type *Desktop app*. Save its JSON as `~/.config/mochi/google-oauth-client.json` and run
 `mochi-tasks auth`; Google warns that the app is unverified (it is yours: Advanced → continue).
 
+**Google Drive, Docs, Sheets, Calendar and Contacts** go through `mochi-drive`, `mochi-calendar` and
+`mochi-contacts`, which share one sign-in per Google account (`mochi-google`, on the same OAuth client): enable the
+Google Drive, Docs, Sheets, Calendar and People APIs in that project, then `mochi-google auth ACCOUNT` once per account
+and tick every box (accounts are named as in `mail.accounts` in sources.json). App passwords don't work here either.
+
 `dist/mochi-archive.timer` runs `mochi-archive sync` every hour: your interactive Claude Code sessions and your
 conversations with Mochi (chats, requests, its questions and your answers, from its transcripts plus the relay's
 `comms.jsonl`) go into the self-hosted LLM chat archive on sff as two providers, `claudecode` and `mochi`, over ssh
@@ -80,6 +85,9 @@ summaries, its own notes), and ends with a small JSON block. That block is the o
 - **Chat about it** is on every ask: it opens a terminal with Mochi in it, resumed from the very run that raised
   the question, so it remembers why. There you talk normally; chats run in bypass-permissions mode, with the relay's never-list still denied. **Open a chat** in
   the pig's menu (or `mochi-brain --chat`) opens a fresh chat any time.
+- **Recent...** in the menu lists the last dozen asks that were answered, dismissed or expired (on the pig or the
+  phone). Picking one puts it back behind the dot as it was and opens it, so "Chat about it" resumes that run's
+  session, or you can give a different answer this time. Mochi hears that you reopened it.
 - **report**: a file worth reading (the morning brief), also behind the dot.
 - **say** with **urgent**: the pig speaks and hops. Reserved for what cannot wait an hour. If you ignore an urgent
   question (or a Claude session stuck on a permission) for half a minute, it walks right up to the screen, big head at
@@ -89,7 +97,10 @@ summaries, its own notes), and ends with a small JSON block. That block is the o
 The relay decides *when*, never *what*. It also enforces *which tools* a run may use, because safety should not live
 in a prompt: a round gets read-only tools, mail drafts and sends through `mochi-mail` (msmtp; the brief says when it may send on
 its own and when it must ask first, and every send is logged), your Google Tasks through `mochi-tasks` (read freely,
-changed under the same consent rule, every change logged, no delete), and writes inside `memory/`, `journal/` and `reports/`;
+changed under the same consent rule, every change logged, no delete), your Google Drive, Docs and Sheets and your calendars in every signed-in account through `mochi-drive` and `mochi-calendar`
+(read in rounds; created or edited only in runs you asked for or approved, every change logged, nothing deleted or
+shared), your contacts through `mochi-contacts` (read-only), the SMS on your phone through `mochi-sms` (Google Messages for Web in Mochi's Chrome, and KDE Connect
+over the LAN: read freely, a text sent only under the mail rule, every send logged), and writes inside `memory/`, `journal/` and `reports/`;
 a run you asked for or approved may also edit files and run commands; and a deny list no level can override (no
 `sudo`, no deleting mail or sending through the Gmail connector, no force-push, no `rm -rf`, no sharing Drive files). Rounds use Sonnet; things
 you ask for use the default model. Constants at the top of the script: cadence, daily cap, models.
@@ -106,7 +117,25 @@ mochi-brain --status      # the pig says what it's up to
 mochi-brain --seen        # Mochi's journal for the last two days
 mochi-brain --report      # open the latest report
 mochi-brain --log         # the relay's recent log
+mochi-brain --denials     # tools Mochi's runs reached for and were refused (the allow-list audit, kept by the relay)
+mochi-brain --week        # the relay's numbers for last week (what the week note is built on)
 ```
+
+**Results are one line.** When you ask Mochi for something, or say yes to an offer, the answer is one line in the
+pig's bubble (and a message on your phone if you're away or asked from there); the full write-up is filed under
+`reports/` and listed in the menu's **Recent...**, where "Show me" and "Chat about it" still work. There is no
+"done" question to dismiss any more: a finished task raises an ask only when a real next step needs you.
+
+**Nights.** While you're away between 02:00 and 10:00 nothing starts on the clock: no light rounds, no catch-ups (new
+messages wait for the morning round), no plain triggers. Mochi's own watches still wake it, as do urgent triggers and
+the night's own runs (dream, workshop, study). The morning brief is written in the first round at or after 09:00.
+Presence comes from real input (XInput2 raw key, button and pointer events), not from X's screensaver counter, which
+any player or game resets with XResetScreenSaver: that kept the relay believing you were at the desk all night on
+2026-10-12/13 and cost 15 empty rounds. When the two disagree the relay logs it once an hour, so the culprit can be found.
+
+**The week note.** In the first dream after a week ends, Mochi writes `reports/week-YYYY-Www.md`, a short letter: what
+it took off your plate, what it got wrong, what it is carrying for you, what it would need to do more, and the relay's
+numbers for the week. It waits behind the dot like a brief. It is the one report a dream may raise.
 
 Everything the relay does is appended to `~/.local/share/mochi/actions.log`; everything Mochi thought is in its
 journal and in the Claude Code transcripts for that directory.
@@ -193,6 +222,44 @@ reply to one of Mochi's questions, it arrives as that answer. The other way, a r
 "Show me" delivers them, on screen or to the phone. A report can be a PDF or a picture too. From a shell or a chat:
 `mochi-telegram file PATH... [--caption TEXT] [--photo]`. Limits are Telegram's: 50 MB out, 20 MB in.
 
+### Telegram as you (mochi-tg)
+
+The bot is Mochi's own voice. `brain/mochi_tg.py` (installed as `mochi-tg`) is yours: it sends a Telegram message
+from *your* account, in your name, after you allow that one message on your phone (the bot shows the recipient and the
+text with **Send it** / **Deny**; no tap, no message). It exists because for a week Mochi could only hand you lines to
+paste ("ask Nastya where the contract is"). Setup once: your API id and hash in `~/.config/mochi/telegram-api.json`
+(the Telegram archive's own pair was copied there), Telethon in the tools venv (`make tools`), then `mochi-tg auth`:
+your phone number, the code Telegram sends you, your two-step password if you have one. The session lives in
+`~/.config/mochi/telegram-user.session`.
+
+`mochi-tg status`, `mochi-tg dialogs [QUERY]` (your chats with the archive's ids), `mochi-tg send WHO "TEXT" [--why
+TEXT] [--reply-to ID] [--dry-run]`, `mochi-tg log`. The relay allows `send` only in runs you asked for or approved,
+rations the questions (15 a day), and the brief's rule is the mail rule: only what you asked for, in your voice, never
+money or commitments, never to a channel or a bot. `auth` and `logout` are on the never-list. The same trade as the
+vault's "remember": the session file is readable by anything running as you, so the tap guards against mistakes, not
+against a run set on getting around it.
+
+### Your phone (the app)
+
+`app/` is Mochi on the phone: a plain-Java Android app (no Gradle, no third-party code; `app/build.sh` builds it from
+the SDK alone, `app/install.sh` installs and pairs it over adb and grants it everything). It runs as a foreground
+service and reports location, battery, network, screen, steps, every notification (messages with sender and text,
+mail, deliveries, alerts), what's playing, where the sound goes, calls, texts and app usage; the desk can send it
+`locate`, a `buzz`, an ask with buttons, and (only in a run they asked for) take a picture with either camera or
+record a clip from the microphone, which comes back transcribed (faster-whisper in Mochi's tools venv). Everything travels through `relay/` (a blind mailbox on mc.tsatsin.com,
+`relay/deploy.sh`) sealed end to end with X25519 + HKDF + AES-256-GCM, a fresh ephemeral key per message; the relay
+holds only ciphertext and keeps nothing after delivery. If the relay is out of reach for half an hour the phone mails
+the same sealed blobs through Gmail to an address mbsync already pulls. On the desk `mochi-phone serve` (a user
+service) opens them into `~/.local/share/mochi/phone/`; `mochi-sense phone` is the digest's view, `mochi-phone
+where|now|notifs|calls|sms|usage` the detail, and the relay's live feed starts catch-ups for missed calls, texts and
+messages from people. The rules for using it are in `brain/CLAUDE.md`, "Their phone".
+
+### This machine's eyes and ears
+
+`mochi-desk photo | audio --seconds N | screen [--monitor N]` are the desk's twin of the phone's captures: a still
+from the webcam, a clip from the microphone (transcribed), what's on a monitor. Same rule as the phone: only in a
+run they asked for. `mochi-desk media` lists what was taken; files live in `~/.local/share/mochi/desk/media/`.
+
 ### Its own browser
 
 `brain/mochi_browser.py` (installed as `mochi-browser`) gives Mochi a Chrome of its own: a separate profile in
@@ -202,10 +269,13 @@ the relay finds it on PATH or in an fnm/nvm install). The relay writes the MCP s
 passes it with `--mcp-config`, so the `mcp__chrome__*` tools (navigate, snapshot, screenshot, click, fill, ...) are
 there in every round, task and chat:
 
-- background runs get a headless Chrome that lives only as long as the run; a chat gets a visible window;
-- `mochi-browser open [URL]` opens Mochi's Chrome on your screen with a localhost-only debugging port, and every run
-  attaches to that window while it's open: you can watch it work, and it's how you log Mochi into something (Mochi
-  never types your passwords);
+- the Chrome is an ordinary headed one on a nested X display (Xephyr) whose window the relay keeps hidden, off the
+  screen and off the panel (wmctrl): a headless Chrome can't be shown later and sites treat it with suspicion, this
+  one is a real browser that just isn't on your desk. Runs and chats both use it; it's closed after a run unless it's
+  on your screen or a chat still has it. Without Xephyr/wmctrl, runs fall back to a headless Chrome;
+- `mochi-browser show` brings that window to the front and `hide` takes it back. Mochi does this when a page needs
+  you (a captcha, a code, a login it may not do itself); `mochi-browser open [URL]` is the same for you, e.g. to log
+  Mochi into something (Mochi never types your passwords), with a localhost-only debugging port;
 - a round may look and click; typing into forms, uploads and `evaluate_script` are only in runs you approved or chats;
 - screenshots can only be written under `reports/` in its workspace. `mochi-browser status` shows the whole chain.
 

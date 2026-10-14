@@ -163,8 +163,9 @@ class RelayComms(unittest.TestCase):
     def test_relay_lines_feed_the_archive(self):
         mb.COMMS_FILE.unlink(missing_ok=True)
         r = type("R", (), {})()
-        r.state, r.pet, r.tg, r.tasks = {"asks": {}, "events": []}, Anything(), Anything(), queue.Queue()
+        r.state, r.pet, r.tg, r.tasks = {"asks": {}, "events": [], "closed": []}, Anything(), Anything(), queue.Queue()
         r.away, r.event, r.save = (lambda: False), (lambda text: None), (lambda: None)
+        r.remember_closed = lambda *a: mb.Relay.remember_closed(r, *a)
         mb.Relay.add_ask(r, "renew the domain?", ["Yes, do it", "Not now"], aid="dom", src="round")
         mb.Relay.on_answer(r, "dom", "Yes, do it", via="pig")
         task = r.tasks.get_nowait()

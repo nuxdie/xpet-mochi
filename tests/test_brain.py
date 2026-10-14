@@ -532,5 +532,252 @@ class Workshop(unittest.TestCase):
         self.assertTrue((WS.TREE / "src" / "b.hpp").exists())
 
 
+class Pig:
+    """Records what the relay sends to the pig."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, **msg):
+        self.sent.append(msg)
+
+    def ask(self, aid, text, options, urgent=False):
+        self.sent.append({"event": "ask", "id": aid, "text": text})
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+class History(unittest.TestCase):
+    def relay(self):
+        r = type("R", (), {})()
+        r.state = {"asks": {}, "events": [], "closed": []}
+        r.pet, r.tg, r.tasks = Pig(), type("T", (), {"__getattr__": lambda s, n: lambda *a, **k: None})(), queue.Queue()
+        r.away, r.save = (lambda: False), (lambda: None)
+        r.event = lambda text: r.state["events"].append(text)
+        for name in ("add_ask", "remember_closed", "reopen", "on_answer", "on_message"):
+            setattr(r, name, getattr(mb.Relay, name).__get__(r))
+        return r
+
+    def test_dismissed_comes_back_with_its_chat(self):
+        r = self.relay()
+        r.add_ask("the gas bill | went up 30%", mb.REPORT_OPTIONS, path="/x.md", aid="gas", session="sess-1")
+        r.add_ask("workshop: a hat", ["Keep it", "Undo"], aid="workshop-1")
+        r.on_answer("gas", "Dismiss")
+        self.assertNotIn("gas", r.state["asks"])
+        r.on_message({"event": "history"})
+        h = r.pet.sent[-1]
+        self.assertEqual(h["ids"], "gas")
+        self.assertNotIn("|", h["labels"])
+        self.assertIn("(dismiss)", h["labels"])
+        r.on_message({"event": "reopen", "id": "gas"})
+        a = r.state["asks"]["gas"]
+        self.assertEqual((a["session"], a["path"]), ("sess-1", "/x.md"))
+        self.assertEqual(a["options"].count(mb.CHAT), 1)
+        self.assertEqual(r.pet.sent[-1], {"event": "show", "id": "gas"})
+        self.assertEqual(r.state["closed"], [])
+        self.assertIn("reopened (was 'Dismiss')", r.state["events"][-1])
+        r.on_message({"event": "reopen", "id": "nope"})  # unknown: nothing happens
+        self.assertEqual(r.pet.sent[-1]["event"], "show")
+        for i in range(mb.HISTORY_KEEP + 5):
+            r.remember_closed(f"a{i}", {"text": "t", "at": time.time()}, "ok")
+        self.assertEqual(len(r.state["closed"]), mb.HISTORY_KEEP)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class PhoneFeed(unittest.TestCase):
+    """The phone as a feed source: new items become catch-up items; Telegram ones only while the archive is down."""
+
+    def feed(self):
+        fired = []
+        return mb.Feed({}, lambda *a: fired.append(a)), fired
+
+    def test_phone_items_new_since_last_poll(self):
+        f, _ = self.feed()
+        items = {"phone:call:1": {"line": "phone: missed call from Mom at 10:00", "at": 1},
+                 "phone:notif:Telegram:Denis:1": {"line": "phone: 1 message(s) from Denis in Telegram", "at": 2}}
+        f.take({"ok": True, "items": items}, t=10, src="phone")      # the first look is a baseline
+        self.assertEqual(f.state["items"], {})
+        items["phone:sms:2"] = {"line": "phone: a text from DHL at 10:05", "at": 3}
+        items["phone:notif:Telegram:Denis:2"] = {"line": "phone: 2 message(s) from Denis in Telegram", "at": 4}
+        items["phone:notif:WhatsApp:Nastya:2"] = {"line": "phone: 1 message(s) from Nastya in WhatsApp", "at": 5}
+        f.take({"ok": True, "items": items}, t=20, src="phone")
+        self.assertEqual(sorted(f.state["items"]), ["phone:notif:WhatsApp:Nastya:2", "phone:sms:2"])  # Telegram: the archive's job
+
+    def test_telegram_through_the_phone_when_the_archive_is_down(self):
+        f, _ = self.feed()
+        f.take({"ok": True, "items": {}}, t=10, src="phone")
+        f.state["down"]["telegram"] = {"since": 5, "told": False}
+        f.take({"ok": True, "items": {"phone:notif:Telegram:Denis:2": {"line": "phone: 2 message(s) from Denis in Telegram", "at": 4}}},
+               t=20, src="phone")
+        self.assertEqual(list(f.state["items"]), ["phone:notif:Telegram:Denis:2"])
+
+
+class NightsAndBriefs(unittest.TestCase):
+    """Away at night means asleep (no clock rounds, no catch-ups); the brief comes in the morning; a watch still wakes."""
+
+    def at(self, h, m=0):
+        import datetime as dt
+        return dt.datetime.combine(dt.date.today(), dt.time(h, m))
+
+    def test_night_window(self):
+        a, b = mb.NIGHT_HOURS
+        self.assertTrue(mb.night_now(self.at(a)))
+        self.assertTrue(mb.night_now(self.at(b - 1, 59)))
+        self.assertFalse(mb.night_now(self.at(b)))
+        self.assertFalse(mb.night_now(self.at(a - 1, 59)))
+
+    def test_brief_once_a_day_and_not_before_morning(self):
+        st = {"brief_day": ""}
+        self.assertFalse(mb.brief_due(st, self.at(0, 30)))             # midnight is never brief time
+        self.assertTrue(mb.brief_due(st, self.at(mb.BRIEF_FROM, 5)))
+        st["brief_day"] = mb.today()
+        self.assertFalse(mb.brief_due(st, self.at(11)))                 # written already today
+        self.assertTrue(mb.brief_due({"brief_day": "2000-01-01"}, self.at(14)))  # a new day, afternoon: still due
+
+    def test_brief_label_marks_the_day(self):
+        r = type("R", (), {"state": {"brief_day": ""}})()
+        import datetime as dt
+        if dt.datetime.now().hour >= mb.BRIEF_FROM:
+            self.assertIn("morning brief", mb.Relay.brief_label(r))
+            self.assertEqual(r.state["brief_day"], mb.today())
+            self.assertEqual(mb.Relay.brief_label(r), "")               # not twice
+        else:
+            self.assertEqual(mb.Relay.brief_label(r), "")
+            self.assertEqual(r.state["brief_day"], "")
+
+    def test_a_watch_wakes_at_night_but_a_plain_trigger_waits(self):
+        s = Stub(away=True, quiet=True)
+        s.state["wake"].append({"text": "unit failed", "urgent": False, "at": time.time(), "source": "watcher"})
+        mb.Relay.maybe_wake(s)
+        self.assertEqual(s.started, [])
+        s.state["wake"].append({"text": "watch 'weid-mail' fired", "urgent": False, "at": time.time(), "source": "watch"})
+        mb.Relay.maybe_wake(s)
+        self.assertEqual(len(s.started), 1)
+        self.assertIn("weid-mail", s.started[0])
+        self.assertEqual(s.state["wake"], [])                           # the plain one rode along
+
+    def test_week_due_is_last_iso_week_once(self):
+        import datetime as dt
+        d = dt.date(2026, 10, 14)  # a Wednesday in W42
+        self.assertEqual(mb.week_due({"week_report": ""}, d), "2026-W41")
+        self.assertIsNone(mb.week_due({"week_report": "2026-W41"}, d))
+        self.assertEqual(mb.week_due({"week_report": "2026-W41"}, dt.date(2026, 10, 19)), "2026-W42")  # Monday: W42 is over
+        t0, t1 = mb.week_span("2026-W41")
+        self.assertEqual(dt.datetime.fromtimestamp(t0).date(), dt.date(2026, 10, 5))
+        self.assertEqual(t1 - t0, 7 * 86400)
+
+
+class WeekStats(unittest.TestCase):
+    def test_counts_from_comms_and_log(self):
+        import datetime as dt
+        t0, _ = mb.week_span("2026-W41")
+        d = Path(TMP) / f"week-{time.time_ns()}"
+        d.mkdir()
+        rows = [{"t": t0 + 100, "kind": "ask", "id": "a1", "src": "round", "text": "x"},
+                {"t": t0 + 200, "kind": "answer", "id": "a1", "label": "Already did it"},
+                {"t": t0 + 300, "kind": "ask", "id": "a2", "src": "result", "text": "y"},
+                {"t": t0 + 400, "kind": "answer", "id": "a2", "label": "Dismiss"},
+                {"t": t0 + 500, "kind": "done", "task": "ask", "via": "telegram", "title": "z"},
+                {"t": t0 + 600, "kind": "result", "id": "r1", "text": "sent"},
+                {"t": t0 - 10, "kind": "ask", "id": "old", "src": "round", "text": "last week"}]
+        (d / "comms.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+        day = dt.datetime.fromtimestamp(t0 + 3600).strftime("%Y-%m-%d %H:%M")
+        (d / "actions.log").write_text(f"{day} round 'round': ok (15s, $0.23)\n{day} catchup 'catch-up': ok (6s, $0.13)\n"
+                                       f"{day} round 'round': FAILED: boom (9s, $0.10)\n2026-09-01 00:00 round 'round': ok (1s, $9.00)\n"
+                                       f"{day} you're away\n")
+        s = mb.week_stats("2026-W41", comms_file=d / "comms.jsonl", log_file=d / "actions.log")
+        self.assertEqual(s["runs"], {"round": 2, "catchup": 1})
+        self.assertEqual(s["cost_usd"], 0.46)
+        self.assertEqual(s["asks_raised_by"], {"round": 1, "result": 1})
+        self.assertEqual(s["asks_unprompted"], 1)
+        self.assertEqual(s["tasks_done"], {"telegram": 1})
+        self.assertEqual(s["results_delivered"], 1)
+        self.assertEqual(s["misses"], {"Already did it": 1, "Dismiss": 1})
+        self.assertEqual(s["asks_in_week"], 2)
+
+
+class Denials(unittest.TestCase):
+    def test_denials_of_json_result(self):
+        j = {"permission_denials": [{"tool_name": "Bash", "tool_input": {"command": "echo hi >> journal/x.md && sed -i 1d y"}},
+                                    {"tool_name": "mcp__claude_ai_Gmail__unlabel_thread", "tool_input": {"threadId": "abc", "labelIds": ["INBOX"]}},
+                                    "junk"]}
+        d = mb.denials_of(j)
+        self.assertEqual(len(d), 2)
+        self.assertTrue(d[0].startswith("Bash: echo hi >> journal/x.md"))
+        self.assertIn("unlabel_thread: threadId=abc", d[1])
+        self.assertEqual(mb.denials_of({}), [])
+        self.assertEqual(mb.denials_of("nope"), [])
+
+    def test_noted_and_summarised(self):
+        r = type("R", (), {"state": {"denials": [], "events": []}})()
+        r.event = lambda text: r.state["events"].append(text)
+        mb.Relay.note_denials(r, {"kind": "approved", "title": "Archive them"}, {"denials": ["mcp__x: threadId=1", "mcp__x: threadId=2"]})
+        mb.Relay.note_denials(r, {"kind": "round", "title": "round"}, {"denials": ["Bash: echo a >> b"]})
+        mb.Relay.note_denials(r, {"kind": "round", "title": "round"}, {})
+        self.assertEqual(len(r.state["denials"]), 3)
+        self.assertEqual(len(r.state["events"]), 1)                     # only the task they asked for is said out loud
+        self.assertIn("Archive them", r.state["events"][0])
+        rows = mb.Relay.denials_lately(r)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(rows[0].startswith("1× in "))
+        self.assertIn("approved", rows[0])
+
+
+class Results(unittest.TestCase):
+    """A finished task: one line in the bubble, filed under Recent..., no 'done' ask."""
+
+    def relay(self, away=False):
+        r = type("R", (), {})()
+        r.state = {"asks": {}, "events": [], "closed": []}
+        r.pet, r.tasks = Pig(), queue.Queue()
+        r.pet.say = lambda text, secs=0: r.pet.sent.append({"event": "say", "text": text, "secs": secs})
+        r.tg_sent = []
+        r.tg = type("T", (), {"send": lambda s, text, **k: r.tg_sent.append(text), "may_buzz": lambda s, *a, **k: False,
+                              "report_body": lambda s, p: "body", "__getattr__": lambda s, n: lambda *a, **k: None})()
+        r.away, r.save = (lambda: away), (lambda: None)
+        r.event = lambda text: r.state["events"].append(text)
+        for name in ("deliver_result", "write_report", "remember_closed", "add_ask"):
+            setattr(r, name, getattr(mb.Relay, name).__get__(r))
+        return r
+
+    def test_bubble_and_recent_not_an_ask(self):
+        mb.REPORTS.mkdir(parents=True, exist_ok=True)
+        r = self.relay()
+        r.deliver_result({"kind": "ask", "title": "move the call", "via": "pig"},
+                         {"text": "I moved it.\n\n```json\n{\"say\": \"moved it to sat 19:00\"}\n```"},
+                         {"say": "moved it to sat 19:00"}, "sess-9")
+        self.assertEqual(r.state["asks"], {})                           # no result ask
+        says = [m for m in r.pet.sent if m.get("event") == "say"]
+        self.assertEqual(says[-1]["text"], "moved it to sat 19:00")
+        c = r.state["closed"][-1]
+        self.assertEqual((c["how"], c["session"]), ("done", "sess-9"))
+        self.assertTrue(Path(c["path"]).exists())
+        self.assertIn("I moved it.", Path(c["path"]).read_text())
+        self.assertEqual(r.tg_sent, [])                                 # at the desk: nothing to the phone
+        self.assertIn("(done)", mb.history_label(c))
+
+    def test_away_gets_the_line_on_the_phone(self):
+        r = self.relay(away=True)
+        r.deliver_result({"kind": "approved", "title": "t", "via": "pig"}, {"text": "ok"}, {}, "")
+        self.assertEqual(r.tg_sent, ["done: t"])
+        r2 = self.relay()
+        r2.deliver_result({"kind": "ask", "title": "t", "via": "telegram"}, {"text": "ok"}, {"say": "did it"}, "")
+        self.assertEqual(r2.tg_sent, ["did it\n\nbody"])                # asked from the phone: the whole answer goes back
+
+
+class Presence(unittest.TestCase):
+    def test_raw_input_wins_once_seen(self):
+        p = mb.IdleProbe(raw=False)
+        p.input = type("I", (), {"seconds": lambda s: None})()
+        p.screensaver_seconds = lambda: 3.0
+        self.assertEqual(p.seconds(), 3.0)                               # no raw event yet: the screensaver counter
+        p.input = type("I", (), {"seconds": lambda s: 900.0})()
+        self.assertEqual(p.seconds(), 900.0)                             # X says 3 s, the devices say 15 min: the devices
+        self.assertGreater(p.noted, 0)                                   # and it was logged
+        p.screensaver_seconds = lambda: 1000.0
+        p.input = type("I", (), {"seconds": lambda s: 20.0})()
+        self.assertEqual(p.seconds(), 20.0)
