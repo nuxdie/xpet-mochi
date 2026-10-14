@@ -29,6 +29,7 @@ import importlib.util
 import json
 import os
 import queue
+import random
 import re
 import select
 import shlex
@@ -73,6 +74,8 @@ AWAY_ROUND_EVERY = 2 * 3600  # while you're away and the Telegram bot is set up:
 NIGHT_HOURS = (2, 10)        # away in this window = asleep: nothing starts on the clock (no light rounds, no catch-ups);
                              # only a watch of Mochi's, an urgent trigger, or the night's own runs (dream, workshop, study)
 BRIEF_FROM = 9               # the morning brief is written in the first round at or after this hour, never at midnight
+HOME_OUT_MIN = 20 * 60       # the phone out this long and then home = they came home (shorter is GPS jitter or the bins)
+HOME_GREET_WITHIN = 4 * 3600  # home, then at the desk within this long: the pig greets them there too
 TG_AUDIBLE_PER_DAY = 3       # Telegram messages that may buzz your phone per day; the rest arrive silently
 TG_QUIET_HOURS = (23, 8)     # nothing buzzes between these hours, except an urgent say
 VAULT_ASKS_PER_DAY = 20      # mochi-vault sign-in questions on the phone per day (each one is a tap they owe)
@@ -2128,6 +2131,8 @@ class Relay:
                     if not a.get("tg"):
                         a["tg"] = self.tg.ask(aid, a)
             log("you're away" if away else "you're back")
+            if not away:
+                self.greet_at_desk()
         first_today = self.state["counts"].get("day") != today() or self.count("rounds") == 0
         if away and dream_due(dt.datetime.now(), self.state["last_dream"], now() - (self.state["away_since"] or now()),
                               journal_days(self.state["last_dream"])) and not self.busy and self.tasks.empty():
@@ -2169,9 +2174,51 @@ class Relay:
         self.state["brief_day"] = today()
         return "the morning brief is due now (first round at or after 09:00 today): write it; "
 
+    # -- coming home ("when I'm back home I want mochi to greet me", 2026-10-14). mochi-phone reports the zone changes
+    # as triggers; a real return (out a while, not GPS jitter) gets one quiet line on the phone at the door, and the
+    # pig is glad when they first sit down at the desk afterwards. Both are answers to them arriving, never news.
+
+    HOME_LINES = {"morning": ["welcome home! 🐷", "you're back! oink"],
+                  "day": ["welcome home! 🐷", "you're back! oink", "home again 🐷"],
+                  "evening": ["welcome home 🐷 the evening's yours", "home! oink. kettle on?", "welcome back home 🐷"],
+                  "night": ["home safe 🐷", "welcome home. sleep well 🐷"]}
+    DESK_LINES = ["welcome home!", "you're home! oink", "there you are!"]
+
+    def on_phone_zone(self, text):
+        if text != "their phone: home":  # left home, or went from home straight to a named place
+            if not self.state.get("left_home"):
+                self.state["left_home"] = now()
+            self.state["home_greet"] = 0
+        else:
+            left = self.state.get("left_home") or 0
+            self.state["left_home"] = 0
+            if not left or now() - left < HOME_OUT_MIN:
+                return
+            self.state["home_greet"] = now()
+            h = dt.datetime.now().hour
+            part = "night" if h < 5 else "morning" if h < 12 else "day" if h < 18 else "evening"
+            if self.away():  # at the desk already (a phone that lagged): the pig says it instead
+                self.tg.send(random.choice(self.HOME_LINES[part]))
+                log("came home: greeted on the phone")
+            else:
+                self.greet_at_desk()
+
+    def greet_at_desk(self):
+        at = self.state.get("home_greet") or 0
+        if not at:
+            return
+        self.state["home_greet"] = 0
+        if now() - at > HOME_GREET_WITHIN:
+            return
+        self.pet.send(event="emote", emote="happy")
+        self.pet.say(random.choice(self.DESK_LINES), 4)
+        log("came home: the pig greeted them at the desk")
+
     def trigger(self, text, urgent=False, source="trigger", wake=True):
         """Something happened that may deserve a round before the clock says so. The relay notes it for Claude and,
         if the rationing allows (maybe_wake), starts a round with it as the reason; what to do about it is Claude's."""
+        if text.startswith(("their phone: ", "their phone left ")):  # mochi-phone's zone changes
+            self.on_phone_zone(text)
         self.event(f"[{source}] {text}")
         if wake:
             self.state["wake"] = (self.state["wake"] + [{"text": text[:500], "urgent": bool(urgent), "at": now(),
