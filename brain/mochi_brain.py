@@ -251,13 +251,16 @@ NEVER = [  # denied at every level, including things you approved
 WORKSHOP_TOOLS = ["Edit(workshop/xpet/src/**)", "Write(workshop/xpet/src/**)", "Edit(workshop/xpet/tests/**)",
                   "Write(workshop/xpet/tests/**)", "Bash(mochi-workshop build:*)", "Bash(mochi-workshop test:*)",
                   "Bash(mochi-workshop preview:*)", "Bash(mochi-workshop diff:*)", "Bash(mochi-workshop status:*)"]
+# Mochi's own computer (peppy, an old Chromebook; brain/mochi_box.py): root there, every command logged. It holds none
+# of their keys or files, so it is Mochi's to use in any run that may act, rounds included (CLAUDE.md "Your own computer").
+BOX_TOOLS = ["Bash(mochi-box:*)"]
 LEVELS = {
-    "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + BROWSE_TOOLS,
+    "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + BROWSE_TOOLS + BOX_TOOLS,
     "dream": READ_TOOLS + OWN_FILES,  # reads and rewrites its own notes; no mail, no browser
     "workshop": READ_TOOLS + OWN_FILES + WORKSHOP_TOOLS,  # its notes and its own body; nothing else
     "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS
                 + PHONE_CAPTURE_TOOLS
-                + VAULT_TOOLS + DRIVE_CHANGE_TOOLS + TG_SEND_TOOLS,
+                + VAULT_TOOLS + DRIVE_CHANGE_TOOLS + TG_SEND_TOOLS + BOX_TOOLS,
 }
 
 BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}\n```'
