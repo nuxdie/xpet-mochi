@@ -948,8 +948,8 @@ public:
         bool shouldHide = st == St::Away || D.fullscreenActive;
         if (shouldHide != hidden) {
             hidden = shouldHide;
-            if (hidden) { menu.close(); XUnmapWindow(dpy, win); }
-            else { XMapRaised(dpy, win); seenAt = now(); }  // it couldn't see you meanwhile: a film is not a break
+            if (hidden) { menu.close(); XUnmapWindow(dpy, win); hiddenAt = D.fullscreenActive ? now() : 0; }
+            else { XMapRaised(dpy, win); seenAt = now(); filmOver(); }  // it couldn't see you meanwhile: a film is not a break
         }
         if (st == St::Away) {
             if ((awayLeft -= dt) <= 0) { dropInAtPointer(); say("I'm back"); }
@@ -1274,6 +1274,9 @@ private:
     // the last moment it knew you were there (the pointer moved, a click, or it was just unhidden and couldn't tell)
     double seenAt = now();
     static constexpr double BREAK_SECS = 20 * 60;  // this long without a stir counts as you having been away
+    // when a fullscreen window (a film, a game) hid it; 0 when it's showing or was hidden for another reason
+    double hiddenAt = 0;
+    static constexpr double FILM_STRETCH_SECS = 2 * 60, FILM_NAP_SECS = 25 * 60;  // behind the screen this long: a stretch; this long: it dozed off
     // the close-up: ignored while it needs you, it comes up to the glass and stares, then goes back
     double closeT = -1, attentionSince = 0, lastCloseup = 0, approach = 0;
     static constexpr double CLOSE_IN = 2.0, CLOSE_STARE = 4.5, CLOSE_OUT = 2.0;
@@ -1652,6 +1655,22 @@ private:
     void welcomeBack() {
         bool settled = st == St::Idle || st == St::Sit || st == St::Work;
         if (settled && grounded() && !anim.busy() && !menu.open && !closeupOn()) anim.start(art3d::Action::Perk, 2.2);
+    }
+
+    // The film's over: a fullscreen window had it hidden and now it's back on the desk. A couple of minutes behind the
+    // screen and it comes back with a stretch; a long one and it had dozed off there, so it wakes up properly (the
+    // yawn, stretch and shake of Rouse). A moment's fullscreen (a quick alt-tab) is nothing. Sitting, it gets up for
+    // it; asleep it sleeps on; walking, playing or at its desk it just carries on. No bubble: it's a reaction, not news.
+    void filmOver() {
+        double gone = hiddenAt > 0 ? now() - hiddenAt : 0;
+        hiddenAt = 0;
+        if (gone < FILM_STRETCH_SECS) return;
+        bool settled = st == St::Idle || st == St::Sit;
+        if (!settled || !grounded() || anim.busy() || menu.open || closeupOn()) return;
+        bool nap = gone >= FILM_NAP_SECS;
+        set(St::Idle, nap ? 4 : 3);  // on its feet, and no new plan until the trick is done
+        anim.start(nap ? art3d::Action::Rouse : art3d::Action::Stretch, nap ? 3.0 : 2.2);
+        idleActionIn = frand(6, 12);  // not another trick straight after
     }
 
     // Waking up on its own, rested: it gets up with a yawn, a stretch and a shake rather than just standing up.
