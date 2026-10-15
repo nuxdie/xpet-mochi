@@ -57,7 +57,18 @@ avatar: tests/portrait.cpp $(wildcard src/*.hpp)
 	$(CXX) -std=c++17 -O2 -Wno-missing-field-initializers $(shell pkg-config --cflags cairo) tests/portrait.cpp -o tests/portrait $(shell pkg-config --libs cairo)
 	./tests/portrait dist/mochi-avatar.png 8.5 650 70 o
 
-clean:
-	rm -f xpet tests/render_test tests/portrait
+# The README's pictures (docs/*.gif, docs/*.png), drawn by the pig's own renderer: no real desktop in them. Needs ffmpeg.
+readme-art: tests/readme_art.cpp $(wildcard src/*.hpp)
+	$(CXX) -std=c++17 -O2 -Wno-missing-field-initializers $(shell pkg-config --cflags cairo) tests/readme_art.cpp -o tests/readme_art $(shell pkg-config --libs cairo)
+	rm -rf docs/frames && ./tests/readme_art docs/frames
+	for s in hero tricks life handled; do \
+		ffmpeg -loglevel error -y -framerate 30 -i docs/frames/$$s/%04d.png \
+			-vf "fps=25,split[a][b];[a]palettegen=max_colors=192:stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
+			-loop 0 docs/$$s.gif; done
+	cp dist/mochi-avatar.png docs/mochi.png
 
-.PHONY: tools install install-autostart clean test avatar
+clean:
+	rm -f xpet tests/render_test tests/portrait tests/readme_art
+	rm -rf docs/frames
+
+.PHONY: tools install install-autostart clean test avatar readme-art

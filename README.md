@@ -1,17 +1,175 @@
-# xpet
+<p align="center">
+  <img src="docs/mochi.png" width="150" alt="Mochi, a blocky pink pig, looking at you">
+</p>
 
-A small 3D Minecraft-style pig that lives on top of your windows (X11), software-rendered with Cairo (no GL). It walks along title bars and around inside windows (on their floor, just above the bottom edge), jumps between them, rides along when you drag a window, and falls off when you close or minimise the one it's standing on.
+<h1 align="center">Mochi</h1>
 
-It is properly animated: a four-legged gait that matches its ground speed (a trot when it chases your cursor), breathing, a wagging tail nub, a head that follows your pointer when it moves, looks over at the window you are working in (focus and title changes count as activity), and looks out at you when it talks to you, when you pet it, and now and then when things are quiet (it turns to face you to talk), and a smooth turn through "facing you" instead of a flip. On its own it sniffs the ground, stretches, shakes, looks around, scratches, wiggles and hops. It nuzzles your hand when petted and shakes its head when it has had enough, squashes on landing and stretches on take-off, kicks when you hold it and tumbles when you throw it, turns to face into the screen and sits down at its laptop (or book, or globe) when it works, tapping the keys and following the lines, chews with a working snout as the bowl empties, and twitches a leg in its sleep. Poses ease into each other instead of snapping. It cheers (two jumps) when a Claude run finishes that touched five or more files, sulks when a run keeps failing, and now and then walks over to sit on the window you have settled into. It blinks at a natural rhythm, snuffles at your pointer when it comes to its nose, its skin has a faint per-texel tone, and the light goes warm in the evening and cool at night. `src/art3d.hpp` holds the model, the rig and the renderer.
+<p align="center">
+  <b>A small pixel pig that lives on top of your windows, with Claude Code for a brain.</b><br>
+  It walks your title bars, naps, eats, cheers when your build goes green,<br>
+  and quietly keeps the threads of your life from slipping.
+</p>
 
-## Build
+<p align="center">
+  <img alt="X11" src="https://img.shields.io/badge/X11-Linux_desktop-f4a7a0?style=flat-square">
+  <img alt="C++17 + Cairo" src="https://img.shields.io/badge/C%2B%2B17-Cairo,_no_GL-c97b84?style=flat-square">
+  <img alt="Claude Code" src="https://img.shields.io/badge/brain-Claude_Code-d97757?style=flat-square">
+  <img alt="Android" src="https://img.shields.io/badge/phone-Android_app-9db58a?style=flat-square">
+  <img alt="Telegram" src="https://img.shields.io/badge/away-Telegram_bot-7aa7d9?style=flat-square">
+</p>
+
+<p align="center">
+  <img src="docs/hero.gif" alt="Mochi walks along a window's title bar, turns to you, cheers that the tests pass, and walks back" width="880">
+</p>
+
+<p align="center">
+  <a href="#the-pig">The pig</a> ·
+  <a href="#the-mind">The mind</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#use">Use</a> ·
+  <a href="#the-brain">How the brain works</a> ·
+  <a href="#privacy">Privacy</a>
+</p>
+
+---
+
+Mochi is two things that grew up together:
+
+- **`xpet`**, a 3D Minecraft-style pig that lives on your X11 desktop. One C++ file and a few headers, software-rendered
+  with Cairo at 30 fps, no GL, no engine. It stands on your windows, rides along when you drag them and falls off when you
+  close them.
+- **`mochi-brain`**, a thin relay that wakes [Claude Code](https://claude.com/claude-code) in the pig's own workspace
+  about every half hour, and whenever something new reaches you. Claude reads its notes, looks around your mail,
+  calendar, chats and repos, carries the open loops, and almost never interrupts. It was written for one person's brief:
+
+> *"I have many things going in my life. I have many places those things are registered or described. My main target is
+> to have an entity that would be in the know and could act benevolently for me. Keep me going and moving light through
+> life."*
+
+The pig is useful on its own (a desk pet, and a live avatar for your Claude Code sessions). The brain is the ambitious
+half: it is built around one person's setup, and reading `brain/CLAUDE.md` is the best way to see what it does and why.
+
+## The pig
+
+<p align="center">
+  <img src="docs/life.gif" alt="Eight pigs: walking, trotting, eating from a bowl, napping, and sitting at a laptop, a book, a terminal and a globe" width="880">
+</p>
+
+**It has a life of its own.** A four-legged gait that matches its ground speed (a trot when it chases your cursor),
+breathing, a wagging tail nub, blinking at a natural rhythm. It eats when it's hungry, chewing with a working snout as
+the bowl empties; it naps and twitches a leg in its sleep. There is nothing to feed and no stats to manage: it looks
+after itself, and time passes gently while it isn't running. It doesn't die.
+
+**It works when you work.** Hooked into Claude Code, it turns to face into the screen and sits down at its laptop when
+a session writes code, a book when it reads or searches, a terminal when it runs things, a globe when it browses,
+tapping the keys and following the lines.
+
+<p align="center">
+  <img src="docs/tricks.gif" alt="Eight tricks: sniff, stretch, shake, hop, scratch, wiggle, look around, cheer" width="880">
+</p>
+
+**It has tricks.** On its own it sniffs the ground, stretches, shakes, scratches, wiggles, hops and looks around. It
+cheers (two jumps, turned round to you) when a Claude run finishes that touched five or more files, and sulks when a run
+keeps failing. Squash before a hop, stretch on take-off, a settle after landing: poses ease into each other instead of
+snapping.
+
+<p align="center">
+  <img src="docs/handled.gif" alt="Four pigs: kicking while held up, being petted, perking up when you're back, sulking" width="880">
+</p>
+
+**It notices you.** Its head follows your pointer, looks over at the window you're working in, and looks out at *you*
+when it talks, when you pet it, and when you come back after a break. Pet it and it nuzzles your hand (until it has
+had enough and shakes its head). Pick it up and it kicks; throw it and it tumbles, then squashes on landing. Now and then
+it walks over to sit on the window you've settled into.
+
+<p align="center">
+  <img src="docs/costumes.png" alt="The pig in four outfits: none, an autumn scarf, a witch hat, a bobble hat" width="880">
+</p>
+
+**It dresses for the season,** and makes its own clothes. On *workshop nights* the brain gets an hour in its own git
+worktree of this repo to make one thing about the pig better: a costume for a date coming up, a new trick, a better
+reaction to your desktop. It renders what it made, looks at the picture, iterates, and must pass the render test. In
+the morning you get one quiet line in the menu: **Keep it** or **Undo**. An undo is the most useful thing you can tell
+it, and it writes down why.
+
+<p align="center">
+  <img src="docs/daylight.png" alt="The same pig in morning, day, evening and night light" width="880">
+</p>
+
+**It lives in your light.** Warm in the evening, cool and dim at night. Its skin has a faint per-texel tone, and the
+whole thing is Minecraft boxes drawn by a tiny software renderer in `src/art3d.hpp` (the model, the rig, the renderer).
+It hides while a fullscreen app is focused.
+
+## The mind
+
+<p align="center">
+  <img src="docs/ask.png" alt="The pig on a window with a yellow question bubble: the dentist moved to thu 15:00. put it in your calendar?" width="880">
+</p>
+
+**Quiet is the rule.** Most rounds end with nothing to show: what Mochi noticed goes into its journal, not your face.
+When something needs you, it becomes an **ask**: a small yellow dot by the pig's head that waits until you choose to
+look. Claude designs each question itself, with its own buttons ("which evening?" → *Tue* / *Thu* / *neither*), and
+**Chat about it** on every ask opens a terminal with Mochi in it, resumed from the very run that asked. The pig only
+speaks up on its own for what can't wait an hour.
+
+```mermaid
+flowchart LR
+    subgraph world [Where your life is written down]
+        direction TB
+        M[Mail] ~~~ C[Calendars & tasks] ~~~ T[Telegram, SMS] ~~~ P[Phone] ~~~ N[NAS, repos, browser, ...]
+    end
+    world -->|mochi-sense digests| R(("claude -p<br/>in Mochi's workspace"))
+    R <-->|reads & writes| W[("memory/ · journal/<br/>reports/")]
+    R -->|one JSON block| B[mochi-brain relay]
+    B -->|asks, reports, rare urgent say| X[🐷 the pig]
+    B -->|when you're away| PH[📱 your phone]
+    X -->|your answer| B
+    PH -->|tap or reply| B
+    B -->|a yes starts a run with more tools| R
+```
+
+**What it does in a day.**
+
+| when | what runs |
+|---|---|
+| about every 30 min while you're at the desk | a **round**: read the notes, look around, carry the open loops, usually say nothing |
+| a chat settles, mail lands, a calendar event moves, a call gets transcribed | a **catch-up**: is it news? update the loops, tell you only if it changes something |
+| first round after 09:00 | the **morning brief**, under 25 lines, behind the dot |
+| you're away | asks go to your phone as buttons; the bar for asking doesn't move |
+| a watch it set fires ("wake me when that reply arrives", "wake me Friday at 10") | an early round, rationed |
+| night | a **dream** (fold days into patterns), a **study** session (who you are, from your archives), a **workshop** (the pig) |
+| once a week | **the week with Mochi**: what it took off your plate, what it got wrong, what it's carrying |
+
+**Safety lives in the relay, not the prompt.** Each kind of run gets an allow-list of tools: rounds read and draft,
+runs you said yes to may act, and a deny list no level overrides (no `sudo`, no deleting mail, no force-push, no
+sharing Drive files). Sending mail, a Telegram message or a text as you follows one consent rule, and the risky ones
+ask your phone first. Every action is logged.
+
+## Quick start
 
 Needs `libx11-dev libxext-dev libxrandr-dev libcairo2-dev`.
 
 ```sh
-make
-./xpet              # or: make install  (→ ~/.local/bin/xpet)
+make && ./xpet          # just the pig
+make install            # → ~/.local/bin/xpet, mochi-brain, mochi-sense, ... and Mochi's CLAUDE.md
+make install-autostart  # start both at login, restarted by systemd if they crash
+make test               # renders every pose, action and costume and checks each frame
+make readme-art         # re-renders the pictures in this README (needs ffmpeg)
 ```
+
+The pig alone needs nothing else. The brain needs the `claude` CLI; each source it reads is optional and set up in
+`~/.config/mochi/sources.json` (start from `sources.example.json`). The sections below cover each one.
+
+| | |
+|---|---|
+| `src/` | the pig: `main.cpp` (its life, the desktop, the menu, the socket), `art3d.hpp` (model, rig, renderer), `wardrobe.hpp` (costumes and their calendar) |
+| `brain/` | the relay (`mochi_brain.py`), the senses (`mochi_sense.py`), one tool per service (`mochi_mail.py`, `mochi_calendar.py`, `mochi_tg.py`, ...), and `CLAUDE.md`, Mochi's standing brief |
+| `app/` | Mochi on the phone: a plain-Java Android app, no Gradle |
+| `relay/` | a blind, end-to-end-sealed mailbox between the phone and the desk |
+| `dist/` | systemd units and the autostart entry |
+| `tests/` | the render test, the README renderer, unit tests for the tools |
+
+---
 
 ## Use
 
@@ -227,7 +385,7 @@ reply to one of Mochi's questions, it arrives as that answer. The other way, a r
 The bot is Mochi's own voice. `brain/mochi_tg.py` (installed as `mochi-tg`) is yours: it sends a Telegram message
 from *your* account, in your name, after you allow that one message on your phone (the bot shows the recipient and the
 text with **Send it** / **Deny**; no tap, no message). It exists because for a week Mochi could only hand you lines to
-paste ("ask Nastya where the contract is"). Setup once: your API id and hash in `~/.config/mochi/telegram-api.json`
+paste ("ask her where the contract is"). Setup once: your API id and hash in `~/.config/mochi/telegram-api.json`
 (the Telegram archive's own pair was copied there), Telethon in the tools venv (`make tools`), then `mochi-tg auth`:
 your phone number, the code Telegram sends you, your two-step password if you have one. The session lives in
 `~/.config/mochi/telegram-user.session`.
