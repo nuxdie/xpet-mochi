@@ -142,8 +142,8 @@ inline const RGB PINK = rgb(0xF0A5A2), SNOUT = rgb(0xD97F7D), DARK = rgb(0x4A262
                  COVER = rgb(0x4A78D6), SEA = rgb(0x3F74D8), LAND = rgb(0x5DBB63), BOWL = rgb(0x6C8EBF),
                  FOOD = rgb(0x8A5A2B), STAND = rgb(0x5A4A3A);
 // The Fresh Animations skin's accents (FreshLX's resource pack): the snout is the face's own pink with a darker middle
-// row and the nostrils at its outer edges, a brow over each eye, two dark toes on each hoof, a red ridge down the back.
-inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL = rgb(0x894746), BROW = rgb(0xE8908B),
+// row and the nostrils at its outer edges, two dark toes on each hoof, a red ridge down the back.
+inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL = rgb(0x894746),
                  RIDGE = rgb(0xC6615A), RIDGE_DOT = rgb(0xBE504D);
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
@@ -769,30 +769,21 @@ inline void rect(Box& b, int face, double u0, double u1, double v0, double v1, R
     if (u1 - u0 > 0.02 && v1 - v0 > 0.02) b.decals.push_back({face, (u0 + u1) / 2, (v0 + v1) / 2, (u1 - u0) / 2, (v1 - v0) / 2, c});
 }
 
-// The face is the Fresh Animations pig's (FreshLX): at the outer edges each eye is a 2x1 white with a 1x1 pupil that
-// moves (px, py: -1..1, toward +z and up), a darker brow over it. Theirs sit a row lower, level with the top of the
-// snout; seen three-quarters on (how the pig mostly stands) the snout hid the near eye there, so these are a row up.
-inline Part headPart(Eyes eyes, double snout, double px = 0, double py = 0) {
+// The eyes are the pig's own, not Fresh Animations' (he liked these better, 2026-10-15): a white outer column and a
+// black inner one, no brow, no moving pupil. The rig still computes pupilX/Y; the face just doesn't use them.
+inline Part headPart(Eyes eyes, double snout, double /*px*/ = 0, double /*py*/ = 0) {
     Part p;
     Box head{{4, 0, 0}, {8, 8, 8}, PINK, 1u << 1, {}};  // pivot at the neck (back-centre); back face sits in the body
-    // On the front face (+x) u is up and v is sideways (+z). Decals mustn't overlap (the z-buffer can't order them),
-    // so the white is laid round the pupil.
-    for (double side : {-1.0, 1.0}) {
-        double v0 = side > 0 ? 2 : -4, v1 = v0 + 2;
-        rect(head, 0, 2, 3, v0, v1, BROW);
-        if (eyes == Eyes::Open) {
-            double out = std::clamp(side * px, 0.0, 1.0);  // the pupil rests at the inner corner, moves out from there
-            double pa = side > 0 ? 2 + out : -3 - out, pb = pa + 1;
-            double pu0 = std::clamp(1 + 0.4 * py, 1.0, 2.0), pu1 = std::clamp(2 + 0.4 * py, 1.0, 2.0);
-            rect(head, 0, 1, 2, v0, pa, WHITE);
-            rect(head, 0, 1, 2, pb, v1, WHITE);
-            rect(head, 0, 1, pu0, pa, pb, WHITE);
-            rect(head, 0, pu1, 2, pa, pb, WHITE);
-            rect(head, 0, pu0, pu1, pa, pb, BLACK);
-        } else {
-            rect(head, 0, 1.35, 1.65, v0, v1, DARK);
-            if (eyes == Eyes::Happy) rect(head, 0, 0.1, 0.8, v0 + 0.3 * side + 0.2, v1 + 0.3 * side - 0.2, BLUSH);
+    // Eyes on the front face (+x): u is up, v is sideways. Each eye: white outer column, black inner.
+    if (eyes == Eyes::Open) {
+        for (double side : {-1.0, 1.0}) {
+            head.decals.push_back({0, 2.0, side * 3.0, 1.0, 0.5, WHITE});
+            head.decals.push_back({0, 2.0, side * 2.0, 1.0, 0.5, BLACK});
         }
+    } else {
+        for (double side : {-1.0, 1.0}) head.decals.push_back({0, 2.0, side * 2.5, 0.3, 1.0, DARK});
+        if (eyes == Eyes::Happy)
+            for (double side : {-1.0, 1.0}) head.decals.push_back({0, 0.6, side * 2.6, 0.5, 0.9, BLUSH});
     }
     p.boxes.push_back(head);
     // The head's back face is buried in the body except for the strip above the body line: a thin cap box
