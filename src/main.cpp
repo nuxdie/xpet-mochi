@@ -861,7 +861,7 @@ public:
             se.busy = false;
             setAct(Act::Done, "", "");
             if (id == shownSession || shown == Act::Off) {
-                if (se.edits >= 5) { anim.start(art3d::Action::Cheer, 1.6); say("done! " + std::to_string(se.edits) + " files", 3); spawn(0); spawn(0); }
+                if (se.edits >= 5) { anim.start(art3d::Action::Cheer, art3d::CHEER_SECS); say("done! " + std::to_string(se.edits) + " files", 3); spawn(0); spawn(0); }
                 else if (se.errors >= 3) { say("done, but that was rough", 3); }
             }
         } else if (ev == "compact") {
@@ -1168,7 +1168,9 @@ public:
             atDesk = false;
         }
         // Turn around smoothly: the pig swings through "facing you" on the way. At the desk it turns to the prop.
-        bool faceYou = (bubbleLeft > 0 || happyLeft > 0) && !atDesk && !lyingDown() && (pose == art::Pose::Stand || pose == art::Pose::Sit);
+        // A cheer turns round to you even at the desk (it's showing you the job is done), then back to the work.
+        bool cheering = anim.action == art3d::Action::Cheer;
+        bool faceYou = (((bubbleLeft > 0 || happyLeft > 0) && !atDesk) || cheering) && !lyingDown() && (pose == art::Pose::Stand || pose == art::Pose::Sit);
         double targetYaw = closeupOn() ? (backingOff ? 270 : 90) : faceYou ? 90 : atDesk ? deskYaw : (mirror ? 150 : 30);
         double turn = std::fmod(targetYaw - yaw + 540, 360) - 180;  // shortest way round
         yaw = std::fmod(yaw + turn * 0.16 + 360, 360);
@@ -2069,15 +2071,18 @@ int writeStrip(const std::string& name, const char* path) {
         return 1;
     }
     double zoom = getenv("XPET_SHEET_ZOOM") ? atof(getenv("XPET_SHEET_ZOOM")) : 1.6;
-    const int cellW = (int)(100 * zoom), cellH = (int)(78 * zoom), N = 8;
-    cairo_surface_t* sf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, cellW * N, cellH * 2);
+    const int cellW = (int)(100 * zoom), cellH = (int)(110 * zoom), N = 8;  // tall enough for a hop or a rear-up
+    // Rows: standing three-quarter, standing facing you, and at the desk (sitting at the laptop, as when a Claude
+    // session ends and it cheers), so a trick can be judged where it actually plays.
+    cairo_surface_t* sf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, cellW * N, cellH * 3);
     cairo_t* cr = cairo_create(sf);
     cairo_set_source_rgb(cr, 0.82, 0.85, 0.90);
     cairo_paint(cr);
-    for (int row = 0; row < 2; ++row)
+    for (int row = 0; row < 3; ++row)
         for (int i = 0; i < N; ++i) {
             art3d::Frame f;
-            f.yaw = row ? 90 : 30;
+            f.yaw = row == 0 ? 30 : row == 1 ? 90 : 315;
+            if (row == 2) { f.pose = art3d::Pose::Sit; f.prop = art3d::Prop::Laptop; }
             double p = (i + 0.5) / N;
             f.t = 1.0 + p * a->secs;
             f.costume = wardrobe::today();

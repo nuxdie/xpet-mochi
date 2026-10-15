@@ -92,6 +92,14 @@ int main() {
             char name[96]; snprintf(name, sizeof name, "costume-%s-%s", c.name.c_str(), act);
             frame(name, f, actionNamed(act)->action, 0.5);
         }
+    std::vector<const Costume*> dressed{nullptr};
+    for (const Costume& c : wardrobe::all()) dressed.push_back(&c);
+    for (const Costume* c : dressed)  // cheering at the desk: turned round to you, reared up, hooves high
+        for (double p : {0.4, 0.55}) {
+            Frame f; f.pose = Pose::Sit; f.prop = Prop::Laptop; f.yaw = 90; f.t = 1.1; f.costume = c;
+            char name[96]; snprintf(name, sizeof name, "desk-cheer-%s@%.2f", c ? c->name.c_str() : "bare", p);
+            frame(name, f, Action::Cheer, p);
+        }
     check("every season names a costume that exists", [] {
         for (const wardrobe::Season& s : wardrobe::SEASONS)
             if (!wardrobe::named(s.costume)) { fprintf(stderr, "  no costume '%s'\n", s.costume); return false; }

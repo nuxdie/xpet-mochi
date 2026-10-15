@@ -158,7 +158,7 @@ inline const ActionInfo ACTIONS[] = {
     {"lookaround", Action::LookAround, 2.4}, {"hop", Action::Hop, 0.55},   {"struggle", Action::Struggle, 1.1},
     {"nuzzle", Action::Nuzzle, 1.3},   {"headshake", Action::HeadShake, 0.9}, {"land", Action::Land, 0.7},
     {"jump", Action::Jump, 0.75},     {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
-    {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 1.6},         {"snuffle", Action::Snuffle, 1.4},
+    {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 2.0},         {"snuffle", Action::Snuffle, 1.4},
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
 };
 // Rouse keeps its eyes shut through the yawn: the first this much of it (the pet closes them, the rig can't).
@@ -168,6 +168,8 @@ constexpr double BEDTIME_EYES = 0.74;
 // Perk: the head is up and it has turned to look by here (the pet points the eyes at you from then on), and from
 // PERK_GLAD it has recognised you (happy eyes, the wag starts in the rig at the same moment).
 constexpr double PERK_LOOK = 0.1, PERK_GLAD = 0.3;
+// Cheer: the first this much is a crouch while the pet turns it round to face you (at the desk it faces the laptop).
+constexpr double CHEER_TURN = 0.15, CHEER_SECS = 2.0;
 // Jump starts with a crouch on the ground: it leaves the floor this far in (0.3 s of the 0.75).
 constexpr double JUMP_CROUCH = 0.4, JUMP_SECS = 0.75;
 inline const ActionInfo* actionNamed(const std::string& name) {
@@ -482,15 +484,27 @@ inline Rig actionRig(Action a, double p, double t) {
             r.bodyRoll = 2 * std::sin(t * 1.7) * e;
             r.leg[0] = r.leg[1] = 6 * e;
             break;
-        case Action::Cheer: {  // two jumps for joy with a wiggle in between (a big job finished)
-            double hop = std::fabs(std::sin(p * 2 * M_PI)) * e;
-            r.lift = 9 * hop;
-            for (double& l : r.leg) l = 25 * hop;
-            r.scaleY = 1 + 0.12 * std::sin(p * 4 * M_PI) * e;
-            r.headPitch = -15 * e;
-            r.tail = 45 * std::sin(t * 16) * e;
-            r.bodyRoll = 6 * std::sin(t * 16) * e;
-            r.shadow = 1 - 0.5 * hop;
+        case Action::Cheer: {  // "yay!": rears back, both front hooves up and pumping, two bounces (a big job finished)
+            // It mostly plays at the desk, sitting at the laptop, where the pet first turns it round to face you;
+            // the first CHEER_TURN of it is a small crouch while it turns, so the rear-up reads as one beat. Standing,
+            // the same numbers make it rear up on its hind legs. Everything lets go over the last fifth.
+            double dip = env(p / CHEER_TURN);
+            double up = smoothstep((p - 0.7 * CHEER_TURN) / 0.14) * smoothstep((1 - p) / 0.2);
+            double q = std::clamp((p - 0.28) / 0.52, 0.0, 1.0);  // the two bounces
+            double hop = std::fabs(std::sin(q * 2 * M_PI));
+            double pump = std::sin(t * 15) * smoothstep((p - 0.25) / 0.1) * up;  // hooves waving in turn
+            r.bodyPitch = 24 * up;                       // back onto its rump, chest up
+            r.bodyY = -0.5 * dip;
+            r.scaleY = 1 - 0.1 * dip + 0.1 * std::sin(q * 4 * M_PI) * up;  // squash before, stretch going up
+            r.scaleXZ = 1 + 0.05 * dip;
+            r.leg[0] = 105 * up + 20 * pump;             // hooves high, left and right in turn
+            r.leg[1] = 105 * up - 20 * pump;
+            r.leg[2] = r.leg[3] = 10 * hop;
+            r.lift = 6 * hop * up;
+            r.headPitch = 8 * dip - 24 * up;             // nose to the sky
+            r.headRoll = 7 * std::sin(t * 7.5) * up;     // a happy head-bob from side to side
+            r.tail = 45 * std::sin(t * 16) * (dip + up);
+            r.shadow = 1 - 0.4 * hop * up;
             break;
         }
         case Action::Snuffle:  // sniffing at your finger: snout working, head pushed a little forward
