@@ -971,6 +971,7 @@ public:
         particles.erase(std::remove_if(particles.begin(), particles.end(), [](auto& p) { return p.life <= 0; }),
                         particles.end());
         if (lyingDown() && st != St::Sleep) anim.action = art3d::Action::Idle;  // picked up or woken halfway down
+        if (anim.action == art3d::Action::Dream && st != St::Sleep) anim.action = art3d::Action::Idle;  // woken mid-dream
         if (st == St::Sleep && !lyingDown() && tick % 40 == 0) spawn(1);
         updateActivity();
         if (bubbleLeft > 0) bubbleLeft -= dt;
@@ -1020,6 +1021,11 @@ public:
             }
         }
         if (st == St::Play && !anim.busy() && std::fabs(vx) < 0.1 && chance(dt / 2)) anim.start(art3d::Action::Hop, 0.5);
+        // A long nap has a dream or two in it: every few minutes a little run in its sleep. Not while still lying down.
+        if (st == St::Sleep && !lyingDown() && !anim.busy() && grounded() && !menu.open && (dreamIn -= dt) <= 0) {
+            dreamIn = frand(90, 240);
+            anim.start(art3d::Action::Dream, art3d::DREAM_SECS);
+        }
         attention(dt);
     }
 
@@ -1258,7 +1264,7 @@ private:
     art3d::Animator anim;  // the smoothed rig: poses ease into each other, actions layer on top
     const art3d::Costume* costume = wardrobe::today();  // what it's wearing (wardrobe.hpp: by the calendar)
     bool costumeForced = false;                         // set over the socket ("wear"); the calendar waits
-    double lookX = 0, lookY = 0, lookW = 0, prevHappy = 0, idleActionIn = 4, airLift = 0;
+    double lookX = 0, lookY = 0, lookW = 0, prevHappy = 0, idleActionIn = 4, airLift = 0, dreamIn = 120;
     int lookKind = 0;  // 0 nothing, 1 a point on the screen, 2 you
     // attention: what it looks at
     int ptrX = 0, ptrY = 0;
@@ -2084,6 +2090,10 @@ int writeStrip(const std::string& name, const char* path) {
             art3d::Frame f;
             f.yaw = row == 0 ? 30 : row == 1 ? 90 : 315;
             if (row == 2) { f.pose = art3d::Pose::Sit; f.prop = art3d::Prop::Laptop; }
+            if (a->action == art3d::Action::Dream) {  // it only dreams asleep: all three rows lying down, eyes shut
+                f.pose = art3d::Pose::Sleep; f.prop = art3d::Prop::Nothing; f.eyes = art::Eyes::Closed;
+                if (row == 2) f.yaw = 150;
+            }
             double p = (i + 0.5) / N;
             f.t = 1.0 + p * a->secs;
             f.costume = wardrobe::today();

@@ -94,6 +94,13 @@ int main() {
         }
     std::vector<const Costume*> dressed{nullptr};
     for (const Costume& c : wardrobe::all()) dressed.push_back(&c);
+    for (const Costume* c : dressed)  // dreaming plays lying down: paddling legs and twitching ears must stay in frame
+        for (double yaw : yaws)
+            for (double p : {0.3, 0.5, 0.65}) {
+                Frame f; f.pose = Pose::Sleep; f.yaw = yaw; f.t = 1.1 + p; f.costume = c;
+                char name[96]; snprintf(name, sizeof name, "dream-%s@%.0f-%.2f", c ? c->name.c_str() : "bare", yaw, p);
+                frame(name, f, Action::Dream, p);
+            }
     for (const Costume* c : dressed)  // cheering at the desk: turned round to you, reared up, hooves high
         for (double p : {0.4, 0.55}) {
             Frame f; f.pose = Pose::Sit; f.prop = Prop::Laptop; f.yaw = 90; f.t = 1.1; f.costume = c;

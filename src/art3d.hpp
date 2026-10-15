@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -164,8 +164,10 @@ inline const ActionInfo ACTIONS[] = {
     {"jump", Action::Jump, 0.75},     {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 2.0},         {"snuffle", Action::Snuffle, 1.4},
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
-    {"paw", Action::Paw, 2.0},
+    {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},
 };
+// Dream plays only while it sleeps (the Sleep pose under it): how long one dream lasts.
+constexpr double DREAM_SECS = 3.4;
 // Rouse keeps its eyes shut through the yawn: the first this much of it (the pet closes them, the rig can't).
 constexpr double ROUSE_YAWN = 0.4;
 // Bedtime shuts them once the head goes down, from this far in.
@@ -675,6 +677,32 @@ inline Rig actionRig(Action a, double p, double t) {
             r.headYaw = -8 * e2;
             r.earSwing = 8 * e2;
             r.tail = 12 * std::sin(t * 7.5) * e2;
+            break;
+        }
+        case Action::Dream: {  // asleep and running after something in a dream: legs paddling, ears twitching
+            // Made for the Sleep pose (legs stretched out flat, ears lying back). A sniff in its sleep first, then a
+            // run that swells and fades, one muffled "woof" (the head jerks, the snout puffs) in the middle of it, and
+            // a long breath out as it settles again. The legs swing mostly upward from where they lie, so the hooves
+            // don't go through the floor. Eyes stay shut: the pose keeps them so.
+            double sniff = env(p / 0.18);
+            double run = smoothstep((p - 0.12) / 0.15) * smoothstep((0.8 - p) / 0.2);
+            double woof = env((p - 0.5) / 0.09);
+            double sigh = env((p - 0.76) / 0.24);
+            double ph = t * 11;  // a little gallop, under 2 steps a second
+            auto paddle = [&](double off, double amp) { return (0.35 * amp + amp * std::sin(ph + off)) * run; };
+            r.leg[0] = paddle(0, 22);  r.leg[1] = paddle(M_PI, 22);  // the front pair in turn (mostly under the chin),
+            r.leg[3] = -paddle(0.4, 32); r.leg[2] = -paddle(M_PI + 0.4, 32);  // the hind pair, the ones you see, a beat late
+            for (int i = 0; i < 4; ++i)  // and each kicks out sideways as it comes forward
+                r.splay[i] = (i % 2 ? 1 : -1) * 14 * std::max(0.0, std::sin(ph + (i == 1 || i == 2 ? M_PI : 0))) * run;
+            r.bodyRoll = 2.5 * std::sin(ph) * run;
+            r.headPitch = -5 * run - 10 * woof;  // the head lifts a little off the ground, jerks up once
+            r.headRoll = 3 * std::sin(ph / 2) * run;
+            r.snout = 1 + 0.2 * std::fabs(std::sin(t * 22)) * sniff + 0.25 * woof;
+            r.ear = 12 * std::fabs(std::sin(ph)) * run + 16 * woof;  // bouncing with the run
+            r.earFlick = 34 * std::sin(t * 8) * (sniff + 0.6 * run);  // one, then the other
+            r.tail = 35 * std::sin(t * 17) * run;
+            r.scaleY = 1 + 0.06 * sigh;
+            r.scaleXZ = 1 + 0.02 * sigh;
             break;
         }
         case Action::Scratch:  // hind leg scratching behind the "ear"
