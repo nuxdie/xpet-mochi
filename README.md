@@ -56,7 +56,8 @@ half: it is built around one person's setup, and reading `brain/CLAUDE.md` is th
 </p>
 
 **It has a life of its own.** A four-legged gait that matches its ground speed (a trot when it chases your cursor),
-breathing, a wagging tail nub, blinking at a natural rhythm. It eats when it's hungry, chewing with a working snout as
+each foot lifting as it swings forward, the head held level while the body sways; it steps round on its feet when it
+turns on the spot. Breathing, floppy ears that bounce as it goes, a wagging tail nub, blinking at a natural rhythm. It eats when it's hungry, chewing with a working snout as
 the bowl empties; it naps and twitches a leg in its sleep. There is nothing to feed and no stats to manage: it looks
 after itself, and time passes gently while it isn't running. It doesn't die.
 
@@ -65,19 +66,25 @@ a session writes code, a book when it reads or searches, a terminal when it runs
 tapping the keys and following the lines.
 
 <p align="center">
-  <img src="docs/tricks.gif" alt="Eight tricks: sniff, stretch, shake, hop, scratch, wiggle, look around, cheer" width="880">
+  <img src="docs/tricks.gif" alt="Ten tricks: sniff, stretch, shake, hop, scratch, wiggle, look around, paw, land, cheer" width="880">
 </p>
 
-**It has tricks.** On its own it sniffs the ground, stretches, shakes, scratches, wiggles, hops and looks around. It
+**It has tricks.** On its own it sniffs the ground, stretches, shakes, scratches, wiggles, hops, paws at the floor
+and looks around. It
 cheers (two jumps, turned round to you) when a Claude run finishes that touched five or more files, and sulks when a run
 keeps failing. Squash before a hop, stretch on take-off, a settle after landing: poses ease into each other instead of
-snapping.
+snapping. The ears follow through: flung up in a fall, slapped down on landing, flapping in a shake, flat when it
+sulks or sleeps.
+
+<p align="center">
+  <img src="docs/face.gif" alt="A close-up of the pig: its pupils, then its head, follow a mouse pointer circling round it" width="880">
+</p>
 
 <p align="center">
   <img src="docs/handled.gif" alt="Four pigs: kicking while held up, being petted, perking up when you're back, sulking" width="880">
 </p>
 
-**It notices you.** Its head follows your pointer, looks over at the window you're working in, and looks out at *you*
+**It notices you.** Its eyes get to your pointer first and the head follows, looks over at the window you're working in, and looks out at *you*
 when it talks, when you pet it, and when you come back after a break. Pet it and it nuzzles your hand (until it has
 had enough and shakes its head). Pick it up and it kicks; throw it and it tumbles, then squashes on landing. Now and then
 it walks over to sit on the window you've settled into.
@@ -98,6 +105,9 @@ it, and it writes down why.
 
 **It lives in your light.** Warm in the evening, cool and dim at night. Its skin has a faint per-texel tone, and the
 whole thing is Minecraft boxes drawn by a tiny software renderer in `src/art3d.hpp` (the model, the rig, the renderer).
+Its face, ears, hooves and much of how it moves are rebuilt after the pig in FreshLX's
+[Fresh Animations](https://modrinth.com/resourcepack/fresh-animations) resource pack (and its Extensions); none of the
+pack's files are included here.
 It hides while a fullscreen app is focused.
 
 ## The mind

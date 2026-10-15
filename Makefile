@@ -61,7 +61,7 @@ avatar: tests/portrait.cpp $(wildcard src/*.hpp)
 readme-art: tests/readme_art.cpp $(wildcard src/*.hpp)
 	$(CXX) -std=c++17 -O2 -Wno-missing-field-initializers $(shell pkg-config --cflags cairo) tests/readme_art.cpp -o tests/readme_art $(shell pkg-config --libs cairo)
 	rm -rf docs/frames && ./tests/readme_art docs/frames
-	for s in hero tricks life handled; do \
+	for s in hero face tricks life handled; do \
 		ffmpeg -loglevel error -y -framerate 30 -i docs/frames/$$s/%04d.png \
 			-vf "fps=25,split[a][b];[a]palettegen=max_colors=192:stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
 			-loop 0 docs/$$s.gif; done

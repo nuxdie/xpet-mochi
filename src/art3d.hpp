@@ -141,10 +141,14 @@ inline const RGB PINK = rgb(0xF0A5A2), SNOUT = rgb(0xD97F7D), DARK = rgb(0x4A262
                  INK = rgb(0x3A4A6A), TERM = rgb(0x141A1F), TERMTXT = rgb(0x5BE37A), PAGE = rgb(0xFFF7EA),
                  COVER = rgb(0x4A78D6), SEA = rgb(0x3F74D8), LAND = rgb(0x5DBB63), BOWL = rgb(0x6C8EBF),
                  FOOD = rgb(0x8A5A2B), STAND = rgb(0x5A4A3A);
+// The Fresh Animations skin's accents (FreshLX's resource pack): the snout is the face's own pink with a darker middle
+// row and the nostrils at its outer edges, a brow over each eye, two dark toes on each hoof, a red ridge down the back.
+inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL = rgb(0x894746), BROW = rgb(0xE8908B),
+                 RIDGE = rgb(0xC6615A), RIDGE_DOT = rgb(0xBE504D);
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -160,6 +164,7 @@ inline const ActionInfo ACTIONS[] = {
     {"jump", Action::Jump, 0.75},     {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 2.0},         {"snuffle", Action::Snuffle, 1.4},
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
+    {"paw", Action::Paw, 2.0},
 };
 // Rouse keeps its eyes shut through the yawn: the first this much of it (the pet closes them, the rig can't).
 constexpr double ROUSE_YAWN = 0.4;
@@ -213,6 +218,11 @@ struct Rig {
     double centred = 0;      // 0: the body tilts about its rear-bottom corner (sitting, stretching);
                              // 1: about its centre (in the air), so a tumble stays put
     double yaw = 0;          // the whole pig turned on the spot, on top of the frame's yaw (only actions use it)
+    double ear = 0;          // both ears flung up and out from where they hang (deg; < 0 lies them flat)
+    double earSwing = 0;     // both ears swung forward (deg, > 0) or back
+    double earFlick = 0;     // one ear alone up: > 0 the +z one, < 0 the -z one (a twitch, a scratch)
+    double legLift[4] = {0, 0, 0, 0};  // a hip raised (units): that foot picked up off the ground
+    double pupilX = 0, pupilY = 0;     // the pupils in the eye whites, -1..1: > 0 toward +z, and up
 };
 
 inline Rig operator+(Rig a, const Rig& b) {
@@ -224,6 +234,9 @@ inline Rig operator+(Rig a, const Rig& b) {
     a.centred = std::max(a.centred, b.centred);
     a.neck += b.neck;
     a.yaw += b.yaw;
+    a.ear += b.ear; a.earSwing += b.earSwing; a.earFlick += b.earFlick;
+    for (int i = 0; i < 4; ++i) a.legLift[i] += b.legLift[i];
+    a.pupilX += b.pupilX; a.pupilY += b.pupilY;
     return a;
 }
 inline void ease(double& v, double target, double k) { v += (target - v) * k; }
@@ -235,6 +248,8 @@ inline void ease(Rig& r, const Rig& to, double k) {
     ease(r.snout, to.snout, k); ease(r.tail, to.tail, k); ease(r.shadow, to.shadow, k); ease(r.lift, to.lift, k);
     ease(r.centred, to.centred, k);
     ease(r.neck, to.neck, k);
+    ease(r.ear, to.ear, k); ease(r.earSwing, to.earSwing, k); ease(r.earFlick, to.earFlick, k);
+    for (int i = 0; i < 4; ++i) ease(r.legLift[i], to.legLift[i], k);
 }
 
 inline double env(double p) { return std::sin(std::clamp(p, 0.0, 1.0) * M_PI); }  // 0 → 1 → 0 over an action
@@ -269,6 +284,7 @@ inline Rig baseFor(const Frame& f) {
             r.leg[2] = r.leg[3] = -90;
             r.headPitch = 14;
             r.headRoll = 6;
+            r.ear = -12;  // lying flat against the head
             break;
         case Pose::Dangle:  // held up by the scruff: nose up, legs hang
             r.bodyPitch = 12;
@@ -277,6 +293,7 @@ inline Rig baseFor(const Frame& f) {
             r.bodyY = 1.5;
             r.shadow = 0;
             r.centred = 1;
+            r.ear = 25;
             break;
         case Pose::Fall:
             r.centred = 1;
@@ -285,18 +302,36 @@ inline Rig baseFor(const Frame& f) {
             r.leg[2] = r.leg[3] = 30;
             r.bodyPitch = std::clamp(f.vy * 1.6, -28.0, 28.0) * (f.thrown ? 0 : 1);
             r.shadow = 0;
+            r.ear = 70;  // the air flings them up
             break;
     }
     return r;
+}
+
+// Now and then one ear flicks while it stands about: a quick up-and-down every ~7 s, the two ears in turn.
+inline double earTwitch(double t) {
+    constexpr double every = 6.7, len = 0.32;
+    double q = std::fmod(t, every);
+    if (q > len) return 0;
+    double side = (long)(t / every) % 2 ? 1 : -1;
+    return side * 28 * std::sin(q / len * M_PI);
 }
 
 // The things that keep moving while a pose holds. Added on top of the eased base every frame.
 struct Motion {
     double gait = 0;  // walking phase, advanced by ground speed so the hooves match the ground
     double spin = 0;  // tumble angle when thrown
+    double prevYaw = 1e9, turnPh = 0, turning = 0;  // stepping round on the spot while it turns
     Rig at(const Frame& f, double dt) {
         Rig m;
         double t = f.t;
+        // Turning where it stands, it steps round on its feet instead of sliding (Fresh Animations' pigs do): a step
+        // per ~40 degrees of turn, diagonal pairs in turn, each foot lifted as it goes.
+        double dyaw = prevYaw > 1e8 ? 0 : std::remainder(f.yaw - prevYaw, 360.0);
+        prevYaw = f.yaw;
+        double rate = dt > 0 ? std::fabs(dyaw) / dt : 0;
+        ease(turning, f.pose == Pose::Stand ? std::clamp(rate / 90, 0.0, 1.0) : 0.0, 0.25);
+        turnPh += std::fabs(dyaw) * DEG * 4.5;
         bool walking = f.pose == Pose::WalkA || f.pose == Pose::WalkB;
         if (walking) gait += dt * (6 + f.speed * 3.2);
         else gait = std::fmod(gait, 2 * M_PI) * 0.9;
@@ -307,16 +342,22 @@ struct Motion {
                 bool trot = f.speed > 2.5;
                 // Diagonal pairs swing together; the forward swing is quicker than the push back (skewed sine),
                 // so the step reads as a step and not a pendulum.
-                auto swing = [&](double ph) { return std::sin(ph + 0.35 * std::sin(ph)) * (trot ? 42 : 30); };
+                auto swing = [&](double ph) { return std::sin(ph + 0.35 * std::sin(ph)) * (trot ? 42 : 34); };
                 double a = swing(gait), b = swing(gait + M_PI);
                 m.leg[0] = a; m.leg[3] = a; m.leg[1] = b; m.leg[2] = b;
+                // Each foot comes up off the ground while it swings forward and is planted for the push back.
+                double la = std::max(0.0, std::cos(gait)) * (trot ? 1.6 : 1.0), lb = std::max(0.0, -std::cos(gait)) * (trot ? 1.6 : 1.0);
+                m.legLift[0] = m.legLift[3] = la; m.legLift[1] = m.legLift[2] = lb;
+                m.yaw = std::sin(gait - M_PI / 4) * 1.5;  // the body swings a little from side to side with the stride
                 m.bodyY = std::fabs(std::sin(gait)) * (trot ? 1.0 : 0.45);
                 m.bodyRoll = std::sin(gait) * (trot ? 3.5 : 2.5);
                 m.bodyPitch = trot ? -3 : 0;  // leaning into it
-                m.headPitch = std::sin(gait * 2 + 0.6) * (trot ? 6 : 4) + (trot ? -5 : 1);
+                m.headPitch = std::sin(gait * 2 + 0.6) * (trot ? 6 : 4) + (trot ? -5 : 1) - m.bodyPitch;  // held level
                 m.headYaw = std::sin(gait) * 3;  // sways with the shoulders
                 m.headRoll = std::sin(gait) * -2;
                 m.tail = std::sin(gait) * 25 + std::sin(gait * 2) * 8;
+                m.ear = std::fabs(std::sin(gait)) * (trot ? 14 : 6);  // they bounce with each step
+                m.earSwing = std::cos(gait * 2) * (trot ? 10 : 6) - (trot ? 8 : 0);
                 break;
             }
             case Pose::Stand:
@@ -324,12 +365,16 @@ struct Motion {
                 m.bodyRoll = 1.2 * std::sin(t * 0.37);  // slow shift of weight from one side to the other
                 m.bodyX = 0.3 * std::sin(t * 0.37 + 1);
                 m.headYaw = 14 * std::sin(t * 0.45) * std::sin(t * 0.17) * (1 - f.lookW);  // glances this way and that
+                m.headPitch = 4 * std::sin(t * 0.31 + 2 * std::sin(t * 0.13));  // and the head drifts, never quite still
+                m.headRoll = 3 * std::sin(t * 0.21 + 1);
                 m.tail = std::sin(t * 1.3) * 14;
+                m.earFlick = earTwitch(t);
                 break;
             case Pose::Eat:
                 m.headPitch = 6 + std::sin(t * 9) * 7;
                 m.snout = 1 + 0.14 * std::fabs(std::sin(t * 18));
                 m.tail = std::sin(t * 7) * 28;
+                m.earSwing = 8 + 4 * std::sin(t * 9);  // flopping forward over the bowl with each bite
                 break;
             case Pose::Sit:
                 m.scaleY = 1 + 0.01 * std::sin(t * 2.2);
@@ -347,6 +392,7 @@ struct Motion {
                 } else {
                     m.headYaw = 12 * std::sin(t * 0.4) * std::sin(t * 0.15) * (1 - f.lookW);
                     m.tail = std::sin(t * 1.1) * 12;
+                    m.earFlick = earTwitch(t);
                 }
                 break;
             case Pose::Sleep: {
@@ -360,16 +406,25 @@ struct Motion {
                 m.bodyPitch = std::sin(t * 3) * 3;
                 m.bodyRoll = std::sin(t * 2.3) * 6;
                 m.tail = std::sin(t * 4) * 15;
+                m.ear = 8 * std::sin(t * 2.3 + 1);
                 break;
             case Pose::Fall:
                 if (f.thrown) {
                     m.bodyPitch = spin;
                     for (int i = 0; i < 4; ++i) m.leg[i] = std::sin(t * 25 + i) * 25;
+                    m.ear = 20 * std::sin(t * 25);
                 } else {
                     m.bodyPitch = std::sin(t * 8) * 6;
                     for (int i = 0; i < 4; ++i) m.leg[i] = std::sin(t * 12 + i * 1.5) * 8;
+                    m.ear = 8 * std::sin(t * 13);  // fluttering in the wind
                 }
                 break;
+        }
+        if (turning > 0.01) {
+            double s = std::sin(turnPh) * 16 * turning, l = std::fabs(std::sin(turnPh)) * 1.1 * turning;
+            m.leg[0] += s; m.leg[3] += s; m.leg[1] -= s; m.leg[2] -= s;
+            if (std::cos(turnPh) > 0) { m.legLift[0] += l; m.legLift[3] += l; } else { m.legLift[1] += l; m.legLift[2] += l; }
+            m.bodyY += 0.25 * std::fabs(std::sin(turnPh)) * turning;
         }
         if (f.talking) { m.headPitch += std::sin(t * 11) * 2.5; m.snout += 0.06 * std::fabs(std::sin(t * 11)); }
         if (f.happy) { m.tail += std::sin(t * 14) * 30; m.bodyY += 0.3 * std::fabs(std::sin(t * 7)); }
@@ -387,6 +442,7 @@ inline Rig actionRig(Action a, double p, double t) {
             r.bodyY = -0.6 * e;
             r.leg[0] = r.leg[1] = 6 * e;
             r.snout = 1 + 0.22 * std::fabs(std::sin(t * 22)) * e;
+            r.earSwing = 12 * e;  // flopping forward over its nose
             break;
         case Action::Stretch:  // front legs out, rump up, nose up: a big cat-like stretch
             r.leg[0] = r.leg[1] = 55 * e;
@@ -395,12 +451,16 @@ inline Rig actionRig(Action a, double p, double t) {
             r.headPitch = -22 * e;
             r.scaleXZ = 1 + 0.04 * e;
             r.tail = 20 * e;
+            r.ear = -8 * e;
+            r.earSwing = -18 * e;  // pressed back
             break;
         case Action::Shake:  // a wet-dog shake
             r.bodyRoll = 13 * std::sin(t * 32) * e;
             r.headRoll = 22 * std::sin(t * 32 + 1.2) * e;
             r.headYaw = 8 * std::sin(t * 16) * e;
             r.tail = 40 * std::sin(t * 30) * e;
+            r.ear = (25 + 30 * std::sin(t * 32 + 2.2)) * e;  // flapping, a beat behind the head
+            r.earSwing = 14 * std::sin(t * 16 + 1) * e;
             break;
         case Action::LookAround:  // left, then right, then back
             r.headYaw = 42 * std::sin(p * 2 * M_PI) * smoothstep(std::min(p, 1 - p) * 6);
@@ -412,11 +472,13 @@ inline Rig actionRig(Action a, double p, double t) {
             r.scaleY = 1 + 0.12 * std::sin(p * 2 * M_PI);
             r.scaleXZ = 1 - 0.06 * std::sin(p * 2 * M_PI);
             r.shadow = 1 - 0.5 * e;
+            r.ear = -18 * std::sin(p * 2 * M_PI);  // pressed down going up, flung up coming down
             break;
         case Action::Struggle:  // kicking in your hand
             for (int i = 0; i < 4; ++i) r.leg[i] = 28 * std::sin(t * 26 + i * 1.6) * e;
             r.bodyRoll = 9 * std::sin(t * 20) * e;
             r.headYaw = 12 * std::sin(t * 18) * e;
+            r.ear = (15 + 20 * std::sin(t * 20 + 1)) * e;
             break;
         case Action::Nuzzle:  // leans into the hand
             r.headPitch = -26 * e;
@@ -424,9 +486,12 @@ inline Rig actionRig(Action a, double p, double t) {
             r.headRoll = 10 * e;
             r.bodyY = 0.5 * e;
             r.tail = 25 * std::sin(t * 12) * e;
+            r.ear = -10 * e;
+            r.earSwing = -14 * e;  // laid back, content
             break;
         case Action::HeadShake:
             r.headYaw = 32 * std::sin(t * 19) * e;
+            r.ear = 22 * std::fabs(std::sin(t * 19 + 0.8)) * e;  // flung out at each turn
             break;
         case Action::Land: {  // squash on impact, one bounce off the floor, a soft touch-down, rest
             // One spring cycle and no more (he asked for a single bounce): g > 0 is squash, g < 0 the rebound. After
@@ -450,6 +515,7 @@ inline Rig actionRig(Action a, double p, double t) {
             r.headPitch = 16 * lag;  // a nod after the body has already stopped
             r.bodyRoll = 3.5 * std::sin(p * 19) * smoothstep((p - 0.1) * 6) * std::exp(-2.5 * p) * fade;  // finds its balance
             r.tail = 30 * std::sin(p * 22) * std::exp(-3 * p) * fade;
+            r.ear = -22 * g + 10 * up;  // they slap down on impact and bounce up with the rebound
             break;
         }
         case Action::Jump: {  // wind up, then spring: a crouch on the ground, a stretch on take-off
@@ -469,6 +535,8 @@ inline Rig actionRig(Action a, double p, double t) {
             r.leg[0] = r.leg[1] = -20 * s;
             r.headPitch = -8 * crouch - 12 * s;
             r.tail = 25 * crouch + 15 * std::sin(t * 26) * gather;
+            r.earSwing = -10 * crouch - 14 * s;  // swept back by the take-off
+            r.ear = -10 * s;
             break;
         }
         case Action::Wiggle:  // a happy butt wiggle
@@ -483,6 +551,8 @@ inline Rig actionRig(Action a, double p, double t) {
             r.headRoll = 6 * std::sin(t * 1.7) * e;
             r.bodyRoll = 2 * std::sin(t * 1.7) * e;
             r.leg[0] = r.leg[1] = 6 * e;
+            r.ear = -14 * e;  // drooping
+            r.earSwing = 10 * e;
             break;
         case Action::Cheer: {  // "yay!": rears back, both front hooves up and pumping, two bounces (a big job finished)
             // It mostly plays at the desk, sitting at the laptop, where the pet first turns it round to face you;
@@ -505,6 +575,7 @@ inline Rig actionRig(Action a, double p, double t) {
             r.headRoll = 7 * std::sin(t * 7.5) * up;     // a happy head-bob from side to side
             r.tail = 45 * std::sin(t * 16) * (dip + up);
             r.shadow = 1 - 0.4 * hop * up;
+            r.ear = (20 + 12 * std::sin(t * 15)) * up;
             break;
         }
         case Action::Snuffle:  // sniffing at your finger: snout working, head pushed a little forward
@@ -512,6 +583,7 @@ inline Rig actionRig(Action a, double p, double t) {
             r.neck = 1.2 * e;
             r.headPitch = -6 * e;
             r.headRoll = 5 * std::sin(t * 9) * e;
+            r.earSwing = 8 * e;  // pricked forward, curious
             break;
         case Action::Rouse: {  // waking up from a nap: a big yawn, a long play-bow stretch, then shake the sleep off
             // Each stage rises, holds and lets go (a plateau, not a sine), and they overlap a little so it flows.
@@ -532,6 +604,8 @@ inline Rig actionRig(Action a, double p, double t) {
             r.bodyRoll = 13 * std::sin(t * 32) * shake;
             r.headYaw = 8 * std::sin(t * 16) * shake;
             r.tail = 25 * yawn + 20 * bow + 40 * std::sin(t * 30) * shake;
+            r.ear = -8 * bow + (25 + 30 * std::sin(t * 32 + 2.2)) * shake;  // up off the pillow
+            r.earSwing = -18 * bow;
             break;
         }
         case Action::Bedtime: {  // lying down for a nap like a dog: sniff the spot, turn once round on it, flop
@@ -567,6 +641,7 @@ inline Rig actionRig(Action a, double p, double t) {
             r.scaleY = 1 - 0.12 * plop + 0.07 * sigh;  // lands heavy, then one long breath out
             r.scaleXZ = 1 + 0.06 * plop;
             r.tail = 25 * std::sin(step) * turning + 30 * std::sin(p * 40) * env((p - 0.8) / 0.15);
+            r.ear = -12 * head;  // ends lying flat, as Sleep has them
             break;
         }
         case Action::Perk: {  // "oh, you're back": startled up out of a doze, a look, then glad to see you
@@ -584,6 +659,22 @@ inline Rig actionRig(Action a, double p, double t) {
             r.bodyPitch = -4 * up;       // leaning forward, eager
             r.headRoll = 9 * env((p - PERK_GLAD) / 0.45);  // the quizzical tilt, then straight again
             r.tail = 42 * std::sin(t * 17) * glad;
+            r.ear = 26 * up + 6 * std::sin(t * 7) * glad;  // pricked up
+            r.earSwing = 10 * up;
+            break;
+        }
+        case Action::Paw: {  // pawing at the ground with a front hoof, a couple of scrapes (Fresh Animations' idle)
+            double e2 = smoothstep(p / 0.15) * smoothstep((1 - p) / 0.15);
+            double scrape = std::sin(t * 7.5);
+            r.leg[0] = (24 + 22 * scrape) * e2;
+            r.legLift[0] = (2.0 + 1.0 * std::max(0.0, scrape)) * e2;
+            r.bodyRoll = 3 * e2;  // the weight onto the other three
+            r.bodyY = -0.2 * e2;
+            r.headPitch = 14 * e2;  // watching the hoof
+            r.headRoll = -6 * e2;
+            r.headYaw = -8 * e2;
+            r.earSwing = 8 * e2;
+            r.tail = 12 * std::sin(t * 7.5) * e2;
             break;
         }
         case Action::Scratch:  // hind leg scratching behind the "ear"
@@ -592,6 +683,7 @@ inline Rig actionRig(Action a, double p, double t) {
             r.headRoll = -14 * e;
             r.headYaw = 10 * e;
             r.bodyRoll = 6 * e;
+            r.earFlick = (35 + 12 * std::sin(t * 24)) * e;  // the ear being scratched (the +z side, as leg 3)
             break;
         default: break;
     }
@@ -638,6 +730,11 @@ struct Animator {
         }
         ease(lookYaw, tx * f.lookW, 0.12);
         ease(lookPitch, ty * f.lookW, 0.12);
+        // The pupils lead the head: they get to what it looks at first and settle back as the head catches up, and when
+        // nothing holds its eye they drift now and then (Fresh Animations' eyes). They look even where the head can't.
+        double drift = std::clamp(std::sin(f.t / 2.7) + std::sin(f.t / 1.6), -0.35, 0.35) * smoothstep(std::sin(f.t / 12.5) * 4 - 1);
+        r.pupilX += std::clamp(lookYaw / 50 + (tx * f.lookW - lookYaw) / 15 + drift * (1 - f.lookW), -1.0, 1.0);
+        r.pupilY += std::clamp(-lookPitch / 35 - (ty * f.lookW - lookPitch) / 12, -1.0, 1.0);
         bool awake = f.pose == Pose::Stand || f.pose == Pose::Sit || f.pose == Pose::WalkA || f.pose == Pose::WalkB || f.pose == Pose::Eat;
         bool mayLook = awake && (f.prop == Prop::Nothing || f.lookKind == 2);  // at the desk it only looks up for you
         if (mayLook) { r.headYaw += lookYaw; r.headPitch += lookPitch; }
@@ -666,27 +763,44 @@ struct Animator {
 
 inline Box legBox() { return {{0, -3, 0}, {4, 6, 4}, PINK, 0, {}}; }  // hangs from its hip; the top shows when it swings out
 
-inline Part headPart(Eyes eyes, double snout) {
+// A rectangle on a box face, by its edges in the face's (u, v) (decals take a centre and half sizes).
+inline void rect(Box& b, int face, double u0, double u1, double v0, double v1, RGB c) {
+    if (v0 > v1) std::swap(v0, v1);
+    if (u1 - u0 > 0.02 && v1 - v0 > 0.02) b.decals.push_back({face, (u0 + u1) / 2, (v0 + v1) / 2, (u1 - u0) / 2, (v1 - v0) / 2, c});
+}
+
+// The face is the Fresh Animations pig's (FreshLX): at the outer edges each eye is a 2x1 white with a 1x1 pupil that
+// moves (px, py: -1..1, toward +z and up), a darker brow over it. Theirs sit a row lower, level with the top of the
+// snout; seen three-quarters on (how the pig mostly stands) the snout hid the near eye there, so these are a row up.
+inline Part headPart(Eyes eyes, double snout, double px = 0, double py = 0) {
     Part p;
     Box head{{4, 0, 0}, {8, 8, 8}, PINK, 1u << 1, {}};  // pivot at the neck (back-centre); back face sits in the body
-    // Eyes on the front face (+x): u is up, v is sideways. Each eye: white outer column, black inner.
-    if (eyes == Eyes::Open) {
-        for (double side : {-1.0, 1.0}) {
-            head.decals.push_back({0, 2.0, side * 3.0, 1.0, 0.5, WHITE});
-            head.decals.push_back({0, 2.0, side * 2.0, 1.0, 0.5, BLACK});
+    // On the front face (+x) u is up and v is sideways (+z). Decals mustn't overlap (the z-buffer can't order them),
+    // so the white is laid round the pupil.
+    for (double side : {-1.0, 1.0}) {
+        double v0 = side > 0 ? 2 : -4, v1 = v0 + 2;
+        rect(head, 0, 2, 3, v0, v1, BROW);
+        if (eyes == Eyes::Open) {
+            double out = std::clamp(side * px, 0.0, 1.0);  // the pupil rests at the inner corner, moves out from there
+            double pa = side > 0 ? 2 + out : -3 - out, pb = pa + 1;
+            double pu0 = std::clamp(1 + 0.4 * py, 1.0, 2.0), pu1 = std::clamp(2 + 0.4 * py, 1.0, 2.0);
+            rect(head, 0, 1, 2, v0, pa, WHITE);
+            rect(head, 0, 1, 2, pb, v1, WHITE);
+            rect(head, 0, 1, pu0, pa, pb, WHITE);
+            rect(head, 0, pu1, 2, pa, pb, WHITE);
+            rect(head, 0, pu0, pu1, pa, pb, BLACK);
+        } else {
+            rect(head, 0, 1.35, 1.65, v0, v1, DARK);
+            if (eyes == Eyes::Happy) rect(head, 0, 0.1, 0.8, v0 + 0.3 * side + 0.2, v1 + 0.3 * side - 0.2, BLUSH);
         }
-    } else {
-        for (double side : {-1.0, 1.0}) head.decals.push_back({0, 2.0, side * 2.5, 0.3, 1.0, DARK});
-        if (eyes == Eyes::Happy)
-            for (double side : {-1.0, 1.0}) head.decals.push_back({0, 0.6, side * 2.6, 0.5, 0.9, BLUSH});
     }
     p.boxes.push_back(head);
     // The head's back face is buried in the body except for the strip above the body line: a thin cap box
     // flush with the back carries that strip, so from behind the head is not a hollow box.
     p.boxes.push_back({{0.3, 3, 0}, {0.6, 2, 8}, PINK, (1u << 0) | (1u << 3), {}});
-    Box sn{{8 + 0.5 * snout, -1.5, 0}, {1 * snout, 3 * snout, 4 * snout}, SNOUT, 1u << 1, {}};
-    sn.decals.push_back({0, 0.5 * snout, -1.2 * snout, 0.45, 0.45, DARK});
-    sn.decals.push_back({0, 0.5 * snout, 1.2 * snout, 0.45, 0.45, DARK});
+    Box sn{{8 + 0.5 * snout, -1.5, 0}, {1 * snout, 3 * snout, 4 * snout}, SNOUT_FACE, 1u << 1, {}};
+    rect(sn, 0, -0.5 * snout, 0.5 * snout, -1 * snout, 1 * snout, SNOUT_MID);
+    for (double side : {-1.0, 1.0}) rect(sn, 0, -0.5 * snout, 0.5 * snout, side > 0 ? 1 * snout : -2 * snout, side > 0 ? 2 * snout : -1 * snout, NOSTRIL);
     p.boxes.push_back(sn);
     return p;
 }
@@ -726,15 +840,22 @@ inline std::vector<Part> assemble(const Frame& f, const Rig& r) {
     };
     Part b;
     b.xf = body;
-    b.boxes.push_back({{0, 4 * sy, 0}, {16 * sxz, 8 * sy, 10 * sxz}, PINK, 0, {}});
+    Box bodyBox{{0, 4 * sy, 0}, {16 * sxz, 8 * sy, 10 * sxz}, PINK, 0, {}};
+    // The ridge down the back, with a knot on each side every few steps (the top face: u is z, v is x).
+    rect(bodyBox, 2, -1 * sxz, 1 * sxz, -5.5 * sxz, 5.5 * sxz, RIDGE);
+    for (double x : {-3.0, 0.0, 3.0})
+        for (double z : {-1.5, 1.5}) rect(bodyBox, 2, (z - 0.5) * sxz, (z + 0.5) * sxz, (x - 0.5) * sxz, (x + 0.5) * sxz, RIDGE_DOT);
+    b.boxes.push_back(bodyBox);
     dress(b, Anchor::Body);
     parts.push_back(b);
     // Legs hang from hips at the body's bottom corners.
     const V3 hips[4] = {{6, 0, -3}, {6, 0, 3}, {-6, 0, -3}, {-6, 0, 3}};
     for (int i = 0; i < 4; ++i) {
         Part l;
-        l.xf = body * Xf::trans(hips[i] * sxz) * Xf::rotZ(r.leg[i] - r.bodyPitch) * Xf::rotX(r.splay[i]);
+        l.xf = body * Xf::trans(hips[i] * sxz + V3{0, r.legLift[i], 0}) * Xf::rotZ(r.leg[i] - r.bodyPitch) * Xf::rotX(r.splay[i]);
         Box lb = legBox();
+        double zs = hips[i].z > 0 ? 1 : -1;  // two dark toes at the bottom of the front, mirrored on the far side
+        for (double v : {-1.5, 0.5}) rect(lb, 0, -3, -2, (v - 0.5) * zs, (v + 0.5) * zs, NOSTRIL);
         // A roughly vertical leg has its top inside the body; the painter's sort would still paint that top over
         // the body's side, so it is hidden until the leg swings out far enough for the top to actually show.
         if (std::fabs(r.leg[i]) < 28 && std::fabs(r.splay[i]) < 14) lb.hidden |= 1u << 2;
@@ -743,10 +864,27 @@ inline std::vector<Part> assemble(const Frame& f, const Rig& r) {
         parts.push_back(l);
     }
     // Head pivots at the neck: front-top of the body, slightly inside it.
-    Part h = headPart(f.pose == Pose::Sleep ? Eyes::Closed : f.eyes, r.snout);  // asleep is asleep
+    Part h = headPart(f.pose == Pose::Sleep ? Eyes::Closed : f.eyes, r.snout, r.pupilX, r.pupilY);  // asleep is asleep
     h.xf = body * Xf::trans({6 * sxz + r.neck, 6 * sy, 0}) * Xf::rotY(-r.headYaw) * Xf::rotZ(-r.headPitch) * Xf::rotX(r.headRoll);
     dress(h, Anchor::Head);
     parts.push_back(h);
+    // Ears: the floppy side ears of the Fresh Animations pig (FreshLX's resource pack, its Extensions add-on:
+    // modrinth.com/resourcepack/fresh-animations), rebuilt here. A flap hinged high on each side of the head near the
+    // front, hanging down and flared out a little; they hang with gravity (half the head's nod is undone) and the rig
+    // flings them up, sweeps them back, lays them flat or flicks one. Under a hat they hang out from beneath it, so
+    // with one on they don't rise past level and through the brim.
+    for (double side : {-1.0, 1.0}) {
+        double flick = side > 0 ? std::max(0.0, r.earFlick) : std::max(0.0, -r.earFlick);
+        double up = std::clamp(15 + r.ear + flick, 2.0, f.costume && f.costume->hatHeight > 0 ? 80.0 : 120.0);
+        Part e;
+        e.xf = h.xf * Xf::trans({5.5, 3, side * 4}) * Xf::rotY(-side * 18 * std::clamp(up / 20, 0.3, 1.0)) *
+               Xf::rotX(-side * up) * Xf::rotZ(r.headPitch / 2 + r.earSwing - 6);
+        Box ear{{-0.5, -2, side * 0.3}, {3, 4, 1}, PINK, 0, {}};
+        if (side > 0) ear.decals.push_back({5, 0, 0, 1.6, 1.0, SNOUT});  // the inside, against the head (-z face: u is y)
+        else ear.decals.push_back({4, 0, 0, 1.0, 1.6, SNOUT});            // (+z face: u is x)
+        e.boxes.push_back(ear);
+        parts.push_back(e);
+    }
     // Tail nub at the rear top, wagging.
     Part tl;
     tl.xf = body * Xf::trans({-8 * sxz, 6.5 * sy, 0}) * Xf::rotY(r.tail);

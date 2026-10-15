@@ -1013,8 +1013,9 @@ public:
                 else if (r < 0.42) anim.start(art3d::Action::LookAround, 2.4);
                 else if (r < 0.57) anim.start(art3d::Action::Stretch, 2.2);
                 else if (r < 0.7) anim.start(art3d::Action::Shake, 0.9);
-                else if (r < 0.8) anim.start(art3d::Action::Scratch, 1.7);
-                else if (r < 0.9 && s.fun > 50) anim.start(art3d::Action::Hop, 0.55);
+                else if (r < 0.78) anim.start(art3d::Action::Scratch, 1.7);
+                else if (r < 0.86) anim.start(art3d::Action::Paw, 2.0);
+                else if (r < 0.93 && s.fun > 50) anim.start(art3d::Action::Hop, 0.55);
                 else anim.start(art3d::Action::Wiggle, 0.9);
             }
         }

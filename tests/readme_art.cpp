@@ -251,10 +251,11 @@ static void tricks() {
     std::vector<Cell> cells = {
         trick("sniff", Action::Sniff, 1.7), trick("stretch", Action::Stretch, 2.2), trick("shake", Action::Shake, 0.9, 0.8),
         trick("hop", Action::Hop, 0.55, 0.9), trick("scratch", Action::Scratch, 1.7), trick("wiggle", Action::Wiggle, 0.9, 0.8),
-        trick("look around", Action::LookAround, 2.4), trick("cheer", Action::Cheer, CHEER_SECS),
+        trick("look around", Action::LookAround, 2.4), trick("paw", Action::Paw, 2.0), trick("land", Action::Land, 0.7, 0.9),
+        trick("cheer", Action::Cheer, CHEER_SECS),
     };
-    cells[7].yaw = 90;
-    grid("tricks", cells, 4, 3.0);
+    cells[9].yaw = 90;
+    grid("tricks", cells, 5, 3.0);
 }
 
 static void life() {
@@ -300,6 +301,54 @@ static void handled() {
         }},
     };
     grid("handled", cells, 4, 3.0);
+}
+
+// An arrow pointer, tip at (x, y).
+static void cursor(cairo_t* cr, double x, double y) {
+    const double pts[][2] = {{0, 0}, {0, 22}, {6, 17}, {10, 26}, {14, 24}, {10, 16}, {17, 16}};
+    cairo_move_to(cr, x, y);
+    for (auto& q : pts) cairo_line_to(cr, x + q[0], y + q[1]);
+    cairo_close_path(cr);
+    cairo_set_source_rgb(cr, 1, 1, 1);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgb(cr, 0.1, 0.1, 0.1);
+    cairo_set_line_width(cr, 1.5);
+    cairo_stroke(cr);
+}
+
+// Up close: the eyes get to your pointer before the head does, an ear twitches, it blinks. A loop of one circle.
+static void face() {
+    const int W = 880, H = 360;
+    const double secs = 5.0, zoom = Z * 1.7;
+    cairo_surface_t* sf = cairo_image_surface_create(CAIRO_FORMAT_RGB24, W, H);
+    Actor a;
+    HeadPos hp{W / 2.0, 120};
+    int n = (int)(secs * FPS);
+    for (int pass = 0; pass < 2; ++pass)
+        for (int i = 0; i < n; ++i) {
+            double t = i / FPS, ang = t / secs * 2 * M_PI;
+            // The pointer goes round the pig: out to the right, over the top, down the left side, back below.
+            double px = W / 2.0 + 330 * std::cos(ang), py = 165 - 120 * std::sin(ang);
+            Frame& f = a.f;
+            f = Frame{};
+            f.t = 10 + pass * secs + t;  // the ear twitch falls into the loop (every 6.7 s from t = 13.4)
+            f.frame = i / 6;
+            f.yaw = 80;
+            f.lookKind = 1;
+            f.lookX = px - hp.cx;
+            f.lookY = py - (hp.top + 50);
+            f.lookW = 1;
+            f.eyes = i >= 96 && i < 100 ? Eyes::Closed : Eyes::Open;
+            Rig r = a.anim.update(f);
+            if (!pass) continue;
+            cairo_t* cr = cairo_create(sf);
+            gradient(cr, W, H, BLUSH_T, BLUSH_B);
+            hp = render(cr, f, r, W / 2.0, H - 48, zoom);
+            cursor(cr, px, py);
+            cairo_destroy(cr);
+            save(sf, "face", i);
+        }
+    cairo_surface_destroy(sf);
 }
 
 // Stills ----------------------------------------------------------------------------------------------------------
@@ -396,6 +445,7 @@ int main(int argc, char** argv) {
     if (argc > 1) OUT = argv[1];
     mkdir("docs", 0755);
     hero();
+    face();
     tricks();
     life();
     handled();
