@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -164,10 +164,12 @@ inline const ActionInfo ACTIONS[] = {
     {"jump", Action::Jump, 0.75},     {"wiggle", Action::Wiggle, 0.9},       {"scratch", Action::Scratch, 1.7},
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 2.0},         {"snuffle", Action::Snuffle, 1.4},
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
-    {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},
+    {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},         {"stir", Action::Stir, 2.8},
 };
 // Dream plays only while it sleeps (the Sleep pose under it): how long one dream lasts.
 constexpr double DREAM_SECS = 3.4;
+// Stir, asleep too: you came back while it napped, and it half-hears you.
+constexpr double STIR_SECS = 2.8;
 // Rouse keeps its eyes shut through the yawn: the first this much of it (the pet closes them, the rig can't).
 constexpr double ROUSE_YAWN = 0.4;
 // Bedtime shuts them once the head goes down, from this far in.
@@ -701,6 +703,25 @@ inline Rig actionRig(Action a, double p, double t) {
             r.ear = 12 * std::fabs(std::sin(ph)) * run + 16 * woof;  // bouncing with the run
             r.earFlick = 34 * std::sin(t * 8) * (sniff + 0.6 * run);  // one, then the other
             r.tail = 35 * std::sin(t * 17) * run;
+            r.scaleY = 1 + 0.06 * sigh;
+            r.scaleXZ = 1 + 0.02 * sigh;
+            break;
+        }
+        case Action::Stir: {  // asleep, it half-hears you come back: one ear up, head up off its chin, then back down
+            // Made for the Sleep pose, eyes shut throughout: it doesn't wake, it only listens. The ear goes first and
+            // comes down last; between, the head lifts with a listening tilt, a sniff (it's you), a sleepy wag, and it
+            // settles with the chin sinking a touch lower than before and one long breath out.
+            double ear = smoothstep(p / 0.08) * smoothstep((0.9 - p) / 0.12);
+            double lift = smoothstep((p - 0.12) / 0.14) * smoothstep((0.78 - p) / 0.16);
+            double sniff = env((p - 0.38) / 0.24), wag = env((p - 0.35) / 0.4);
+            double settle = env((p - 0.74) / 0.2), sigh = env((p - 0.72) / 0.28);
+            r.earFlick = 50 * ear + 8 * std::sin(t * 14) * env((p - 0.42) / 0.16);  // up, a little twitch while it listens
+            r.ear = 10 * lift;  // the other one stirs too
+            r.earSwing = 10 * lift;
+            r.headPitch = -20 * lift + 5 * settle;
+            r.headRoll = -9 * lift;
+            r.snout = 1 + 0.2 * std::fabs(std::sin(t * 22)) * sniff;
+            r.tail = 24 * std::sin(t * 10) * wag;
             r.scaleY = 1 + 0.06 * sigh;
             r.scaleXZ = 1 + 0.02 * sigh;
             break;

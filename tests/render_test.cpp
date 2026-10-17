@@ -100,6 +100,8 @@ int main() {
                 Frame f; f.pose = Pose::Sleep; f.yaw = yaw; f.t = 1.1 + p; f.costume = c;
                 char name[96]; snprintf(name, sizeof name, "dream-%s@%.0f-%.2f", c ? c->name.c_str() : "bare", yaw, p);
                 frame(name, f, Action::Dream, p);
+                snprintf(name, sizeof name, "stir-%s@%.0f-%.2f", c ? c->name.c_str() : "bare", yaw, p);
+                frame(name, f, Action::Stir, p);  // asleep, the ear up and the head off its chin
             }
     for (const Costume* c : dressed)  // cheering at the desk: turned round to you, reared up, hooves high
         for (double p : {0.4, 0.55}) {

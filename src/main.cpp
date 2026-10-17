@@ -971,7 +971,8 @@ public:
         particles.erase(std::remove_if(particles.begin(), particles.end(), [](auto& p) { return p.life <= 0; }),
                         particles.end());
         if (lyingDown() && st != St::Sleep) anim.action = art3d::Action::Idle;  // picked up or woken halfway down
-        if (anim.action == art3d::Action::Dream && st != St::Sleep) anim.action = art3d::Action::Idle;  // woken mid-dream
+        if ((anim.action == art3d::Action::Dream || anim.action == art3d::Action::Stir) && st != St::Sleep)
+            anim.action = art3d::Action::Idle;  // woken mid-dream
         if (st == St::Sleep && !lyingDown() && tick % 40 == 0) spawn(1);
         updateActivity();
         if (bubbleLeft > 0) bubbleLeft -= dt;
@@ -1660,10 +1661,16 @@ private:
 
     // You come back after a break (the pointer stirs after twenty still minutes): it perks up, looks round at you,
     // glad, and that's all. No bubble, no hop, no coming over: an answer to you being back, not a demand. Asleep it
-    // sleeps on; walking or playing it misses you; at its desk it looks up from the work.
+    // only half-hears you: an ear and its head come up, eyes still shut, and it goes back to sleep (a dream gives way
+    // to it). Walking or playing it misses you; at its desk it looks up from the work.
     void welcomeBack() {
         bool settled = st == St::Idle || st == St::Sit || st == St::Work;
         if (settled && grounded() && !anim.busy() && !menu.open && !closeupOn()) anim.start(art3d::Action::Perk, 2.2);
+        bool napping = st == St::Sleep && !lyingDown() && (!anim.busy() || anim.action == art3d::Action::Dream);
+        if (napping && grounded() && !menu.open && !closeupOn()) {
+            anim.start(art3d::Action::Stir, art3d::STIR_SECS);
+            dreamIn = std::max(dreamIn, 60.0);  // not straight back into a dream
+        }
     }
 
     // The film's over: a fullscreen window had it hidden and now it's back on the desk. A couple of minutes behind the
@@ -2090,7 +2097,7 @@ int writeStrip(const std::string& name, const char* path) {
             art3d::Frame f;
             f.yaw = row == 0 ? 30 : row == 1 ? 90 : 315;
             if (row == 2) { f.pose = art3d::Pose::Sit; f.prop = art3d::Prop::Laptop; }
-            if (a->action == art3d::Action::Dream) {  // it only dreams asleep: all three rows lying down, eyes shut
+            if (a->action == art3d::Action::Dream || a->action == art3d::Action::Stir) {  // asleep: all three rows lying down, eyes shut
                 f.pose = art3d::Pose::Sleep; f.prop = art3d::Prop::Nothing; f.eyes = art::Eyes::Closed;
                 if (row == 2) f.yaw = 150;
             }
