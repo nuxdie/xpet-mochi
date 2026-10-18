@@ -973,6 +973,8 @@ public:
         if (lyingDown() && st != St::Sleep) anim.action = art3d::Action::Idle;  // picked up or woken halfway down
         if ((anim.action == art3d::Action::Dream || anim.action == art3d::Action::Stir) && st != St::Sleep)
             anim.action = art3d::Action::Idle;  // woken mid-dream
+        if (anim.action == art3d::Action::Chase && (!grounded() || st == St::Drag || std::fabs(vx) > 0.1))
+            anim.action = art3d::Action::Idle;  // picked up or off somewhere: no spinning on the move
         if (st == St::Sleep && !lyingDown() && tick % 40 == 0) spawn(1);
         updateActivity();
         if (bubbleLeft > 0) bubbleLeft -= dt;
@@ -1017,6 +1019,10 @@ public:
                 else if (r < 0.7) anim.start(art3d::Action::Shake, 0.9);
                 else if (r < 0.78) anim.start(art3d::Action::Scratch, 1.7);
                 else if (r < 0.86) anim.start(art3d::Action::Paw, 2.0);
+                // In high spirits it sometimes goes after its own tail instead of a hop; never next to the desk, where
+                // the spin would sweep through the laptop.
+                else if (r < 0.93 && s.fun > 50 && deskProp == art::Prop::Nothing && grounded() && chance(0.25))
+                    anim.start(art3d::Action::Chase, art3d::CHASE_SECS);
                 else if (r < 0.93 && s.fun > 50) anim.start(art3d::Action::Hop, 0.55);
                 else anim.start(art3d::Action::Wiggle, 0.9);
             }
@@ -1148,6 +1154,8 @@ public:
         if (anim.action == art3d::Action::Rouse && anim.actionT < anim.actionLen * art3d::ROUSE_YAWN) eyes = art::Eyes::Closed;
         if (anim.action == art3d::Action::Perk && anim.actionT > anim.actionLen * art3d::PERK_GLAD) eyes = art::Eyes::Happy;  // it's you!
         if (lyingDown() && anim.actionT > anim.actionLen * art3d::BEDTIME_EYES) eyes = art::Eyes::Closed;
+        bool chasing = anim.action == art3d::Action::Chase;
+        if (chasing && anim.actionT > anim.actionLen * art3d::CHASE_SPIN) eyes = art::Eyes::Happy;  // this is fun
         bool mirror = dir < 0;
         art::Prop prop = art::Prop::Nothing;
         if (working) {
@@ -1178,7 +1186,7 @@ public:
         // Turn around smoothly: the pig swings through "facing you" on the way. At the desk it turns to the prop.
         // A cheer turns round to you even at the desk (it's showing you the job is done), then back to the work.
         bool cheering = anim.action == art3d::Action::Cheer;
-        bool faceYou = (((bubbleLeft > 0 || happyLeft > 0) && !atDesk) || cheering) && !lyingDown() && (pose == art::Pose::Stand || pose == art::Pose::Sit);
+        bool faceYou = (((bubbleLeft > 0 || happyLeft > 0) && !atDesk) || cheering) && !lyingDown() && !chasing && (pose == art::Pose::Stand || pose == art::Pose::Sit);
         double targetYaw = closeupOn() ? (backingOff ? 270 : 90) : faceYou ? 90 : atDesk ? deskYaw : (mirror ? 150 : 30);
         double turn = std::fmod(targetYaw - yaw + 540, 360) - 180;  // shortest way round
         yaw = std::fmod(yaw + turn * 0.16 + 360, 360);
@@ -1189,7 +1197,7 @@ public:
         fr.tint = dayTint();
         fr.talking = bubbleLeft > 0; fr.happy = happyLeft > 0; fr.hungry = s.food < 25 && !working;
         fr.progress = st == St::Eat ? 1 - clampd(stLeft / 4, 0, 1) : 0;
-        fr.lookX = lookX; fr.lookY = lookY; fr.lookW = lyingDown() ? 0 : lookW; fr.lookKind = lookKind;  // no glances mid-turn
+        fr.lookX = lookX; fr.lookY = lookY; fr.lookW = lyingDown() || chasing ? 0 : lookW; fr.lookKind = lookKind;  // no glances mid-turn
         fr.propX = deskX; fr.propZ = deskZ; fr.propYaw = deskPropYaw;
         fr.costume = costume;
         art3d::Rig rig = anim.update(fr);

@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -165,7 +165,11 @@ inline const ActionInfo ACTIONS[] = {
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 2.0},         {"snuffle", Action::Snuffle, 1.4},
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
     {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},         {"stir", Action::Stir, 2.8},
+    {"chase", Action::Chase, 3.0},
 };
+// Chase: round and round after its own tail. It spins from CHASE_SPIN to CHASE_STOP of the way through (the pet keeps
+// its head from tracking anything meanwhile); before is the moment it spots the tail, after is the dizzy wobble.
+constexpr double CHASE_SPIN = 0.2, CHASE_STOP = 0.72, CHASE_SECS = 3.0;
 // Dream plays only while it sleeps (the Sleep pose under it): how long one dream lasts.
 constexpr double DREAM_SECS = 3.4;
 // Stir, asleep too: you came back while it napped, and it half-hears you.
@@ -724,6 +728,35 @@ inline Rig actionRig(Action a, double p, double t) {
             r.tail = 24 * std::sin(t * 10) * wag;
             r.scaleY = 1 + 0.06 * sigh;
             r.scaleXZ = 1 + 0.02 * sigh;
+            break;
+        }
+        case Action::Chase: {  // spots its own tail, crouches, spins twice round after it, stops a little dizzy
+            // Three beats: the tail twitches and the head whips round to look at it; a quick crouch (anticipation); two
+            // whole turns on the spot with the nose leading, stepping fast, leaning in, ears flung out by the spin; it
+            // stops a touch past where it started, swings back, and the head wobbles while the world stops turning.
+            // Ends at zero (two whole turns are no turn), so it hands back to standing without a pop.
+            double notice = smoothstep(p / 0.08) * smoothstep((0.26 - p) / 0.08);
+            double crouch = env((p - 0.11) / 0.11);
+            double q = std::clamp((p - CHASE_SPIN) / (CHASE_STOP - CHASE_SPIN), 0.0, 1.0);
+            double spinning = smoothstep(q * 4) * smoothstep((1 - q) * 4);
+            double dizzy = smoothstep((p - CHASE_STOP) / 0.05) * smoothstep((1 - p) / 0.16);
+            double step = smoothstep(q) * 2 * M_PI * 8;  // eight steps for the two turns
+            r.yaw = 720 * smoothstep(q) + 16 * env((p - 0.66) / 0.18);  // carried a little past, then back
+            double a = 24 * std::sin(step) * spinning, l = 1.4 * std::fabs(std::sin(step)) * spinning;
+            r.leg[0] = r.leg[3] = a;
+            r.leg[1] = r.leg[2] = -a;
+            if (std::cos(step) > 0) { r.legLift[0] = r.legLift[3] = l; } else { r.legLift[1] = r.legLift[2] = l; }
+            r.scaleY = 1 - 0.12 * crouch + 0.03 * spinning;
+            r.scaleXZ = 1 + 0.06 * crouch;
+            r.bodyY = -0.6 * crouch + 0.5 * std::fabs(std::sin(step)) * spinning;
+            r.bodyRoll = -8 * spinning + 6 * std::sin(t * 7 + 1) * dizzy;  // leaning into the turn, then swaying
+            for (int i = 0; i < 4; ++i) r.splay[i] = (i % 2 ? 1 : -1) * 14 * dizzy;  // legs braced wide: steady now
+            r.headYaw = 65 * notice + 38 * spinning + 14 * std::sin(t * 3.5) * dizzy;  // looking back at the tail
+            r.headPitch = 10 * notice + 6 * spinning + 6 * dizzy;
+            r.headRoll = 19 * std::sin(t * 7) * dizzy;  // the wobble
+            r.tail = 30 * std::sin(t * 20) * notice + 40 * std::sin(t * 18) * spinning + 25 * std::sin(t * 12) * dizzy;
+            r.ear = 15 * notice + 32 * spinning + 8 * std::sin(t * 7 + 2) * dizzy;
+            r.earSwing = 10 * notice - 14 * spinning;
             break;
         }
         case Action::Scratch:  // hind leg scratching behind the "ear"
