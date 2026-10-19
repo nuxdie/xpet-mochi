@@ -1008,7 +1008,9 @@ public:
         if (idle && (idleActionIn -= dt) <= 0) {
             idleActionIn = frand(3, 9);
             double r = frand();
-            if (st == St::Sit) {
+            // Once in a long while, standing or sitting about, a sneeze: about one idle trick in seventy.
+            if (r > 0.986 && grounded()) anim.start(art3d::Action::Sneeze, art3d::SNEEZE_SECS);
+            else if (st == St::Sit) {
                 if (r < 0.3) anim.start(art3d::Action::LookAround, 2.4);
                 else if (r < 0.5) anim.start(art3d::Action::Scratch, 1.7);
                 else if (r < 0.65) anim.start(art3d::Action::Shake, 0.9);
@@ -1156,6 +1158,9 @@ public:
         if (lyingDown() && anim.actionT > anim.actionLen * art3d::BEDTIME_EYES) eyes = art::Eyes::Closed;
         bool chasing = anim.action == art3d::Action::Chase;
         if (chasing && anim.actionT > anim.actionLen * art3d::CHASE_SPIN) eyes = art::Eyes::Happy;  // this is fun
+        if (anim.action == art3d::Action::Sneeze && anim.actionT > anim.actionLen * art3d::SNEEZE_SHUT &&
+            anim.actionT < anim.actionLen * art3d::SNEEZE_OPEN)
+            eyes = art::Eyes::Closed;  // nobody sneezes with their eyes open
         bool mirror = dir < 0;
         art::Prop prop = art::Prop::Nothing;
         if (working) {
@@ -2110,6 +2115,7 @@ int writeStrip(const std::string& name, const char* path) {
                 if (row == 2) f.yaw = 150;
             }
             double p = (i + 0.5) / N;
+            if (a->action == art3d::Action::Sneeze && p > art3d::SNEEZE_SHUT && p < art3d::SNEEZE_OPEN) f.eyes = art::Eyes::Closed;
             f.t = 1.0 + p * a->secs;
             f.costume = wardrobe::today();
             art3d::renderStill(cr, f, i * cellW + cellW / 2.0, row * cellH + cellH - 14 * zoom, zoom, a->action, p);

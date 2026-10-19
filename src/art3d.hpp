@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -165,8 +165,11 @@ inline const ActionInfo ACTIONS[] = {
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 2.0},         {"snuffle", Action::Snuffle, 1.4},
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
     {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},         {"stir", Action::Stir, 2.8},
-    {"chase", Action::Chase, 3.0},
+    {"chase", Action::Chase, 3.0},     {"sneeze", Action::Sneeze, 2.0},
 };
+// Sneeze: two breaths in, the sneeze at SNEEZE_CHOO, then a shake of the head. The eyes squeeze shut from SNEEZE_SHUT
+// to SNEEZE_OPEN (the pet closes them, the rig can't).
+constexpr double SNEEZE_CHOO = 0.52, SNEEZE_SHUT = 0.38, SNEEZE_OPEN = 0.66, SNEEZE_SECS = 2.0;
 // Chase: round and round after its own tail. It spins from CHASE_SPIN to CHASE_STOP of the way through (the pet keeps
 // its head from tracking anything meanwhile); before is the moment it spots the tail, after is the dizzy wobble.
 constexpr double CHASE_SPIN = 0.2, CHASE_STOP = 0.72, CHASE_SECS = 3.0;
@@ -757,6 +760,33 @@ inline Rig actionRig(Action a, double p, double t) {
             r.tail = 30 * std::sin(t * 20) * notice + 40 * std::sin(t * 18) * spinning + 25 * std::sin(t * 12) * dizzy;
             r.ear = 15 * notice + 32 * spinning + 8 * std::sin(t * 7 + 2) * dizzy;
             r.earSwing = 10 * notice - 14 * spinning;
+            break;
+        }
+        case Action::Sneeze: {  // ah... ah... CHOO, and a shake of the head
+            // A small breath in that comes to nothing, then a bigger one held at the top (nose up, snout flared, up on
+            // its toes, ears back), and it all goes at once: the head snaps down past level, the body squashes and
+            // jolts back off its feet, ears and tail flung out. Then it shakes its head and has a last sniff.
+            double first = env((p - 0.05) / 0.24);
+            double release = smoothstep((p - SNEEZE_CHOO + 0.03) / 0.03);
+            double held = smoothstep((p - 0.27) / 0.2) * (1 - release);
+            double in = std::max(0.55 * first, held);
+            double choo = release * (1 - smoothstep((p - SNEEZE_CHOO - 0.04) / 0.13));
+            double jolt = env((p - SNEEZE_CHOO + 0.01) / 0.13);
+            double shakeoff = env((p - 0.6) / 0.26);
+            double sniff = env((p - 0.8) / 0.2);
+            r.headPitch = -28 * in + 20 * choo + 5 * shakeoff;  // more than ~20 down buries the face in the chest
+            r.headYaw = 26 * std::sin(t * 19) * shakeoff;
+            r.bodyPitch = 6 * in - 3 * choo;
+            r.bodyX = -0.4 * in - 1.2 * choo;
+            r.scaleY = 1 + 0.09 * in - 0.13 * choo;
+            r.scaleXZ = 1 - 0.03 * in + 0.08 * choo;
+            r.lift = 1.8 * jolt;
+            r.shadow = 1 - 0.3 * jolt;
+            r.leg[0] = r.leg[1] = -6 * in + 10 * choo;  // braced, then thrown forward
+            r.snout = 1 + 0.3 * in + 0.06 * std::sin(t * 30) * held - 0.25 * choo + 0.15 * std::fabs(std::sin(t * 22)) * sniff;
+            r.ear = 18 * in + 40 * choo + 20 * std::fabs(std::sin(t * 19 + 0.8)) * shakeoff;
+            r.earSwing = -12 * in + 35 * choo;
+            r.tail = 45 * choo;
             break;
         }
         case Action::Scratch:  // hind leg scratching behind the "ear"
