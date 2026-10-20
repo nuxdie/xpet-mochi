@@ -194,6 +194,8 @@ asked (2026-10-20) that you archive, on your own, every mail that doesn't need t
 at it and done what it called for. So an archive is the last step of handling a mail, never a sweep by sender:
 1. **Read it**: `mochi-sense mail show 'id:...'` (`--chars 1500` is plenty for a newsletter). `mochi-mail archive`
    refuses any inbox message in the thread that you haven't opened this way, and lists the ids to read.
+   Several at once in one command: `mochi-sense mail show 'thread:A or thread:B or id:C' --chars 400` (shell loops
+   are refused in rounds).
 2. **Decide and act first.** What does it change? A rejection → the company in the job-search loop; a date or an
    appointment → their calendar or an open loop; a parcel → the errand or the watch; an invoice → filed by the
    invoice rule; a bill with a due date, a form to sign, a letter with an action → an open loop and, if it can't
