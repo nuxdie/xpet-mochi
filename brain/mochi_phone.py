@@ -18,7 +18,7 @@ sender's static key mixed in (the receiver knows who sealed it). The relay token
   mochi-phone feed               JSON for the relay's live feed: what's new that may deserve a catch-up
   mochi-phone status             the line, the keys, the last word from the phone
   mochi-phone events [--hours N] the raw events lately
-  mochi-phone send locate | buzz "TEXT" | ask "TEXT" --options "A,B,C" [--id ID] [--link URL] [--buzz] | close --id ID
+  mochi-phone send locate | lock | buzz "TEXT" | ask "TEXT" --options "A,B,C" [--id ID] [--link URL] [--buzz] | close --id ID
   mochi-phone send photo [--front] [--wait S] | send audio [--seconds N] [--wait S]   a still, a clip (then transcribed)
   mochi-phone media [--days N]   the pictures and clips that came back, with transcripts
   mochi-phone transcribe FILE    (what `serve` does for clips: faster-whisper in Mochi's tools venv)
@@ -659,6 +659,8 @@ def send(args):
             msg["buzz"] = True
     elif kind == "close":  # take an ask's notification back (answered elsewhere, or no longer true)
         msg = {"type": "close", "ask_id": opt(args, "--id") or sys.exit("send close --id ASK_ID")}
+    elif kind == "lock":  # the sleep wall (mochi-bedtime): lock the screen, like the desk's
+        msg = {"type": "lock"}
     elif kind == "photo":
         msg = {"type": "photo", "cam": "front" if "--front" in args else "back"}
     elif kind == "audio":

@@ -470,6 +470,9 @@ public class AgentService extends Service {
             case "close":
                 nm.cancel(1000 + (msg.optString("ask_id").hashCode() & 0xffff));
                 break;
+            case "lock":
+                lockNow();
+                break;
             case "photo":
                 io.post(() -> capture("photo", msg));
                 break;
@@ -533,6 +536,17 @@ public class AgentService extends Service {
                 .setSmallIcon(R.mipmap.ic_launcher).setContentTitle("Mochi").setContentText(text)
                 .setStyle(new Notification.BigTextStyle().bigText(text)).setAutoCancel(true).build();
         nm.notify((int) (System.currentTimeMillis() & 0xffff), n);
+    }
+
+    // The sleep wall: pause what plays, then lock the screen like the desk's. The lock needs LockAdmin active
+    // (install.sh), otherwise only the pause happens.
+    private void lockNow() {
+        AudioManager am = getSystemService(AudioManager.class);
+        am.dispatchMediaKeyEvent(new android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_MEDIA_PAUSE));
+        am.dispatchMediaKeyEvent(new android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_MEDIA_PAUSE));
+        android.app.admin.DevicePolicyManager dpm = getSystemService(android.app.admin.DevicePolicyManager.class);
+        if (dpm.isAdminActive(new android.content.ComponentName(this, LockAdmin.class))) dpm.lockNow();
+        else Log.w(TAG, "lock: LockAdmin is not active");
     }
 
     private void ask(String askId, String text, JSONArray options, String link, boolean strong) {
