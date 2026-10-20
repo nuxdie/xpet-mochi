@@ -14,10 +14,21 @@ request carrying the token from ~/.config/mochi/clocks.json (made on first start
   GET  /clock/sheet.png|json       the pig, drawn by `xpet --clock-sheet` in today's costume (redrawn each day)
   POST /clock/answer               {"id", "label", "room"}: a tap on an ask's option, handed to the relay as an
                                    answer from "clock-<room>", exactly like a click on the desktop pig
-  POST /clock/seen                 {"room", "what", "lux"?}: a touch, or the kitchen lights going on or off
+  POST /clock/seen                 {"room", "what", "lux"?}: a touch, the kitchen lights going on or off, or
+                                   "motion" (mochi-eyes on the Pi saw the room change; no picture leaves the Pi)
   POST /clock/hush                 {"id"}: the urgent line was tapped away, on either clock
+  POST /clock/voice?room=kitchen   a WAV they recorded by tapping "talk to me" on the pig: transcribed here (whisper,
+                                   through mochi-phone), handed to the relay as a task from "clock-<room>", the clip
+                                   dropped; the answer comes back on that clock
 
-`mochi-clocks status` prints what the clocks last told the relay; `mochi-clocks sheet` redraws the pig now.
+Each clock also has a webcam and a microphone (2026-10-20). Mochi takes a still or a clip only in a run they asked for,
+over ssh with its own key (the same rule as mochi-desk):
+
+  mochi-clocks photo ROOM                    a still (1280x1024), printed path; Read it
+  mochi-clocks audio ROOM [--seconds N]      a clip from the room's GoMic, transcribed
+  mochi-clocks media [--days N]              what was taken
+  mochi-clocks status                        what the clocks last told the relay
+  mochi-clocks sheet                         redraw the pig now
 """
 
 import datetime as dt
@@ -48,6 +59,12 @@ SAY_FOR = 15 * 60          # an urgent line stays on the clocks this long, unles
 ASKS_SHOWN = 4
 DESK_ONLY = {"chat about it", "show me"}  # options that open something on the desktop: not offered on a wall
 MAX_BODY = 4096
+MAX_VOICE = 2 * 1024 * 1024  # 16 kHz mono 16-bit: about a minute; the clock stops at 15 s
+SSH_KEY = HOME / ".ssh/mochi_ed25519"
+MEDIA = WORK / "clock" / "media"
+INDEX = WORK / "clock" / "captures.json"
+MAX_SECONDS = 120
+MOTION_EVERY = 60  # a moving room is noted at most this often (the Pi sends more)
 
 
 def config():
@@ -77,8 +94,9 @@ class Clocks:
     """The relay's side of the clocks. `asks` returns the relay's pending asks ({id: ask}), `busy` the kind of the run
     going (or None); a tap on an answer goes to the relay's own socket `sock`, as the pig would send it."""
 
-    def __init__(self, asks, busy, sock=None, log=print):
-        self.asks, self.busy, self.sock, self.log = asks, busy, sock, log
+    def __init__(self, asks, busy, sock=None, log=print, task=None):
+        """`task(text, room)` hands what they said at a clock to the relay as something they asked."""
+        self.asks, self.busy, self.sock, self.log, self.task = asks, busy, sock, log, task
         self.lock = threading.Lock()
         self.said = None  # {"id", "text", "at"}: the last urgent line
         self.hushed = set()
@@ -88,11 +106,12 @@ class Clocks:
 
     # -- what the relay tells the clocks
 
-    def say(self, text, sid=None):
+    def say(self, text, sid=None, room=None):
+        """An urgent line, on both clocks; with `room`, an answer to something asked at that clock, only there."""
         with self.lock:
-            self.said = {"id": sid or secrets.token_hex(4), "text": text[:160], "at": time.time()}
+            self.said = {"id": sid or secrets.token_hex(4), "text": text[:160], "at": time.time(), "room": room}
 
-    def feed(self):
+    def feed(self, room=None):
         try:
             pending = list(self.asks().items())
         except RuntimeError:  # the relay changed the dict under us; next poll gets it
@@ -106,6 +125,9 @@ class Clocks:
         with self.lock:
             s = self.said
             say = s if s and time.time() - s["at"] < SAY_FOR and s["id"] not in self.hushed else None
+            if say and say.get("room") not in (None, room):
+                say = None
+            say = say and {"id": say["id"], "text": say["text"], "at": say["at"]}
         return {"t": round(time.time()), "asks": shown, "say": say, "busy": self.busy() or "",
                 "sheet": self.sheet_version()}
 
@@ -132,6 +154,10 @@ class Clocks:
             r["last"] = {"what": what[:60], "at": round(time.time())}
             if what == "touch":
                 r["touched"] = round(time.time())
+            if what == "motion":
+                if time.time() - r.get("moved", 0) < MOTION_EVERY:
+                    return
+                r["moved"] = round(time.time())
             if what in ("lights on", "lights off"):
                 r["lights"] = {"on": what == "lights on", "at": round(time.time())}
             if lux is not None:
@@ -156,6 +182,8 @@ class Clocks:
                 bits.append(f"lights {'on' if r['lights']['on'] else 'off'} since {stamp(r['lights']['at'])}")
             if r.get("touched"):
                 bits.append(f"last touched {stamp(r['touched'])}")
+            if r.get("moved"):
+                bits.append(f"movement seen {stamp(r['moved'])}")
             if r.get("polled"):
                 bits.append("online" if time.time() - r["polled"] < 180 else f"offline since {stamp(r['polled'])}")
             out.append(f"{room} clock: " + ", ".join(bits))
@@ -175,6 +203,31 @@ class Clocks:
             tmp.replace(SEEN_FILE)
         except OSError:
             pass
+
+    def voice(self, wav, room):
+        """What they said at a clock: transcribed off the server thread, then a task like a question typed to the pig.
+        The clip goes as soon as it is text (guests talk in that kitchen too)."""
+        def work():
+            text = ""
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+                    f.write(wav)
+                    f.flush()
+                    p = subprocess.run(["mochi-phone", "transcribe", f.name], capture_output=True, text=True, timeout=600)
+                    text = p.stdout.strip() if p.returncode == 0 else ""
+            except (OSError, subprocess.TimeoutExpired) as e:
+                self.log(f"clocks: voice not transcribed: {e}")
+            text = heard(text)
+            if len(text) < 3:
+                self.say("sorry, i didn't catch that", room=room)
+                return
+            self.note(room, "spoke")
+            if self.task:
+                self.task(text, room)
+            else:
+                self.say("i heard you, but i can't act on it right now", room=room)
+
+        threading.Thread(target=work, daemon=True).start()
 
     # -- the pig's sprite sheet
 
@@ -261,7 +314,7 @@ class Clocks:
                     room = self.room((q.get("room") or [""])[0])
                     with clocks.lock:
                         clocks.seen.setdefault(room, {})["polled"] = round(time.time())
-                    return self.json(clocks.feed())
+                    return self.json(clocks.feed(room))
                 if u.path in ("/clock/sheet.png", "/clock/sheet.json"):
                     f = SHEET_DIR / u.path.rsplit("/", 1)[1]
                     try:
@@ -274,6 +327,17 @@ class Clocks:
             def do_POST(self):
                 if not self.authorized():
                     return self.reply(401)
+                u = urlparse(self.path)
+                if u.path == "/clock/voice":
+                    n = int(self.headers.get("Content-Length") or 0)
+                    room = self.room((parse_qs(u.query).get("room") or [""])[0])
+                    if not 1000 < n <= MAX_VOICE:
+                        return self.reply(400)
+                    wav = self.rfile.read(n)
+                    if wav[:4] != b"RIFF":
+                        return self.reply(400)
+                    clocks.voice(wav, room)
+                    return self.json({"ok": True})
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, MAX_BODY)) or b"{}") if n <= MAX_BODY else None
@@ -287,7 +351,7 @@ class Clocks:
                     return self.json({"ok": clocks.answer(body, room)})
                 if path == "/clock/seen":
                     what = str(body.get("what", ""))
-                    if what not in ("touch", "lights on", "lights off"):
+                    if what not in ("touch", "lights on", "lights off", "motion"):
                         return self.reply(400)
                     lux = body.get("lux")
                     clocks.note(room, what, lux if isinstance(lux, (int, float)) else None)
@@ -315,9 +379,115 @@ def stamp(t):
     return f"{d:%H:%M}" if d.date() == dt.date.today() else f"{d:%a %H:%M}"
 
 
+def heard(out):
+    """mochi-phone transcribe prints "[en] the words" (the language whisper detected), or "[en]" alone, or "None"."""
+    out = (out or "").strip()
+    if out == "None":
+        return ""
+    if out.startswith("[") and "]" in out[:8]:
+        out = out.split("]", 1)[1]
+    return out.strip()
+
+
+# -- the clocks' camera and microphone, on request (over ssh with Mochi's own key)
+
+def host(room):
+    if room not in ROOMS:
+        sys.exit(f"which clock? {' or '.join(ROOMS)}")
+    return f"n@{room}-clock.local"
+
+
+def ssh(room, cmd, timeout=60, binary=False):
+    p = subprocess.run(["ssh", "-i", str(SSH_KEY), "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-o", "IdentitiesOnly=yes",
+                        "-o", "StrictHostKeyChecking=accept-new", host(room), cmd], capture_output=True, timeout=timeout,
+                       text=not binary)
+    return p.returncode, p.stdout, p.stderr
+
+
+def record(kind, room, path, **extra):
+    """Remember what was taken (media lists it) and print where it landed."""
+    try:
+        caps = json.loads(INDEX.read_text())
+    except (OSError, ValueError):
+        caps = []
+    caps.append({"t": int(time.time()), "kind": kind, "room": room, "path": str(path), **extra})
+    INDEX.write_text(json.dumps(caps[-200:], indent=1, ensure_ascii=False))
+    print(path)
+    if extra.get("text"):
+        print(extra["text"])
+
+
+def photo(room):
+    """The webcams give only raw YUYV: one frame comes over ssh (the first ones are dark while exposure settles, so it
+    skips a few), and ffmpeg makes it a JPEG here. mochi-eyes grabs a tiny frame now and then, so a busy camera retries."""
+    MEDIA.mkdir(parents=True, exist_ok=True)
+    w, h = 1280, 1024
+    grab = (f"v4l2-ctl -d /dev/video0 --set-fmt-video=width={w},height={h},pixelformat=YUYV "
+            "--stream-mmap --stream-skip=10 --stream-count=1 --stream-to=-")
+    raw, err = b"", ""
+    for _ in range(3):
+        code, raw, err = ssh(room, grab, timeout=60, binary=True)
+        if code == 0 and len(raw) == w * h * 2:
+            break
+        time.sleep(2)
+    else:
+        sys.exit(f"{room} camera failed: {(err or b'').decode(errors='replace').strip()[-200:]}")
+    out = MEDIA / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{room}-photo.jpg"
+    p = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuyv422", "-s", f"{w}x{h}", "-i", "-",
+                        "-q:v", "4", str(out)], input=raw, capture_output=True, timeout=60)
+    if p.returncode != 0:
+        sys.exit(f"couldn't make a picture: {p.stderr.decode(errors='replace')[-200:]}")
+    record("photo", room, out)
+
+
+def audio(room, secs):
+    MEDIA.mkdir(parents=True, exist_ok=True)
+    secs = max(1, min(secs, MAX_SECONDS))
+    code, wav, err = ssh(room, f"arecord -q -D plughw:CARD=GoMic -f S16_LE -r 16000 -c1 -d {secs} -t wav -",
+                         timeout=secs + 40, binary=True)
+    if code != 0 or wav[:4] != b"RIFF":
+        sys.exit(f"{room} microphone failed: {(err or b'').decode(errors='replace').strip()[-200:]}")
+    out = MEDIA / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{room}-audio.wav"
+    out.write_bytes(wav)
+    p = subprocess.run(["mochi-phone", "transcribe", str(out)], capture_output=True, text=True, timeout=900)
+    text = heard(p.stdout) if p.returncode == 0 else ""
+    text = text or None
+    if text:
+        out.with_suffix(".txt").write_text(text)
+    record("audio", room, out, seconds=secs, text=text)
+
+
+def media(days):
+    since = time.time() - days * 86400
+    try:
+        caps = [c for c in json.loads(INDEX.read_text()) if c.get("t", 0) >= since]
+    except (OSError, ValueError):
+        caps = []
+    if not caps:
+        return f"_nothing captured at the clocks in the last {days} day(s)_"
+    out = []
+    for c in caps:
+        line = (f"{dt.datetime.fromtimestamp(c['t']):%a %H:%M} {c['room']} {c['kind']}"
+                + (f" {c['seconds']}s" if c.get("seconds") else "") + f": {c['path']}")
+        if c.get("text"):
+            line += f"\n    {c['text'][:300]}"
+        out.append(line)
+    return "\n".join(out)
+
+
+def opt(args, name, default=None):
+    return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else default
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "status"
-    if cmd == "sheet":
+    if cmd == "photo" and len(argv) > 2:
+        photo(argv[2])
+    elif cmd == "audio" and len(argv) > 2:
+        audio(argv[2], int(opt(argv, "--seconds", 10)))
+    elif cmd == "media":
+        print(media(int(opt(argv, "--days", 2))))
+    elif cmd == "sheet":
         c = Clocks(dict, lambda: None)
         c.redraw(wait=True)
         print(SHEET_DIR / "sheet.png")
@@ -328,7 +498,7 @@ def main(argv):
         print(config()["token"])
     else:
         print(__doc__)
-        print("usage: mochi-clocks [status | sheet | token]")
+        print("usage: mochi-clocks [status | sheet | token | photo ROOM | audio ROOM [--seconds N] | media [--days N]]")
         return 2
     return 0
 
