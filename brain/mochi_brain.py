@@ -108,7 +108,10 @@ JOURNAL_KEEP = 60 * 86400    # a day's journal is deleted after this, once its w
 
 STUDY_MODEL = None           # reading people takes the default model
 STUDY_HOURS = (1, 7)         # the same night as the dream; the dream goes first
-STUDY_PER_NIGHT = 2          # sessions per night
+STUDY_PER_NIGHT = 5          # sessions per night (raised from 2, his yes 2026-10-20)
+STUDY_PER_DAY = 3            # and while they're away by day ("mochi knows when i'm away. so it can study then too",
+                             # 2026-10-20). These run beside the worker, not in it, so a catch-up or a question
+                             # never waits 45 minutes behind someone reading old calls.
 STUDY_GAP = 30 * 60          # between the end of one night run and the next study session
 STUDY_AWAY = DREAM_AWAY      # away at least this long
 STUDY_TIMEOUT = 45 * 60
@@ -380,7 +383,7 @@ WEEK_PROMPT = """
    this is the one report a dream may raise. The relay's numbers (facts): {stats}
 """
 
-STUDY_PROMPT = """It's {now}. They're away and you're awake for a study session, not a round (session {n} of {per} tonight;
+STUDY_PROMPT = """It's {now}. They're away and you're awake for a study session, not a round (session {n} of {per} {when};
 last one: {last}). Its whole purpose is understanding who they are as a person: their character, their values,
 what they care about and why, as the "Knowing who they are" section of CLAUDE.md describes. They asked for this in
 so many words: "continue to improve your understanding of me and my character ... dig into my archives to get an
@@ -626,6 +629,16 @@ def study_due(at, study, away_for, last_run_end):
         return False
     done = study.get("count", 0) if study.get("night") == at.date().isoformat() else 0
     return done < STUDY_PER_NIGHT
+
+
+def day_study_due(at, study, away_for):
+    """A daytime study session: away long enough, outside the night's own window (that one is the worker's), sessions
+    left today, and a breather since the last daytime session ended."""
+    a, b = STUDY_HOURS
+    if away_for < STUDY_AWAY or a <= at.hour < b or at.timestamp() - study.get("day_end", 0) < STUDY_GAP:
+        return False
+    done = study.get("day_count", 0) if study.get("day") == at.date().isoformat() else 0
+    return done < STUDY_PER_DAY
 
 
 def workshop_due(at, ws, away_for, last_run_end):
@@ -2113,6 +2126,7 @@ class Relay:
         self.tasks = queue.Queue()
         self.results = queue.Queue()
         self.busy = None  # kind of the run in progress
+        self.side = None  # a daytime study session running beside the worker
         self.was_away = False
         self.tg = Telegram(self)
         self.watches = Watches(WATCHES_FILE, self.state["watches"], lambda text, urgent: self.trigger(text, urgent, "watch"),
@@ -2301,6 +2315,11 @@ class Relay:
     def on_answer(self, aid, label, via="pig"):
         """The user picked one of the options Claude put on an ask (on the pig, or on their phone). The label is
         Claude's own wording, or, from the phone, their typed words."""
+        if aid.startswith("fuel-"):  # mochi-fuel's own "ate?" questions: its answer file, not a run of Claude
+            with open(Path.home() / ".local/state/mochi-fuel/answers", "a") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M')} {aid} {label}\n")
+            self.pet.say("ok, i'll check back" if label.lower() == "not yet" else "noted 🐷", 3)
+            return
         a = self.state["asks"].pop(aid, None)
         if not a or not label:
             return
@@ -2444,19 +2463,23 @@ class Relay:
                 self.greet_at_desk()
         first_today = self.state["counts"].get("day") != today() or self.count("rounds") == 0
         if away and dream_due(dt.datetime.now(), self.state["last_dream"], now() - (self.state["away_since"] or now()),
-                              journal_days(self.state["last_dream"])) and not self.busy and self.tasks.empty():
+                              journal_days(self.state["last_dream"])) and not self.busy and self.tasks.empty() \
+                and not self.side:
             self.start_dream(f"they've been away {human_age(now() - self.state['away_since'])}")
             return
-        if away and not self.busy and self.tasks.empty() and WS and workshop_due(
+        if away and not self.busy and not self.side and self.tasks.empty() and WS and workshop_due(
                 dt.datetime.now(), self.state["workshop"], now() - (self.state["away_since"] or now()),
                 self.state["night_end"]):
             self.start_workshop(f"they've been away {human_age(now() - self.state['away_since'])}")
             return
-        if away and not self.busy and self.tasks.empty() and study_due(
+        if away and not self.busy and not self.side and self.tasks.empty() and study_due(
                 dt.datetime.now(), self.state["study"], now() - (self.state["away_since"] or now()),
                 self.state["night_end"]):
             self.start_study(f"they've been away {human_age(now() - self.state['away_since'])}")
             return
+        if away and not self.side and day_study_due(dt.datetime.now(), self.state["study"],
+                                                    now() - (self.state["away_since"] or now())):
+            self.start_day_study(f"they've been away {human_age(now() - self.state['away_since'])}")
         if away:
             # With the bot set up, a light round now and then so what can't wait can still reach you. Not at night:
             # away then means asleep, and 15 empty rounds on 2026-10-13 said so.
@@ -2718,12 +2741,40 @@ class Relay:
         st["last"] = now()
         ctx = self.context()
         prompt = STUDY_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"), n=st["count"] + asked,
-                                     per=STUDY_PER_NIGHT,
+                                     per=STUDY_PER_NIGHT, when="tonight",
                                      last=dt.datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never",
                                      ctx=json.dumps(ctx, indent=1, ensure_ascii=False), block=BLOCK)
         self.tasks.put({"kind": "study", "title": "study", "level": "dream", "model": STUDY_MODEL,
                         "timeout": STUDY_TIMEOUT, "prompt": prompt})
         log(f"study queued ({why}; {'extra' if asked else 'session ' + str(st['count'])} tonight)")
+
+    def start_day_study(self, why):
+        """A study session by day while they're away, on a thread of its own: the worker stays free for catch-ups,
+        rounds and whatever they ask. Its result comes back through the results queue like any other run."""
+        day = dt.date.today().isoformat()
+        st = self.state["study"]
+        if st.get("day") != day:
+            st.update(day=day, day_count=0)
+        st["day_count"] = st.get("day_count", 0) + 1  # counted now, so a failed session doesn't retry all day
+        last = st.get("last", 0)
+        st["last"] = now()
+        prompt = STUDY_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"), n=st["day_count"],
+                                     per=STUDY_PER_DAY, when="today, while they're away",
+                                     last=dt.datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never",
+                                     ctx=json.dumps(self.context(), indent=1, ensure_ascii=False), block=BLOCK)
+        task = {"kind": "study", "title": "study (day)", "level": "dream", "model": STUDY_MODEL,
+                "timeout": STUDY_TIMEOUT, "prompt": prompt, "day": True}
+        self.side = "study"
+
+        def go():
+            try:
+                res = claude_run(task["prompt"], task["level"], task.get("model"), task["timeout"])
+            except Exception as e:
+                res = {"ok": False, "text": "", "error": repr(e), "secs": 0, "cost": 0}
+            self.results.put((task, res))
+            self.side = None
+        threading.Thread(target=go, daemon=True).start()
+        log(f"study started beside the worker ({why}; session {st['day_count']} today)")
 
     def start_workshop(self, why, asked=False):
         """A night in the workshop: Mochi works on the pig itself (looks, tricks, behaviour) in its own worktree."""
@@ -2872,7 +2923,9 @@ class Relay:
         data = extract_json(res["text"]) or {}
         session = res.get("session") or ""
         self.note_denials(task, res)
-        if kind in ("dream", "study", "workshop"):
+        if task.get("day"):
+            self.state["study"]["day_end"] = now()
+        elif kind in ("dream", "study", "workshop"):
             self.state["night_end"] = now()
         if kind == "dream" and res["ok"] and task.get("week"):
             self.state["week_report"] = task["week"]
@@ -3112,7 +3165,7 @@ def claude_run(prompt, level, model=None, timeout=900, resume=None):
     except OSError as e:
         return {"ok": False, "text": "", "error": str(e), "secs": now() - t0, "cost": 0}
     finally:
-        if BROWSER:
+        if BROWSER and level in ("round", "approved"):  # only runs that had one: a day study runs beside them
             BROWSER.stop()  # the run's hidden Chrome; one on their screen, or one a chat is using, stays
     try:
         j = json.loads(p.stdout)

@@ -537,8 +537,9 @@ idea of what my values are and who I am as a person."* Knowing their values is h
 rule covers the case: what they would want carried, what they'd never want done in their name, what matters to
 them more than convenience.
 
-**When.** Most nights, after the dream, the relay wakes you for up to two **study sessions** (`mochi-brain --study`
-starts one by hand). Each reads one stretch of one source properly and grows `memory/portrait.md`. Rounds don't
+**When.** Most nights, after the dream, the relay wakes you for up to five **study sessions**, and by day for up to
+three more while they're away (2026-10-20, "all in", "mochi knows when i'm away. so it can study then too"; a day
+session runs beside rounds and catch-ups, so it never makes them wait). `mochi-brain --study` starts one by hand. Each reads one stretch of one source properly and grows `memory/portrait.md`. Rounds don't
 study, but when a round or a chat shows something about who they are (a choice, a refusal, a reaction to an ask),
 add one line under "Seen in passing" in `memory/study.md` for the next session to weigh.
 
