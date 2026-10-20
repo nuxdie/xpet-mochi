@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -165,7 +165,7 @@ inline const ActionInfo ACTIONS[] = {
     {"sulk", Action::Sulk, 3.5},       {"cheer", Action::Cheer, 2.0},         {"snuffle", Action::Snuffle, 1.4},
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
     {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},         {"stir", Action::Stir, 2.8},
-    {"chase", Action::Chase, 3.0},     {"sneeze", Action::Sneeze, 2.0},
+    {"chase", Action::Chase, 3.0},     {"sneeze", Action::Sneeze, 2.0},       {"ride", Action::Ride, 2.0},
 };
 // Sneeze: two breaths in, the sneeze at SNEEZE_CHOO, then a shake of the head. The eyes squeeze shut from SNEEZE_SHUT
 // to SNEEZE_OPEN (the pet closes them, the rig can't).
@@ -442,6 +442,40 @@ struct Motion {
         return m;
     }
 };
+
+// Riding a window that is being dragged: how a jolt looks. surge > 0 is the pig thrown toward its nose, side > 0 toward
+// its +z flank (degrees of lean), heave > 0 thrown upward (< 0 pressed down). The pet runs the spring behind these
+// (main.cpp rideStep), so the start of a drag rocks it back and the stop pitches it forward, then it finds its feet.
+inline Rig rideRig(double surge, double side, double heave) {
+    Rig r;
+    double fwd = std::max(0.0, surge), back = std::max(0.0, -surge);
+    // Thrown forward it tips onto its front hooves, rump up: pitched about the front feet (the body rises by what the
+    // nose would sink), hind legs left reaching back. Thrown back it rocks onto its haunches, front hooves up.
+    r.bodyPitch = -surge;
+    r.bodyY = 16 * std::sin(fwd * DEG) + 5 * std::sin(std::fabs(side) * DEG);  // the low side stays on the floor
+    r.leg[0] = r.leg[1] = 0.5 * fwd + 0.9 * back;
+    r.leg[2] = r.leg[3] = -0.9 * fwd - 0.3 * back;
+    r.bodyRoll = side;
+    for (double& s : r.splay) s = 0.7 * std::fabs(side) + 0.6 * std::max(0.0, -heave);  // braced wide
+    r.headPitch = 0.7 * surge;  // the head goes on a little further than the body, a beat behind
+    r.headRoll = 0.5 * side;
+    r.scaleY = 1 + 0.012 * heave;
+    r.scaleXZ = 1 - 0.005 * heave;
+    r.ear = 0.9 * std::fabs(surge) + 0.9 * std::fabs(side) + 1.5 * heave;
+    r.earSwing = 1.6 * surge;
+    r.tail = -2.2 * surge;
+    return r;
+}
+// The spring behind rideRig: a stiff, well-damped one (one clear lean, a small swing back, still), as he likes his
+// bounces. RIDE_SECS is the "ride" trick's length (the strip and the socket play a canned ride with it).
+constexpr double RIDE_W = 8, RIDE_Z = 0.45, RIDE_SECS = 2.0;
+// One jolt's lean t seconds after it, scaled so it peaks at `peak` degrees.
+inline double rideJolt(double t, double peak) {
+    if (t <= 0) return 0;
+    double wd = RIDE_W * std::sqrt(1 - RIDE_Z * RIDE_Z), tp = std::atan2(wd, RIDE_Z * RIDE_W) / wd;
+    double top = std::exp(-RIDE_Z * RIDE_W * tp) * std::sin(wd * tp);
+    return peak * std::exp(-RIDE_Z * RIDE_W * t) * std::sin(wd * t) / top;
+}
 
 // One-shot overlays. p runs 0 → 1 over the action's length.
 inline Rig actionRig(Action a, double p, double t) {
@@ -787,6 +821,11 @@ inline Rig actionRig(Action a, double p, double t) {
             r.ear = 18 * in + 40 * choo + 20 * std::fabs(std::sin(t * 19 + 0.8)) * shakeoff;
             r.earSwing = -12 * in + 35 * choo;
             r.tail = 45 * choo;
+            break;
+        }
+        case Action::Ride: {  // a window ride played out on the spot: it starts (rocked back), then stops (thrown forward)
+            double s = p * RIDE_SECS;
+            r = rideRig((rideJolt(s - 0.1, -12) + rideJolt(s - 0.9, 20)) * smoothstep((1 - p) * 8), 0, 0);
             break;
         }
         case Action::Scratch:  // hind leg scratching behind the "ear"
@@ -1289,7 +1328,9 @@ inline HeadPos render(cairo_t* cr, const Frame& f, const Rig& rig, double cx, do
 }
 
 // Convenience for still renders (the sprite sheet): a fresh animator settled into the pose.
-inline HeadPos renderStill(cairo_t* cr, const Frame& f, double cx, double baseY, double scale = 1.0, Action act = Action::Idle, double actP = 0.5) {
+// `extra` is laid on top like the pet's own overlays (a window ride's lean), for the render test.
+inline HeadPos renderStill(cairo_t* cr, const Frame& f, double cx, double baseY, double scale = 1.0, Action act = Action::Idle, double actP = 0.5,
+                           const Rig& extra = Rig{}) {
     Animator a;
     Frame g = f;
     propPlacement(g.prop, g.yaw, g.propX, g.propZ, g.propYaw);
@@ -1297,7 +1338,7 @@ inline HeadPos renderStill(cairo_t* cr, const Frame& f, double cx, double baseY,
     g.t = f.t;
     Rig r = a.update(g);
     if (act != Action::Idle) r = r + actionRig(act, actP, g.t);
-    return render(cr, g, r, cx, baseY, scale);
+    return render(cr, g, r + extra, cx, baseY, scale);
 }
 
 }  // namespace art3d

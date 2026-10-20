@@ -964,6 +964,7 @@ public:
         } else {
             groundStep(dt);
         }
+        rideStep(dt);
         lastPx = px;
         lastPy = py;
 
@@ -1205,7 +1206,7 @@ public:
         fr.lookX = lookX; fr.lookY = lookY; fr.lookW = lyingDown() || chasing ? 0 : lookW; fr.lookKind = lookKind;  // no glances mid-turn
         fr.propX = deskX; fr.propZ = deskZ; fr.propYaw = deskPropYaw;
         fr.costume = costume;
-        art3d::Rig rig = anim.update(fr);
+        art3d::Rig rig = anim.update(fr) + rideLean();
         // In the air the pig spins about its middle: draw it a bit higher so nothing leaves the window.
         airLift += ((st == St::Air || st == St::Drag ? 30.0 : 0.0) - airLift) * 0.25;
         art3d::HeadPos hp = art3d::render(cr, fr, rig, SPR_X + SPR_W / 2.0, SPR_Y + SPR_H - 1 - GROUND_MARGIN - 14 * approach - airLift);
@@ -1309,6 +1310,11 @@ private:
     bool thrown = false;
     Window plat = 0;
     int platX = 0, platY = 0;
+    // riding a dragged window (rideStep): how far the window moved this frame and last, its speed, and the spring
+    double rideDx = 0, rideDy = 0, ridePrevDx = 0, ridePrevDy = 0, rideVx = 0, rideVy = 0;
+    double rideL = 0, rideLv = 0, rideH = 0, rideHv = 0;
+    // deg/s of lean per px/frame of change in the window's speed, and the most one frame's change can count for
+    static constexpr double RIDE_KICK = 16, RIDE_MAX_A = 10;
 
     // behaviour
     St st = St::Air;
@@ -1631,6 +1637,34 @@ private:
 
     bool grounded() const { return st != St::Air && st != St::Drag && st != St::Away; }
 
+    // Riding a window you drag: every change in the window's speed throws the pig the other way (the start rocks it
+    // back, the stop pitches it forward), on a well-damped spring, so it leans, swings back a little and finds its feet.
+    // The geometry is read every other frame, so the speed is taken over two frames. Lean is on the screen (+ is
+    // thrown to the right), heave up; rideRig turns them into the pig's own terms by where it faces.
+    void rideStep(double dt) {
+        double vx = (rideDx + ridePrevDx) / 2, vy = (rideDy + ridePrevDy) / 2;
+        ridePrevDx = rideDx; ridePrevDy = rideDy;
+        rideDx = rideDy = 0;
+        double ax = vx - rideVx, ay = vy - rideVy;
+        rideVx = vx; rideVy = vy;
+        if (!grounded()) { rideL = rideLv = rideH = rideHv = 0; return; }
+        // A window snapped or thrown across in one go is no worse than a hard stop; a few px of hand jitter barely shows.
+        rideLv -= RIDE_KICK * clampd(ax, -RIDE_MAX_A, RIDE_MAX_A);
+        rideHv += RIDE_KICK * clampd(ay, -RIDE_MAX_A, RIDE_MAX_A);
+        const double w = art3d::RIDE_W, z = art3d::RIDE_Z, wh = art3d::RIDE_W * 1.4;  // the squash is a stiffer spring
+        rideLv += (-w * w * rideL - 2 * z * w * rideLv) * dt;
+        rideHv += (-wh * wh * rideH - 2 * z * wh * rideHv) * dt;
+        rideL = clampd(rideL + rideLv * dt, -24, 24);
+        rideH = clampd(rideH + rideHv * dt, -14, 14);
+    }
+    art3d::Rig rideLean() const {
+        if (std::fabs(rideL) < 0.05 && std::fabs(rideH) < 0.05) return {};
+        double k = st == St::Sleep ? 0.5 : 1;  // asleep it only rocks a little in its sleep
+        double fy = yaw * M_PI / 180;
+        // The pig's nose points along (cos yaw) on the screen and its +z flank along (-sin yaw).
+        return art3d::rideRig(k * rideL * std::cos(fy), -k * rideL * std::sin(fy), k * rideH);
+    }
+
     void act(const std::string& what) {
         if (what == "Quit") { quitRequested = true; return; }
         if (what.find("question") != std::string::npos) {
@@ -1838,6 +1872,8 @@ private:
             if (it == D.rects.end()) { fall(); return; }
             px += it->second.x - platX;
             py += it->second.y - platY;
+            rideDx += it->second.x - platX;
+            rideDy += it->second.y - platY;
             platX = it->second.x;
             platY = it->second.y;
         }

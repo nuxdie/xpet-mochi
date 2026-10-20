@@ -28,11 +28,11 @@ static bool bbox(cairo_surface_t* sf, int& x0, int& y0, int& x1, int& y1) {
     return x1 >= 0;
 }
 
-static void frame(const char* name, Frame f, Action act = Action::Idle, double actP = 0.5) {
+static void frame(const char* name, Frame f, Action act = Action::Idle, double actP = 0.5, const Rig& extra = Rig{}) {
     cairo_surface_t* sf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, WIN_W, WIN_H);
     cairo_t* cr = cairo_create(sf);
     double lift = f.pose == Pose::Fall || f.pose == Pose::Dangle ? 30 : 0;
-    HeadPos hp = renderStill(cr, f, WIN_W / 2.0, WIN_H - 1 - 24 - 14 * f.approach - lift, 1.0, act, actP);  // as main.cpp: GROUND_MARGIN 24
+    HeadPos hp = renderStill(cr, f, WIN_W / 2.0, WIN_H - 1 - 24 - 14 * f.approach - lift, 1.0, act, actP, extra);  // as main.cpp: GROUND_MARGIN 24
     int x0, y0, x1, y1;
     char buf[160];
     bool drawn = bbox(sf, x0, y0, x1, y1);
@@ -109,6 +109,19 @@ int main() {
             char name[96]; snprintf(name, sizeof name, "desk-cheer-%s@%.2f", c ? c->name.c_str() : "bare", p);
             frame(name, f, Action::Cheer, p);
         }
+    for (const Costume* c : dressed)  // riding a dragged window, thrown as far as the spring allows, every way it can face
+        for (int p : {0, 2, 3})
+            for (double yaw : yaws)
+                for (double lean : {-24.0, 24.0})
+                    for (double heave : {-14.0, 14.0}) {
+                        Frame f; f.pose = poses[p]; f.yaw = yaw; f.t = 1.3; f.costume = c;
+                        if (p == 2 && yaw > 200) f.prop = Prop::Laptop;  // at the desk
+                        double fy = yaw * M_PI / 180, k = p == 3 ? 0.5 : 1;  // as main.cpp rideLean
+                        Rig r = rideRig(k * lean * std::cos(fy), -k * lean * std::sin(fy), k * heave);
+                        char name[96];
+                        snprintf(name, sizeof name, "ride-%s-%s@%.0f%+.0f%+.0f", c ? c->name.c_str() : "bare", poseNames[p], yaw, lean, heave);
+                        frame(name, f, Action::Idle, 0.5, r);
+                    }
     check("every season names a costume that exists", [] {
         for (const wardrobe::Season& s : wardrobe::SEASONS)
             if (!wardrobe::named(s.costume)) { fprintf(stderr, "  no costume '%s'\n", s.costume); return false; }
