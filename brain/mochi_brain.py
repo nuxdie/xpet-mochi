@@ -170,7 +170,7 @@ READ_TOOLS = [
     "Bash(mochi-phone where:*)", "Bash(mochi-phone status)", "Bash(mochi-phone events:*)", "Bash(mochi-phone log)",
     "Bash(mochi-phone send locate)", "Bash(mochi-phone now)", "Bash(mochi-phone notifs:*)", "Bash(mochi-phone calls:*)",
     "Bash(mochi-phone sms:*)", "Bash(mochi-phone usage:*)", "Bash(mochi-phone digest)", "Bash(mochi-phone media:*)",
-    "Bash(mochi-desk media:*)", "Bash(mochi-desk status)",
+    "Bash(mochi-desk media:*)", "Bash(mochi-desk status)", "Bash(mochi-clocks media:*)", "Bash(mochi-clocks status)",
     # their Google Drive, Docs and Sheets in both accounts (brain/mochi_drive.py): reading changes nothing; download
     # writes only into the workspace's drive/
     "Bash(mochi-drive accounts)", "Bash(mochi-drive search:*)", "Bash(mochi-drive recent:*)", "Bash(mochi-drive ls:*)",
@@ -210,7 +210,8 @@ SMS_SEND_TOOLS = ["Bash(mochi-sms send:*)", "Bash(mochi-phone send buzz:*)"]  # 
 # The phone's camera and microphone, and this machine's camera, microphone and screen: a still, a clip, a screenshot,
 # only in a run they asked for (CLAUDE.md "Their phone", "This machine's eyes and ears").
 PHONE_CAPTURE_TOOLS = ["Bash(mochi-phone send photo:*)", "Bash(mochi-phone send audio:*)",
-                       "Bash(mochi-desk photo:*)", "Bash(mochi-desk audio:*)", "Bash(mochi-desk screen:*)"]
+                       "Bash(mochi-desk photo:*)", "Bash(mochi-desk audio:*)", "Bash(mochi-desk screen:*)",
+                       "Bash(mochi-clocks photo:*)", "Bash(mochi-clocks audio:*)"]  # and the wall clocks' (2026-10-20)
 # Mochi's own Chrome (brain/mochi_browser.py → chrome-devtools-mcp, server name "chrome"). A round may look: open
 # pages, read them (snapshot), screenshot, click around. Typing into forms, uploads and running scripts on a page
 # change things in the world, so they wait for a YES or a chat.
@@ -2119,7 +2120,8 @@ class Relay:
         self.watchers = Watchers(lambda text, urgent, wake: self.trigger(text, urgent, "watcher", wake), self.sessions)
         self.feed = Feed(self.state["feed"], lambda text, urgent, wake: self.trigger(text, urgent, "feed", wake))
         self.errands = Errands(self.state["errands"], self.tg.quiet_now)
-        self.clocks = CLOCKS.Clocks(lambda: self.state["asks"], lambda: self.busy, BRAIN_SOCK, log) if CLOCKS else None
+        self.clocks = CLOCKS.Clocks(lambda: self.state["asks"], lambda: self.busy, BRAIN_SOCK, log,
+                                    self.ask_at_clock) if CLOCKS else None
         self.capped = ""
         self.catchup_capped = ""
         self.mail_mtime = None
@@ -2398,17 +2400,28 @@ class Relay:
         t = self.state["threads"].get(str(mid)) if mid else None
         return t["session"] if t and now() - t["at"] < THREAD_KEEP else ""
 
+    def ask_at_clock(self, text, room):
+        """They tapped "talk to me" on a wall clock and said this (whisper's transcript): a task like a typed one, and
+        the answer goes back to that clock."""
+        self.ask(text, via=f"clock-{room}")
+
     def ask(self, text, via="pig", files=None, session=""):
         self.event(f"user asked{' (from their phone)' if via == 'telegram' else ''}: {text[:200]}"
                    + (f" [files: {', '.join(Path(f).name for f in files)}]" if files else ""))
         if via != "telegram":
             self.pet.say("on it!", 3)
         prompt = text + (ASK_FILES.format(files="\n".join(f"- {f}" for f in files)) if files else "")
+        if via.startswith("clock-"):
+            prompt = (f"(Said out loud at the {via[6:]} wall clock; whisper transcribed it, so a word may be off. Anyone "
+                      f"in the room could have said it, guests too, so this run has a round's tools: answer, look things "
+                      f"up, note; anything that acts in the world or reveals what's private becomes an ask. Your say is "
+                      f"shown on that clock: readable in passing, nothing private.)\n" + prompt)
         if files and len(files) > 1:
             prompt += ("\nThey sent these together, as one album: read them all before you answer, and treat them as one "
                        "thing (often the pages of one letter), with one answer.")
         fresh = ASK_PROMPT.format(text=prompt, block=BLOCK)
-        self.tasks.put({"kind": "ask", "title": text[:60], "level": "approved", "model": TASK_MODEL, "via": via,
+        level = "round" if via.startswith("clock-") else "approved"  # a voice at a clock may not be theirs
+        self.tasks.put({"kind": "ask", "title": text[:60], "level": level, "model": TASK_MODEL, "via": via,
                         "timeout": 1200, "resume": session, "fresh": fresh,
                         "prompt": FOLLOWUP_PROMPT.format(text=prompt, block=BLOCK) if session else fresh})
 
@@ -2909,7 +2922,7 @@ class Relay:
             self.link(self.tg.send(text, buzz=self.tg.may_buzz(bool(task.get("urgent")))), session)
         self.pet.say(text, 12)
         if self.clocks and str(task.get("via") or "").startswith("clock-"):  # asked at a clock: the line shows there
-            self.clocks.say(text, rid)
+            self.clocks.say(text, rid, room=str(task["via"])[len("clock-"):])
         self.remember_closed(rid, {"text": text, "options": REPORT_OPTIONS, "do": "", "path": str(path),
                                    "session": session, "urgent": bool(task.get("urgent")), "at": now()}, "done")
         self.event(f"finished '{task['title'][:80]}': {text} (report filed: {path.relative_to(WORK)})")
