@@ -1362,6 +1362,29 @@ def mail_body(part, want_html=False):
     return ""
 
 
+MAIL_SEEN = WORK / "mail-seen.json"  # message id -> when `mail show` put it in front of Mochi; mochi-mail archive checks it
+SEEN_DAYS = 30
+
+
+def note_seen(ids):
+    """Remember that these messages were read, so `mochi-mail archive` can tell a looked-at mail from a guess."""
+    if not ids:
+        return
+    try:
+        seen = json.loads(MAIL_SEEN.read_text())
+    except (OSError, ValueError):
+        seen = {}
+    now = time.time()
+    seen = {k: v for k, v in seen.items() if now - v < SEEN_DAYS * 86400}
+    seen.update({i: now for i in ids})
+    try:
+        tmp = MAIL_SEEN.with_suffix(".tmp")
+        tmp.write_text(json.dumps(seen))
+        tmp.replace(MAIL_SEEN)
+    except OSError:
+        pass
+
+
 def mail_show(query, chars):
     ok, out = notmuch("show", "--format=json", "--include-html", "--entire-thread=false", query)
     if not ok:
@@ -1377,7 +1400,7 @@ def mail_show(query, chars):
         elif isinstance(node, list):
             for n in node:
                 yield from msgs(n)
-    parts = []
+    parts, shown = [], []
     for m in msgs(data):
         h = m.get("headers", {})
         body = mail_body(m.get("body", []), False) or mail_body(m.get("body", []), True)
@@ -1390,6 +1413,8 @@ def mail_show(query, chars):
                                 f"**id:** `{m.get('id', '')}`  **tags:** {', '.join(m.get('tags', []))}"
                                 + (f"  \n**attachments:** {', '.join(atts)}" if atts else ""),
                                 "", body or "_(empty body)_"]))
+        shown.append(m.get("id", ""))
+    note_seen([i for i in shown if i])
     return "\n\n".join(parts) if parts else "_no message matches_"
 
 

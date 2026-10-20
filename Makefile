@@ -26,9 +26,11 @@ install: xpet
 	install -Dm755 brain/mochi_vault.py $(PREFIX)/bin/mochi-vault
 	install -Dm755 brain/mochi_sms.py $(PREFIX)/bin/mochi-sms
 	install -Dm755 brain/mochi_phone.py $(PREFIX)/bin/mochi-phone
+	install -Dm755 brain/mochi_errands.py $(PREFIX)/bin/mochi-errands
 	install -Dm755 brain/mochi_desk.py $(PREFIX)/bin/mochi-desk
 	install -Dm755 brain/mochi_tg.py $(PREFIX)/bin/mochi-tg
 	install -Dm755 brain/mochi_box.py $(PREFIX)/bin/mochi-box
+	install -Dm755 brain/mochi_clocks.py $(PREFIX)/bin/mochi-clocks
 	install -Dm644 brain/CLAUDE.md $(MOCHI_HOME)/CLAUDE.md
 	mkdir -p $(HOME)/.config/mochi && echo "$(CURDIR)" > $(HOME)/.config/mochi/xpet-repo  # where mochi-workshop finds the repo
 

@@ -37,9 +37,11 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 import uuid
 from collections import deque
 from pathlib import Path
@@ -48,7 +50,7 @@ HOME = Path.home()
 WORK = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share") / "mochi"  # Claude's workspace
 MEMORY, JOURNAL, REPORTS, SENSES = WORK / "memory", WORK / "journal", WORK / "reports", WORK / "senses"
 INBOX = WORK / "inbox"  # files you send the bot from your phone
-TEXT_TYPES = {".md", ".txt", ".log", ".json", ".csv", ".eml", ".yaml", ".yml", ".html", ""}  # shown as text, not sent as files
+TEXT_TYPES = {".md", ".txt", ".log", ".json", ".csv", ".eml", ".yaml", ".yml", ".html", ".htm", ""}  # shown as text, not sent as files
 STATE_FILE = WORK / "relay.json"
 WATCHES_FILE = MEMORY / "watches.json"  # Mochi's own alarms (see Watches)
 FEED_FILE = MEMORY / "feed.json"  # Mochi's mute list for the live Telegram feed (see Feed)
@@ -80,8 +82,8 @@ TG_AUDIBLE_PER_DAY = 3       # Telegram messages that may buzz your phone per da
 TG_QUIET_HOURS = (23, 8)     # nothing buzzes between these hours, except an urgent say
 VAULT_ASKS_PER_DAY = 20      # mochi-vault sign-in questions on the phone per day (each one is a tap they owe)
 TG_SEND_ASKS_PER_DAY = 15    # mochi-tg "send this as you?" questions on the phone per day (the same kind of tap)
+TG_ALBUM_SETTLE = 4          # seconds after an album's last photo before it goes to a run as one task
 DENIALS_KEEP = 200           # tools a run reached for and was refused, remembered for `mochi-brain --denials`
-VAULT_LEASE_MINUTES = 10     # what an Allow covers (mochi-vault's LEASE_MINUTES; only the wording here)
 ROUND_MODEL = "sonnet"
 TASK_MODEL = None            # things you asked for or approved: the default model
 
@@ -164,6 +166,7 @@ READ_TOOLS = [
     "Bash(mochi-sms unread)", "Bash(mochi-sms search:*)", "Bash(mochi-sms sync:*)", "Bash(mochi-sms contacts:*)",
     "Bash(mochi-sms log:*)",
     # their phone (mochi-phone): where they are, and a fresh fix on request
+    "Bash(mochi-errands:*)",  # location errands: list, near, find (OpenStreetMap), hours; all read-only
     "Bash(mochi-phone where:*)", "Bash(mochi-phone status)", "Bash(mochi-phone events:*)", "Bash(mochi-phone log)",
     "Bash(mochi-phone send locate)", "Bash(mochi-phone now)", "Bash(mochi-phone notifs:*)", "Bash(mochi-phone calls:*)",
     "Bash(mochi-phone sms:*)", "Bash(mochi-phone usage:*)", "Bash(mochi-phone digest)", "Bash(mochi-phone media:*)",
@@ -278,6 +281,7 @@ OFFER_OPTIONS = ["Yes, do it", "Not now", "Never", "Chat about it"]
 REPORT_OPTIONS = ["Show me", "Chat about it", "Dismiss"]
 CHAT = "Chat about it"
 HISTORY_KEEP = 40  # closed asks remembered for Recent...
+THREAD_KEEP = 3 * 86400  # how long a reply on the phone can still pick up the run that sent the message
 HISTORY_SHOWN = 12
 CLOSERS = {"not now", "never", "dismiss", "later", "ok", "no", "no thanks", "skip"}  # answered, nothing to run
 
@@ -363,14 +367,14 @@ End your answer with the mochi block, in exactly this shape (normally left as it
 {block}"""
 
 WEEK_PROMPT = """
-6. **The week with them.** Week {week} is over and has no note yet, so write `reports/week-{week}.md`: a short letter
-   to them, in your voice, under 35 lines, that lets them judge whether you are making their life lighter. Sections:
+6. **The week with them.** Week {week} is over and has no note yet, so write `reports/week-{week}.html` (a page; see
+   "Markdown or a page"): a short letter to them, in your voice, one screen or so, that lets them judge whether you are making their life lighter. Sections:
    *what I took off your plate* (the tasks you did for them, the asks they said yes to and what came of them, mail
    sent or archived, calendar and task changes, drafts: concrete, dated, one line each); *what I got wrong* (asks they
    answered "Already did it", results they dismissed unread, things you re-asked, corrections they made, a run that
    failed or was refused a tool when they had said yes); *what I'm carrying for you* (the open loops with dates, in one
    line each, and the watches set for them); *what I'd need to do more* (sources you can't reach, tools you were refused,
-   things that still take their hands). Then the relay's numbers for the week, as a small table, and one honest
+   things that still take their hands). Then the relay's numbers for the week, as a small `stats` row or table, and one honest
    sentence on how the week went. Return it as the dream's `report` with the title "Your week with Mochi ({week})";
    this is the one report a dream may raise. The relay's numbers (facts): {stats}
 """
@@ -469,6 +473,15 @@ If there is no caption, say in a line or two what it is, and what you could do w
 becomes an ask. If it is a document that belongs somewhere (a receipt, a letter, a scan), say where and offer to put it
 there."""
 
+FOLLOWUP_PROMPT = """They replied on their phone to what you sent them from this conversation:
+
+{text}
+
+Carry on from where you left off, as in a chat: you have everything above, don't redo what's done. Same rules as
+before: be brief, say exactly what you changed, end with the mochi block. Your "say" is the first line of what goes
+back to their phone (the rest of your reply follows it whole):
+{block}"""
+
 ASK_PROMPT = """The user asked you, through the pig, to do this:
 
 {text}
@@ -497,9 +510,11 @@ def load_sibling(name, exe):
 
 
 TG = load_sibling("mochi_telegram", "mochi-telegram")
+PAGE = load_sibling("mochi_view", "mochi-view")  # an HTML report: its plain text, and the page for the phone
 WS = load_sibling("mochi_workshop", "mochi-workshop")  # Mochi's workshop: its worktree of xpet, build, deploy
 BROWSER = load_sibling("mochi_browser", "mochi-browser")  # Mochi's own Chrome, as an MCP server per run
 BOX = load_sibling("mochi_box", "mochi-box")  # Mochi's own computer; its Chrome is a second MCP server
+CLOCKS = load_sibling("mochi_clocks", "mochi-clocks")  # the pig on the kitchen and corridor clocks
 
 
 def now():
@@ -784,6 +799,10 @@ def notify(text):
 
 def is_text(path):
     return Path(path).suffix.lower() in TEXT_TYPES
+
+
+def is_page(path):
+    return Path(path).suffix.lower() in (".html", ".htm")
 
 
 def open_text(path, title="Mochi"):
@@ -1481,12 +1500,210 @@ class Feed:
             self.state["items"].pop(key, None)
 
 
+ERRAND = load_sibling("mochi_errands", "mochi-errands")  # what needs them somewhere, and where they are
+ERRAND_PER_DAY = 4           # location pokes per day; each one buzzes (they asked to be poked: 2026-10-20)
+ERRAND_COOLDOWN = 4 * 3600   # the same errand is not raised again sooner than this, answered "Not now" or ignored
+ERRAND_FIX_AGE = 10 * 60     # a fix older than this is not "where they are"
+ERRAND_FAST = 8.0            # m/s: faster than a bike is a car or a train; not the moment to stop
+ERRAND_MARGIN = 15 * 60      # free for the errand's minutes plus this, or it waits
+ERRAND_SHIFT = 60 * 60       # an Uber Driver notification this recent: they're on a courier shift
+ERRAND_OPTIONS = ["Done", "Not now", "Drop it"]
+ERRAND_APP_FRESH = 20 * 60   # the phone app heard from this recently: pokes go through it (sealed), else Telegram
+PHONE = shutil.which("mochi-phone") or str(HOME / ".local/bin/mochi-phone")
+
+
+def phone_send(*args):
+    """mochi-phone send ...: True if it went to the relay."""
+    try:
+        return subprocess.run([PHONE, "send", *args], capture_output=True, text=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+class Errands:
+    """Mochi's location errands (memory/errands.json, see mochi_errands.py): each time the phone reports a new fix,
+    whether one of them can be done right here, right now: out of the house, not driving, not on a shift or a call
+    or do-not-disturb, free in the calendar for long enough, the place open, outside quiet hours. Then one poke as
+    an ask that goes to their phone and buzzes (ERRAND_PER_DAY). Done / Not now / Drop it come back here; Mochi hears
+    each as an event and keeps the file (ticks the task, removes what's done). An unanswered poke is withdrawn once
+    they've walked on. The check runs in a thread (Overpass, the calendar); pokes come out through `ready`."""
+
+    def __init__(self, state, quiet):
+        self.state, self.quiet = state, quiet
+        for k, v in {"items": {}, "pending": None, "last_fix": 0, "error": ""}.items():
+            state.setdefault(k, v)
+        self.ready = queue.Queue()
+        self.running = False
+        self.cal = (0, None)  # (when read, busy spans)
+        self.fetch = ERRAND.osm_fetch if ERRAND else None  # Overpass (tests put a fake here)
+
+    def item(self, eid):
+        return self.state["items"].setdefault(eid, {})
+
+    def latest(self):
+        try:
+            return json.loads(ERRAND.LATEST.read_text())
+        except (OSError, ValueError, AttributeError):
+            return {}
+
+    def poll(self):
+        """From the main loop: a new fix → a check in the background."""
+        if not ERRAND or self.running:
+            return
+        latest = self.latest()
+        loc = latest.get("loc") or {}
+        if not loc.get("t") or loc["t"] == self.state["last_fix"]:
+            return
+        self.state["last_fix"] = loc["t"]
+        self.running = True
+        threading.Thread(target=self._check, args=(latest,), daemon=True).start()
+
+    def _check(self, latest):
+        try:
+            self.check(latest)
+        except Exception:
+            log("errands: check failed:\n" + traceback.format_exc())
+        finally:
+            self.running = False
+
+    def why_not(self, latest, t=None):
+        """Why nothing may be raised at all right now, or "" if it may."""
+        t = t or now()
+        loc, st = latest.get("loc") or {}, latest.get("state") or {}
+        if self.quiet():
+            return "quiet hours"
+        if t - (loc.get("t") or 0) > ERRAND_FIX_AGE:
+            return "old fix"
+        if (loc.get("speed") or 0) > ERRAND_FAST:
+            return "moving fast"
+        if st.get("dnd"):
+            return "do not disturb"
+        if any(c.get("state") in ("ringing", "offhook", "active") and t - (c.get("t") or 0) < 1800
+               for c in (latest.get("calls") or [])[-2:]):
+            return "on a call"
+        if any(n.get("app") == "com.ubercab.driver" and t - (n.get("t") or 0) < ERRAND_SHIFT
+               for n in latest.get("notifs") or []):
+            return "on a shift"
+        return ""
+
+    def busy(self):
+        if now() - self.cal[0] > 600:
+            rows = ERRAND.agenda()
+            self.cal = (now(), ERRAND.busy_spans(rows) if rows is not None else None)
+        return self.cal[1]
+
+    def check(self, latest, t=None):
+        t = t or now()
+        loc = latest.get("loc") or {}
+        errands, self.state["error"] = ERRAND.load()
+        pend = self.state.get("pending")
+        if pend:  # one poke at a time; withdrawn once they've walked away from the place
+            p = pend.get("place") or {}
+            if loc.get("lat") is not None and ERRAND.distance_m(loc["lat"], loc["lon"], p["lat"], p["lon"]) > pend.get("r", 250) * 2 + 100:
+                self.ready.put(("passed", pend))
+            return
+        if self.state.get("counts_day") != today():
+            self.state["counts_day"], self.state["today"] = today(), 0
+        if self.state.get("today", 0) >= ERRAND_PER_DAY or self.why_not(latest, t):
+            return
+        home = loc.get("zone") == "home"
+        when = dt.datetime.fromtimestamp(t)
+        cache = ERRAND.jload(ERRAND.CACHE, {})
+        best = None
+        for e in errands:
+            eid = ERRAND.eid(e)
+            s = self.state["items"].get(eid) or {}
+            every = float(e.get("every") or 0) * 86400
+            if s.get("dropped") or (s.get("done") and not (every and t - s["done"] > every)):
+                continue
+            if t - max(s.get("poked", 0), s.get("snoozed", 0)) < ERRAND_COOLDOWN or (home and not e.get("from_home")):
+                continue
+            if not ERRAND.doable_now(e, when):
+                continue
+            p = ERRAND.nearest(e, loc["lat"], loc["lon"], loc.get("acc") or 0, cache, self.fetch, when=when,
+                              skip=s.get("not_here") or ())
+            if not p:
+                continue
+            due = ERRAND.day(e.get("until")) or dt.date.max
+            if best is None or (due, p["d"]) < (best[2], best[1]["d"]):
+                best = (e, p, due)
+        ERRAND.jsave(ERRAND.CACHE, cache)
+        if not best:
+            return
+        e, p, _ = best
+        spans = self.busy()
+        minutes = int(e.get("minutes") or 10)
+        free = ERRAND.free_until(spans, when.astimezone()) if spans is not None else None
+        if free is not None and (free - when.astimezone()).total_seconds() < (minutes * 60 + ERRAND_MARGIN):
+            return  # it comes back with the next fix, once the meeting is over
+        self.ready.put(("poke", {"e": e, "place": p, "free": free.strftime("%H:%M") if free else None,
+                                 "calendar": spans is not None}))
+
+    def poke_text(self, e, p, free):
+        """The pig's line, Telegram's (the place by its name, never the street) and the phone app's (sealed end to
+        end, so the street too)."""
+        minutes = int(e.get("minutes") or 10)
+        head = f"📍 {e['do']}"
+        tail = f"{round(p['d'] / 10) * 10:.0f} m · ~{minutes} min" + (f" · free till {free}" if free else "")
+        app = f"{head}\n{p['name']}" + (f", {p['addr']}" if p.get("addr") else "") + f" · {tail}"
+        return f"{head} — {p['name']}, {tail}"[:160], f"{head}\n{p['name']}, {tail}\n{ERRAND.maps_link(p)}", app
+
+    def app_fresh(self):
+        return now() - (self.latest().get("last_seen") or 0) < ERRAND_APP_FRESH
+
+    def poked(self, info, aid):
+        e = info["e"]
+        s = self.item(ERRAND.eid(e))
+        s["poked"] = now()
+        self.state["today"] = self.state.get("today", 0) + 1
+        p = info["place"]
+        r = float(e.get("near") or ERRAND.NEAR_RADIUS)
+        self.state["pending"] = {"aid": aid, "id": ERRAND.eid(e), "do": e["do"], "at": now(),
+                                 "place": {"name": p["name"], "lat": p["lat"], "lon": p["lon"]}, "r": r}
+
+    def answer(self, eid, label):
+        """Their tap on a poke. Returns the line for Mochi's events."""
+        s = self.item(eid)
+        pend = self.state.get("pending") or {}
+        if pend.get("id") == eid:
+            self.state["pending"] = None
+        low = label.lower()
+        where = (pend.get("place") or {}).get("name", "")
+        if low == "done":
+            s["done"] = now()
+            return f"errand done (they tapped Done near {where}): {pend.get('do') or eid}"
+        if low == "drop it":
+            s["dropped"] = now()
+            return f"errand dropped by them: {pend.get('do') or eid} (take it out of errands.json; ask nothing)"
+        if low in ("not now", "later"):
+            s["snoozed"] = now()
+            return f"errand put off ('{label}') near {where}: {pend.get('do') or eid}"
+        s["snoozed"] = now() + 20 * 3600
+        return f"errand: they answered '{label}' near {where} to: {pend.get('do') or eid}"
+
+    def status(self):
+        if not ERRAND:
+            return "mochi-errands not installed"
+        errands, err = ERRAND.load()
+        rows = [f"! {err}"] if err else []
+        for e in errands:
+            s = self.state["items"].get(ERRAND.eid(e)) or {}
+            marks = [f"{k} {human_age(now() - s[k])} ago" for k in ("done", "dropped", "poked", "snoozed")
+                     if s.get(k) and s[k] <= now()]
+            rows.append(f"{ERRAND.eid(e)}: {e['do'][:60]} — {', '.join(marks) or 'waiting'}")
+        pend = self.state.get("pending")
+        if pend:
+            rows.append(f"poked {human_age(now() - pend['at'])} ago, unanswered: {pend['do'][:60]}")
+        return rows or ["none (memory/errands.json)"]
+
+
 # ---- your phone: the Telegram bot ----------------------------------------------------------------
 
 LATER = "Later"
 SHOW = "Show me"
 TG_HELP = """I'm Mochi. While you're away from the computer my questions come here with buttons; tap one and I act on it.
 Write me anything and I'll treat it as a task (reply to one of my questions to answer it in your own words).
+Reply to one of my answers to carry on that conversation; a message that isn't a reply starts a fresh one.
 Send me a photo or a document (a caption says what to do with it) and I'll take it from there.
 /asks  what's waiting   /brief  the latest report   /seen  today's journal   /status   /round"""
 
@@ -1536,6 +1753,7 @@ class Telegram:
         self.ignored = set()
         self.vault = {}  # request id -> (message id, text, accounts) for the sign-in questions on the phone
         self.tgsend = {}  # request id -> (message id, text, reply socket) for mochi-tg's "send this as you?"
+        self.albums = {}  # media_group_id -> {"atts", "caption", "m", "last"}: an album still arriving
         if self.on:
             threading.Thread(target=self.poller, daemon=True).start()
             log("telegram: bot connected (asks reach your phone while you're away)")
@@ -1575,6 +1793,7 @@ class Telegram:
             return None
         try:
             mid = self.bot.send(text, buttons=buttons, buzz=buzz, reply_to=reply_to)
+            self.last_ids = list(getattr(self.bot, "sent_ids", None) or [mid])
             if self.trouble:
                 log("telegram: reaching you again")
                 self.trouble = ""
@@ -1600,10 +1819,21 @@ class Telegram:
             return None
 
     def show(self, path, caption="", reply_to=None):
-        """'Show me' on the phone: a text report as a message, anything else (PDF, picture) as the file itself."""
-        if is_text(path):
-            return self.send(self.report_body(path), reply_to=reply_to)
-        return self.send_file(path, caption=caption, reply_to=reply_to)
+        """'Show me' on the phone: a text report as a message, anything else (PDF, picture) as the file itself. An
+        HTML report is both: its text as a message, then the page as one file that opens in the phone's browser."""
+        if not is_text(path):
+            return self.send_file(path, caption=caption, reply_to=reply_to)
+        mid = self.send(self.report_body(path), reply_to=reply_to)
+        if is_page(path) and PAGE:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / f"{Path(path).stem}.html"
+                try:
+                    out.write_text(PAGE.phone_page(path))
+                except OSError as e:
+                    log(f"telegram: no page for {Path(path).name}: {e}")
+                    return mid
+                self.send_file(out, caption="the page: open it to see it properly")
+        return mid
 
     def edit(self, mid, text, buttons=None):
         if self.on and mid:
@@ -1619,7 +1849,7 @@ class Telegram:
             opts = [o for o in opts if o.lower() != SHOW.lower()]
         buttons = [(o, f"a:{aid}:{a['options'].index(o)}") for o in opts] + [(LATER, f"l:{aid}")]
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-        text = ("❗ " if a.get("urgent") else "") + a["text"]
+        text = ("❗ " if a.get("urgent") else "") + (a.get("tg_text") or a["text"])
         return self.send(text, buttons=rows, buzz=buzz)
 
     def close(self, a, label):
@@ -1632,6 +1862,8 @@ class Telegram:
             body = Path(path).read_text().strip()
         except OSError as e:
             return f"(can't read the report: {e})"
+        if is_page(path):
+            body = PAGE.text_of(body) if PAGE else re.sub(r"<[^>]+>", " ", body)
         return body if len(body) <= limit else body[:limit] + "\n\n(… the rest is on the pig)"
 
     # -- mochi-vault: a sign-in Mochi wants to make with one of their logins, asked on the phone every time
@@ -1648,9 +1880,7 @@ class Telegram:
             return
         self.relay.bump("vault_asks")
         accounts = [str(a)[:60] for a in (m.get("accounts") or [])][:8]
-        text = (f"🔑 Mochi wants to sign in to {str(m.get('host'))[:80]}\n{str(m.get('why') or '')[:300]}\n\n"
-                f"It types the login into its own Chrome; it never sees the password. Allowing covers that account "
-                f"on this site for {VAULT_LEASE_MINUTES} minutes.")
+        text = f"🔑 Mochi wants to sign in to {str(m.get('host'))[:80]}\n{str(m.get('why') or '')[:300]}".rstrip()
         rows = [[(a, f"v:{rid}:{i}")] for i, a in enumerate(accounts)] + [[("Deny", f"v:{rid}:x")]]
         mid = self.send(text, buttons=rows, buzz=not self.quiet_now())
         if not mid:
@@ -1736,29 +1966,55 @@ class Telegram:
                 log(f"telegram: ignored a message from {TG.who(m)} (not the owner)")
             return
         att = TG.attachment(m)
-        if att:
-            self.on_file(att, (m.get("caption") or "").strip(), m)
+        caption = (m.get("caption") or "").strip()
+        if att and m.get("media_group_id"):
+            # An album arrives as one message per photo, the caption on just one of them: hold the pieces until
+            # it has settled, so the pages of one letter reach one run together (flush_albums)
+            al = self.albums.setdefault(m["media_group_id"], {"atts": [], "caption": "", "m": m, "last": 0})
+            al["atts"].append(att)
+            al["caption"] = al["caption"] or caption
+            if not (al["m"].get("reply_to_message")) and m.get("reply_to_message"):
+                al["m"] = m
+            al["last"] = time.time()
+        elif att:
+            self.on_files([att], caption, m)
         else:
             self.on_text((m.get("text") or "").strip(), m)
 
-    def on_file(self, att, caption, m):
-        """A photo or document from the phone: fetch it into inbox/ and hand it to a run (as the answer to the ask it
-        replies to, else as a task with the caption as the instruction)."""
+    def flush_albums(self, settle=TG_ALBUM_SETTLE):
+        """Hand on the albums whose last photo came more than `settle` seconds ago (called from the relay's loop)."""
+        for gid in [g for g, al in self.albums.items() if time.time() - al["last"] >= settle]:
+            al = self.albums.pop(gid)
+            self.on_files(al["atts"], al["caption"], al["m"])
+
+    def on_files(self, atts, caption, m):
+        """Photos or documents from the phone (one, or an album): fetch them into inbox/ and hand them to one run (as
+        the answer to the ask they reply to, else as a task with the caption as the instruction)."""
         r = self.relay
-        try:
-            path = self.bot.download(att, INBOX)
-        except (TG.TgError, OSError) as e:
-            log(f"telegram: can't fetch {att['name']}: {str(e)[:160]}")
-            self.send(f"couldn't fetch that: {str(e)[:200]}", reply_to=m.get("message_id"))
+        paths = []
+        for att in atts:
+            try:
+                path = self.bot.download(att, INBOX)
+            except (TG.TgError, OSError) as e:
+                log(f"telegram: can't fetch {att['name']}: {str(e)[:160]}")
+                self.send(f"couldn't fetch {'one of those' if len(atts) > 1 else 'that'}: {str(e)[:200]}",
+                          reply_to=m.get("message_id"))
+                continue
+            log(f"telegram: received {att['kind']} → {path.relative_to(WORK)} ({(att['size'] or 0) // 1024} KB)"
+                + (f", caption: {caption[:80]}" if caption else ""))
+            paths.append(path)
+        if not paths:
             return
-        log(f"telegram: received {att['kind']} → {path.relative_to(WORK)} ({(att['size'] or 0) // 1024} KB)"
-            + (f", caption: {caption[:80]}" if caption else ""))
         reply = (m.get("reply_to_message") or {}).get("message_id")
         target = next((aid for aid, a in r.state["asks"].items() if reply and a.get("tg") == reply), None)
         if target:
-            r.on_answer(target, f"{caption or 'see the attached file'} [file: {path}]"[:300], via="telegram")
+            files = " ".join(f"[file: {p}]" for p in paths)
+            r.on_answer(target, f"{(caption or 'see the attached file' + ('s' if len(paths) > 1 else ''))[:200]} {files}",
+                        via="telegram")
         else:
-            r.ask(caption or f"(a {att['kind']} from your phone, no caption)", via="telegram", files=[path])
+            what = f"an album of {len(paths)}" if len(paths) > 1 else f"a {atts[0]['kind']}"
+            r.ask(caption or f"({what} from your phone, no caption)", via="telegram", files=paths,
+                  session=r.thread_of(reply))
             self.send("got it, looking", reply_to=m.get("message_id"))
 
     def on_button(self, data, mid):
@@ -1813,7 +2069,8 @@ class Telegram:
                     a["tg"] = mid
         elif cmd in ("/brief", "/report"):
             reports = sorted((a for a in r.state["asks"].values() if a.get("path")), key=lambda a: a["at"])
-            latest = next((p for p in sorted(REPORTS.glob("brief-*.md"), reverse=True)), None)
+            briefs = [*REPORTS.glob("brief-*.md"), *REPORTS.glob("brief-*.html")]
+            latest = max(briefs, key=lambda p: p.name, default=None)
             path = reports[-1]["path"] if reports else latest
             if path:
                 self.show(path, caption=reports[-1]["text"] if reports else "")
@@ -1829,8 +2086,8 @@ class Telegram:
             target = next((aid for aid, a in r.state["asks"].items() if reply and a.get("tg") == reply), None)
             if target:  # a typed answer to one of the asks: their words become the label
                 r.on_answer(target, text[:160], via="telegram")
-            else:
-                r.ask(text, via="telegram")
+            else:  # a reply to one of Mochi's answers carries on that run's conversation; anything else starts fresh
+                r.ask(text, via="telegram", session=r.thread_of(reply))
                 self.send("on it", reply_to=m.get("message_id"))
 
 
@@ -1861,6 +2118,8 @@ class Relay:
                                maildir=maildir())
         self.watchers = Watchers(lambda text, urgent, wake: self.trigger(text, urgent, "watcher", wake), self.sessions)
         self.feed = Feed(self.state["feed"], lambda text, urgent, wake: self.trigger(text, urgent, "feed", wake))
+        self.errands = Errands(self.state["errands"], self.tg.quiet_now)
+        self.clocks = CLOCKS.Clocks(lambda: self.state["asks"], lambda: self.busy, BRAIN_SOCK, log) if CLOCKS else None
         self.capped = ""
         self.catchup_capped = ""
         self.mail_mtime = None
@@ -1873,7 +2132,7 @@ class Relay:
             s = {}
         for k, v in {"asks": {}, "events": [], "last_round": 0, "away_since": 0, "counts": {}, "wake": [],
                      "watches": {}, "last_dream": 0, "study": {}, "night_end": 0, "workshop": {}, "feed": {},
-                     "closed": [], "denials": [], "brief_day": "", "week_report": ""}.items():
+                     "closed": [], "denials": [], "brief_day": "", "week_report": "", "threads": {}, "errands": {}}.items():
             s.setdefault(k, v)
         for oid, o in s.pop("offers", {}).items():  # from before asks carried their own options
             s["asks"][oid] = dict(o, options=OFFER_OPTIONS, path="")
@@ -1919,6 +2178,8 @@ class Relay:
         srv.bind(str(BRAIN_SOCK))
         os.umask(old)
         log("relay up")
+        if self.clocks:
+            self.clocks.serve()
         timers = {}
 
         def due(name, every):
@@ -1944,6 +2205,8 @@ class Relay:
                         self.tg.handle(self.tg.inbox.get_nowait())
                     except Exception:
                         log("telegram message error:\n" + traceback.format_exc())
+                if self.tg.albums:
+                    self.tg.flush_albums()
                 if due("sample", SAMPLE_EVERY):
                     self.activity.sample()
                 if due("presence", 60):
@@ -1960,6 +2223,11 @@ class Relay:
                 if due("feed-mail", 60) and self.mail_pulled():
                     self.feed.poll_async("mail")
                 self.feed.drain()
+                pend = self.errands.state.get("pending")
+                if pend and (pend["aid"] not in self.state["asks"] or now() - pend["at"] > 6 * 3600):
+                    self.errands.state["pending"] = None  # withdrawn by Mochi, expired, or long gone stale
+                self.errands.poll()
+                self.drain_errands()
                 self.maybe_wake()
                 self.maybe_catchup()
                 if due("housekeeping", 600):
@@ -2036,6 +2304,16 @@ class Relay:
             return
         comms("answer", id=aid, label=label, via=via)
         self.remember_closed(aid, a, label)
+        if aid.startswith("errand-"):  # a location poke: the relay keeps its state, Mochi hears it as an event
+            if via != "phone" and (self.errands.state.get("pending") or {}).get("app"):
+                phone_send("close", "--id", aid)  # answered on the pig or in Telegram: off the phone's shade too
+            self.event(self.errands.answer(aid[len("errand-"):], label))
+            if label.lower() in CLOSERS | {"done", "drop it"}:
+                if via != "pig":
+                    self.pet.withdraw(aid)
+                self.tg.close(a, label)
+                self.save()
+                return
         low = label.lower()
         if aid.startswith("workshop-") and low == "show me" and via != "telegram":  # look first, answer after
             if Path(a.get("path") or "").exists():
@@ -2052,12 +2330,12 @@ class Relay:
             return
         options = ", ".join(a.get("options") or [])
         phone = via == "telegram"
-        if phone:
+        if via != "pig":  # answered on the phone or on a clock: off the desktop pig's menu too
             self.pet.withdraw(aid)
         where = " (on your phone)" if phone else ""
         if low == "show me" and a.get("path"):
             if phone:
-                self.tg.show(a["path"], caption=a["text"], reply_to=a.get("tg"))
+                self.link(self.tg.show(a["path"], caption=a["text"], reply_to=a.get("tg")), a.get("session"))
             elif Path(a["path"]).exists():
                 open_text(a["path"], a["text"])
             self.tg.close(a, label)
@@ -2079,6 +2357,7 @@ class Relay:
             self.event(f"user answered '{label}'{where} to: {a['text']}")
             self.tasks.put({"kind": "approved", "title": f"{label}: {a['text']}"[:160], "level": "approved", "ask": aid,
                             "model": TASK_MODEL, "timeout": 1200, "urgent": a.get("urgent", False), "via": via,
+                            "resume": a.get("session") or "",  # the run that asked knows why it asked
                             "prompt": ANSWER_PROMPT.format(label=label, text=a["text"], options=options,
                                                            do=a.get("do") or "-", block=BLOCK)})
         self.save()
@@ -2107,14 +2386,31 @@ class Relay:
         if text:
             send_brain(event="ask", text=text)
 
-    def ask(self, text, via="pig", files=None):
+    def link(self, mid, session):
+        """A message on the phone came out of this run: a reply to it resumes the run (FOLLOWUP_PROMPT)."""
+        if not (mid and session):
+            return
+        ids = getattr(self.tg, "last_ids", None) or []
+        for i in set(ids if mid in ids else []) | {mid}:
+            self.state["threads"][str(i)] = {"session": session, "at": now()}
+
+    def thread_of(self, mid):
+        t = self.state["threads"].get(str(mid)) if mid else None
+        return t["session"] if t and now() - t["at"] < THREAD_KEEP else ""
+
+    def ask(self, text, via="pig", files=None, session=""):
         self.event(f"user asked{' (from their phone)' if via == 'telegram' else ''}: {text[:200]}"
                    + (f" [files: {', '.join(Path(f).name for f in files)}]" if files else ""))
         if via != "telegram":
             self.pet.say("on it!", 3)
         prompt = text + (ASK_FILES.format(files="\n".join(f"- {f}" for f in files)) if files else "")
+        if files and len(files) > 1:
+            prompt += ("\nThey sent these together, as one album: read them all before you answer, and treat them as one "
+                       "thing (often the pages of one letter), with one answer.")
+        fresh = ASK_PROMPT.format(text=prompt, block=BLOCK)
         self.tasks.put({"kind": "ask", "title": text[:60], "level": "approved", "model": TASK_MODEL, "via": via,
-                        "timeout": 1200, "prompt": ASK_PROMPT.format(text=prompt, block=BLOCK)})
+                        "timeout": 1200, "resume": session, "fresh": fresh,
+                        "prompt": FOLLOWUP_PROMPT.format(text=prompt, block=BLOCK) if session else fresh})
 
     # -- when to run a round (the only decision made here)
 
@@ -2331,6 +2627,12 @@ class Relay:
                 "and a chain (`a && b`, `a; b`) is refused if any part is: write your own files with Write/Edit, not "
                 "`echo >>`, `sed -i` or a python heredoc. If something they said yes to was refused, tell them so.)"],
             "watches": self.watches.status(),
+            "clocks": (self.clocks.status() if self.clocks else ["not running"]) + [
+                "(the clocks in the kitchen and the corridor: you live in their landscape and your asks wait behind a "
+                "dot over you there too; see CLAUDE.md 'On the clocks'. A touch or the kitchen lights mean they're home)"],
+            "errands": self.errands.status() + [
+                "(memory/errands.json: what needs them somewhere. The relay pokes them on the phone when they're out, "
+                "near a place for it, free and the place open; see CLAUDE.md 'Errands on the way')"],
             "waking": "a round can start before the clock: `mochi-brain --trigger TEXT`, the relay's own watchers "
                       "(disk, battery, failed units, stuck sessions), or your watches in memory/watches.json "
                       "(see CLAUDE.md, 'Waking up early'); new messages, mail, calendar changes and recorded calls "
@@ -2539,7 +2841,12 @@ class Relay:
                 if task["kind"] == "workshop":
                     res = self.run_workshop(task)
                 else:
-                    res = claude_run(task["prompt"], task["level"], task.get("model"), task.get("timeout", 900))
+                    res = claude_run(task["prompt"], task["level"], task.get("model"), task.get("timeout", 900),
+                                     resume=task.get("resume") or None)
+                    if task.get("resume") and not res["ok"] and "no conversation found" in res["error"].lower():
+                        log(f"session {task['resume'][:8]} is gone; starting '{task['title'][:40]}' fresh")
+                        res = claude_run(task.get("fresh") or task["prompt"], task["level"], task.get("model"),
+                                         task.get("timeout", 900))
             except Exception as e:  # never let the worker die
                 res = {"ok": False, "text": "", "error": repr(e), "secs": 0, "cost": 0}
             self.results.put((task, res))
@@ -2565,7 +2872,7 @@ class Relay:
             else:
                 path = self.write_report(task["title"], f"**This run failed.** {res['error']}\n\n{res['text']}")
                 if task.get("via") == "telegram":
-                    self.tg.send(f"hm, that didn't work: {res['error'][:300]}")
+                    self.link(self.tg.send(f"hm, that didn't work: {res['error'][:300]}"), session or task.get("resume"))
                 self.add_ask(f"hm, that didn't work ({task['title'][:30]})", REPORT_OPTIONS, path=path,
                              session=session, urgent=True, mirror=task.get("via") != "telegram", src="result")
             self.save()
@@ -2597,10 +2904,12 @@ class Relay:
         comms("result", id=rid, text=text, path=str(path), via=task.get("via") or "pig")
         phone = task.get("via") == "telegram"
         if phone:  # they asked from their phone and are waiting there: the answer goes back whole
-            self.tg.send(f"{text}\n\n{self.tg.report_body(path)}", buzz=True)
+            self.link(self.tg.send(f"{text}\n\n{self.tg.report_body(path)}", buzz=True), session)
         elif self.away() or task.get("urgent"):  # they'll see the bubble too late: the line goes to the phone, silently
-            self.tg.send(text, buzz=self.tg.may_buzz(bool(task.get("urgent"))))
+            self.link(self.tg.send(text, buzz=self.tg.may_buzz(bool(task.get("urgent")))), session)
         self.pet.say(text, 12)
+        if self.clocks and str(task.get("via") or "").startswith("clock-"):  # asked at a clock: the line shows there
+            self.clocks.say(text, rid)
         self.remember_closed(rid, {"text": text, "options": REPORT_OPTIONS, "do": "", "path": str(path),
                                    "session": session, "urgent": bool(task.get("urgent")), "at": now()}, "done")
         self.event(f"finished '{task['title'][:80]}': {text} (report filed: {path.relative_to(WORK)})")
@@ -2672,11 +2981,14 @@ class Relay:
             if data.get("urgent"):
                 self.pet.say(say[:160], 10)
                 log(f"URGENT: {say}")
+                if self.clocks:
+                    self.clocks.say(say[:160])
                 self.tg.send("❗ " + say[:1000], buzz=self.tg.may_buzz(True, critical=True))
             else:
                 log(f"quiet (not shown): {say}")
 
-    def add_ask(self, text, options, do="", path=None, aid=None, session="", urgent=False, mirror=True, src="round"):
+    def add_ask(self, text, options, do="", path=None, aid=None, session="", urgent=False, mirror=True, src="round",
+                tg_text="", buzz=None):
         """Put something in the menu behind the dot. "Chat about it" is always one of the options. While you're
         away (or when it's urgent) it also goes to your phone; urgent ones may buzz, within the daily cap."""
         aid = re.sub(r"[^a-zA-Z0-9_-]", "-", str(aid or uuid.uuid4().hex[:8]))[:40]
@@ -2687,12 +2999,49 @@ class Relay:
             self.tg.close(old, "updated")
         a = {"text": text[:160], "options": options, "do": do[:2000], "path": str(path or ""),
              "session": session, "urgent": urgent, "at": now(), "tg": None}
+        if tg_text:
+            a["tg_text"] = tg_text[:600]
         self.state["asks"][aid] = a
         comms("ask", id=aid, text=text[:160], options=options, path=str(path or ""), src=src, urgent=urgent)
         self.pet.ask(aid, text[:160], options, urgent)
-        if mirror and (urgent or self.away()):
-            a["tg"] = self.tg.ask(aid, a, buzz=self.tg.may_buzz(urgent))
+        if mirror and (urgent or self.away() or buzz):
+            a["tg"] = self.tg.ask(aid, a, buzz=self.tg.may_buzz(urgent) if buzz is None else buzz)
         log(f"ask{' (urgent)' if urgent else ''}{' → phone' if a['tg'] else ''}: {text[:160]}  [{' | '.join(options)}]")
+
+    def drain_errands(self):
+        """What the errand check found: a poke to raise, or one they walked past to take back."""
+        while not self.errands.ready.empty():
+            kind, info = self.errands.ready.get_nowait()
+            if kind == "poke":
+                e, p = info["e"], info["place"]
+                aid = f"errand-{ERRAND.eid(e)}"
+                text, tg_text, app_text = self.errands.poke_text(e, p, info["free"])
+                self.errands.poked(info, aid)
+                geo = f"geo:{p['lat']:.6f},{p['lon']:.6f}?q={p['lat']:.6f},{p['lon']:.6f}({urllib.parse.quote(p['name'][:40])})"
+                by_app = self.errands.app_fresh() and phone_send(
+                    "ask", app_text, "--options", ",".join(ERRAND_OPTIONS), "--id", aid, "--link", geo, "--buzz")
+                self.errands.state["pending"]["app"] = by_app
+                self.add_ask(text, ERRAND_OPTIONS, aid=aid, src="errand", buzz=None if by_app else True,
+                             mirror=not by_app, tg_text=tg_text,
+                             do=f"a location errand ({ERRAND.eid(e)} in memory/errands.json): {e['do']}. "
+                                f"Their reply is about doing it at {p['name']}; act on what they said "
+                                f"(tick the linked task if it's done, change or remove the errand).")
+                if not by_app and not self.tg.on:
+                    self.pet.say(text[:160], 8)  # no phone line: the pig is the only way to reach them
+                log(f"errand poke: {e['do']} at {p['name']} ({p['d']:.0f} m)")
+            elif kind == "passed":
+                aid = info["aid"]
+                a = self.state["asks"].pop(aid, None)
+                self.errands.state["pending"] = None
+                if info.get("app"):
+                    phone_send("close", "--id", aid)
+                if a:
+                    self.pet.withdraw(aid)
+                    self.tg.close(a, "walked on")
+                    comms("closed", id=aid, how="walked on")
+                    self.event(f"errand poke unanswered, they walked on from {info['place']['name']} after "
+                               f"{human_age(now() - info['at'])}: {info['do']}")
+            self.save()
 
     def write_report(self, title, body):
         stamp = dt.datetime.now()
@@ -2703,6 +3052,7 @@ class Relay:
 
     def housekeeping(self):
         t = now()
+        self.state["threads"] = {k: v for k, v in self.state["threads"].items() if t - v["at"] < THREAD_KEEP}
         for aid, a in list(self.state["asks"].items()):
             if t - a["at"] > (2 * 3600 if a.get("urgent") else 3 * 86400):
                 self.pet.withdraw(aid)
@@ -2715,7 +3065,7 @@ class Relay:
                 self.event(f"expired unanswered: {a['text']}")
         for aid, a in self.state["asks"].items():  # re-send, in case the pig restarted
             self.pet.ask(aid, a["text"], a.get("options") or REPORT_OPTIONS, a.get("urgent", False))
-        for old in REPORTS.glob("*.md"):
+        for old in [*REPORTS.glob("*.md"), *REPORTS.glob("*.html")]:
             if t - old.stat().st_mtime > 60 * 86400:
                 old.unlink(missing_ok=True)
         for old in JOURNAL.glob("*.md"):  # a day's journal goes once a dream has folded its week into journal/weeks/
@@ -2732,11 +3082,13 @@ class Relay:
 
 # ---- Claude ----------------------------------------------------------------------------------------
 
-def claude_run(prompt, level, model=None, timeout=900):
+def claude_run(prompt, level, model=None, timeout=900, resume=None):
     cmd = [CLAUDE] + (browser_args(headed=False) if level in ("round", "approved") else []) + ["-p", "--output-format", "json", "--permission-mode", "dontAsk",
                                                      "--allowedTools", ",".join(LEVELS[level]), "--disallowedTools", ",".join(NEVER)]
     if model:
         cmd += ["--model", model]
+    if resume:
+        cmd += ["--resume", resume]
     env = dict(os.environ, MOCHI_BRAIN="1")  # the pig's hook relay marks these as Mochi's own runs
     env.pop("CLAUDECODE", None)
     t0 = now()

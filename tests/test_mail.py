@@ -75,10 +75,13 @@ class FakeGmail:
 
 
 class Archive(unittest.TestCase):
-    def run_cmd(self, cmd, query, dry_run=False, notmuch=("one@x",)):
-        a = SimpleNamespace(cmd=cmd, query=query, dry_run=dry_run, max=mm.MAX_ARCHIVE)
+    def run_cmd(self, cmd, query, dry_run=False, notmuch=("one@x",), why="newsletter, nothing to do", asked=False,
+                seen=("one@x", "two@x"), mates=None):
+        a = SimpleNamespace(cmd=cmd, query=query, dry_run=dry_run, max=mm.MAX_ARCHIVE, why=why, asked=asked)
         with mock.patch.object(mm.imaplib, "IMAP4_SSL", FakeGmail), \
                 mock.patch.object(mm, "notmuch_ids", return_value=list(notmuch)), \
+                mock.patch.object(mm, "seen_ids", return_value=set(seen)), \
+                mock.patch.object(mm, "thread_mates", return_value=list(mates if mates is not None else notmuch)), \
                 mock.patch.object(mm.subprocess, "run") as run:
             mm.cmd_archive(a, cmd == "archive")
         return FakeGmail.last, run
@@ -95,6 +98,7 @@ class Archive(unittest.TestCase):
         self.assertEqual(tag[:3], ["notmuch", "tag", "-inbox"])
         self.assertIn('id:"two@x"', tag[-1])
         self.assertIn("Re: Héllo", mm.LOG.read_text())
+        self.assertIn("why='newsletter, nothing to do'", mm.LOG.read_text())
 
     def test_dry_run_changes_nothing(self):
         g, run = self.run_cmd("archive", ["id:one@x"], dry_run=True)
@@ -106,6 +110,28 @@ class Archive(unittest.TestCase):
         g, _ = self.run_cmd("unarchive", ["gmail:20"], notmuch=())
         self.assertEqual(g.msgs["3"]["labels"], {"\\Inbox"})
         self.assertEqual([c for c in g.calls if c[0] == "STORE"], [("STORE", "3", "+X-GM-LABELS", "(\\Inbox)")])
+
+    def test_refuses_mail_not_read(self):
+        FakeGmail.last = None
+        with self.assertRaises(SystemExit) as e:
+            self.run_cmd("archive", ["id:one@x"], seen=("one@x",), mates=("one@x", "two@x"))
+        self.assertIn("id:two@x", str(e.exception))
+        self.assertIsNone(FakeGmail.last)  # refused before Gmail was even opened
+
+    def test_asked_skips_the_reading_check(self):
+        g, _ = self.run_cmd("archive", ["id:one@x"], seen=(), asked=True, why="'archive all the linkedin ones'")
+        self.assertEqual(g.msgs["2"]["labels"], set())
+        self.assertIn(" asked why=", mm.LOG.read_text())
+
+    def test_why_is_required(self):
+        with self.assertRaises(SystemExit):
+            self.run_cmd("archive", ["id:one@x"], why=" ")
+
+    def test_gmail_ids_need_asked(self):
+        with self.assertRaises(SystemExit):
+            self.run_cmd("archive", ["gmail:10"], notmuch=())
+        g, _ = self.run_cmd("archive", ["gmail:10"], notmuch=(), asked=True)
+        self.assertEqual(g.msgs["1"]["labels"], {"\\Important"})
 
     def test_too_many(self):
         with self.assertRaises(SystemExit):

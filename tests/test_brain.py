@@ -364,6 +364,25 @@ class Files(unittest.TestCase):
         self.assertEqual(tg.attachment({"voice": {"file_id": "v"}})["name"], "voice.ogg")
         self.assertIsNone(tg.attachment({"text": "hi"}))
 
+    def test_album_becomes_one_task(self):
+        """An album arrives as one message per photo; it must reach one run with every page, the caption from
+        whichever photo carried it."""
+        link = mb.Telegram.__new__(mb.Telegram)
+        link.albums, got = {}, []
+        link.on_files = lambda atts, caption, m: got.append(([a["file_id"] for a in atts], caption))
+        link.on_text = lambda text, m: got.append(("text", text))
+        link.bot = type("B", (), {"is_owner": lambda self, m: True})()
+        photo = lambda fid, **kw: {"message": {"from": {"id": 1}, "message_id": fid, "media_group_id": "g1",
+                                               "photo": [{"file_id": fid, "file_size": 5}], **kw}}
+        link.handle(photo("p1"))
+        link.handle(photo("p2", caption="the letter"))
+        link.handle(photo("p3"))
+        link.flush_albums()
+        self.assertEqual(got, [])  # still settling
+        link.flush_albums(settle=0)
+        self.assertEqual(got, [(["p1", "p2", "p3"], "the letter")])
+        self.assertEqual(link.albums, {})
+
     def test_multipart_body(self):
         body, ctype = mb.TG.multipart({"chat_id": "7", "caption": "héllo"}, "document", "scan 1.pdf", b"%PDF-1.4")
         boundary = ctype.split("boundary=")[1]
@@ -435,7 +454,7 @@ class Dreams(unittest.TestCase):
         p.write_text("x")
         old = time.time() - mb.JOURNAL_KEEP - 86400
         os.utime(p, (old, old))
-        relay = type("R", (), {"state": {"asks": {}}, "pet": None})()
+        relay = type("R", (), {"state": {"asks": {}, "threads": {}}, "pet": None})()
         mb.Relay.housekeeping(relay)
         self.assertTrue(p.exists())
         y, w, _ = day.isocalendar()
@@ -733,14 +752,15 @@ class Results(unittest.TestCase):
     def relay(self, away=False):
         r = type("R", (), {})()
         r.state = {"asks": {}, "events": [], "closed": []}
-        r.pet, r.tasks = Pig(), queue.Queue()
+        r.pet, r.tasks, r.clocks = Pig(), queue.Queue(), None
         r.pet.say = lambda text, secs=0: r.pet.sent.append({"event": "say", "text": text, "secs": secs})
         r.tg_sent = []
         r.tg = type("T", (), {"send": lambda s, text, **k: r.tg_sent.append(text), "may_buzz": lambda s, *a, **k: False,
                               "report_body": lambda s, p: "body", "__getattr__": lambda s, n: lambda *a, **k: None})()
         r.away, r.save = (lambda: away), (lambda: None)
         r.event = lambda text: r.state["events"].append(text)
-        for name in ("deliver_result", "write_report", "remember_closed", "add_ask"):
+        r.state["threads"] = {}
+        for name in ("deliver_result", "write_report", "remember_closed", "add_ask", "link"):
             setattr(r, name, getattr(mb.Relay, name).__get__(r))
         return r
 
@@ -769,6 +789,41 @@ class Results(unittest.TestCase):
         self.assertEqual(r2.tg_sent, ["did it\n\nbody"])                # asked from the phone: the whole answer goes back
 
 
+class Threads(unittest.TestCase):
+    """A reply on the phone to one of Mochi's answers carries on that run's conversation (claude --resume)."""
+
+    def relay(self):
+        r = type("R", (), {})()
+        r.state = {"asks": {}, "events": [], "closed": [], "threads": {}}
+        r.pet, r.tasks, r.clocks = Pig(), queue.Queue(), None
+        r.tg = type("T", (), {"send": lambda s, text, **k: 101, "last_ids": [100, 101], "may_buzz": lambda s, *a, **k: False,
+                              "report_body": lambda s, p: "body", "__getattr__": lambda s, n: lambda *a, **k: None})()
+        r.away, r.save = (lambda: False), (lambda: None)
+        r.event = lambda text: r.state["events"].append(text)
+        for name in ("deliver_result", "write_report", "remember_closed", "add_ask", "link", "thread_of", "ask"):
+            setattr(r, name, getattr(mb.Relay, name).__get__(r))
+        link = mb.Telegram.__new__(mb.Telegram)
+        link.relay, link.send = r, lambda *a, **k: None
+        return r, link
+
+    def test_reply_resumes_and_plain_message_starts_fresh(self):
+        mb.REPORTS.mkdir(parents=True, exist_ok=True)
+        r, link = self.relay()
+        r.deliver_result({"kind": "ask", "title": "t", "via": "telegram"}, {"text": "ok"}, {"say": "did it"}, "sess-1")
+        self.assertEqual(r.thread_of(100), "sess-1")                    # any chunk of a long answer
+        link.on_text("and the other one?", {"message_id": 7, "reply_to_message": {"message_id": 101}})
+        t = r.tasks.get_nowait()
+        self.assertEqual(t["resume"], "sess-1")
+        self.assertIn("Carry on from where you left off", t["prompt"])
+        self.assertIn("and the other one?", t["fresh"])                 # if the session is gone
+        link.on_text("something new", {"message_id": 8})
+        t = r.tasks.get_nowait()
+        self.assertEqual(t["resume"], "")
+        self.assertNotIn("Carry on", t["prompt"])
+        r.state["threads"]["101"]["at"] -= mb.THREAD_KEEP + 1          # too old: fresh
+        self.assertEqual(r.thread_of(101), "")
+
+
 class Presence(unittest.TestCase):
     def test_raw_input_wins_once_seen(self):
         p = mb.IdleProbe(raw=False)
@@ -781,3 +836,67 @@ class Presence(unittest.TestCase):
         p.screensaver_seconds = lambda: 1000.0
         p.input = type("I", (), {"seconds": lambda s: 20.0})()
         self.assertEqual(p.seconds(), 20.0)
+
+
+class Pages(unittest.TestCase):
+    """An HTML report: set in the house page with a policy, plain text for a Telegram message, one file for the phone."""
+
+    def setUp(self):
+        self.assertIsNotNone(mb.PAGE)                                   # mochi_view loads without GTK
+        self.dir = Path(tempfile.mkdtemp(dir=TMP))
+
+    def test_fragment_gets_page_and_policy(self):
+        out = mb.PAGE.page('<h1>Brief</h1><p class="lede">All calm.</p>', ".html")
+        self.assertTrue(out.startswith("<!doctype html>"))
+        self.assertIn("Content-Security-Policy", out)
+        self.assertIn(".stats", out)                                    # the house styles came along
+        self.assertIn("<main><h1>Brief</h1>", out)
+
+    def test_whole_document_kept_but_policed(self):
+        doc = "<!doctype html><html><head><title>x</title></head><body><script>alert(1)</script></body></html>"
+        out = mb.PAGE.page(doc, ".html")
+        self.assertIn("<head><meta http-equiv=\"Content-Security-Policy\"", out)
+        self.assertNotIn("<main>", out)
+
+    def test_markdown_still_renders(self):
+        self.assertIn("<h1>Hi</h1>", mb.PAGE.page("# Hi", ".md"))
+
+    def test_text_of(self):
+        text = mb.PAGE.text_of('<style>p{}</style><h1>Week 42</h1><p class="lede">Lighter.</p>'
+                               '<div class="stats"><div class="stat"><b>88</b><span>applications</span></div></div>'
+                               '<ul><li>sent &amp; filed</li><li>paid</li></ul>'
+                               '<table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>')
+        self.assertTrue(text.startswith("Week 42\n\nLighter."))
+        self.assertIn("• sent & filed\n• paid", text)
+        self.assertIn("a · b\n1 · 2", text)
+        self.assertNotIn("p{}", text)
+
+    def test_phone_page_inlines_pictures_beside_it(self):
+        (self.dir / "pig.png").write_bytes(b"\x89PNG fake")
+        (self.dir / "r.html").write_text('<img src="pig.png"><img src="../secret.png"><img src="https://x.io/t.gif">')
+        out = mb.PAGE.phone_page(self.dir / "r.html")
+        self.assertIn('src="data:image/png;base64,', out)
+        self.assertIn('src=""', out)                                    # outside reports/: left out
+        self.assertIn("https://x.io/t.gif", out)                        # remote stays, and the policy blocks it
+
+    def test_phone_show_sends_text_then_page(self):
+        (self.dir / "brief-2026-10-20.html").write_text('<h1>Brief</h1><p>Calm day.</p>')
+        sent, files = [], []
+        tg = type("T", (), {"send": lambda s, text, **k: sent.append(text) or 1,
+                            "send_file": lambda s, path, **k: files.append(Path(path).read_text()) or 2})()
+        for name in ("show", "report_body"):
+            setattr(tg, name, getattr(mb.Telegram, name).__get__(tg))
+        tg.show(self.dir / "brief-2026-10-20.html")
+        self.assertEqual(sent, ["Brief\n\nCalm day."])
+        self.assertEqual(len(files), 1)
+        self.assertIn("Content-Security-Policy", files[0])
+
+    def test_markdown_show_is_just_text(self):
+        (self.dir / "r.md").write_text("# R\n\nok")
+        sent, files = [], []
+        tg = type("T", (), {"send": lambda s, text, **k: sent.append(text) or 1,
+                            "send_file": lambda s, path, **k: files.append(path)})()
+        for name in ("show", "report_body"):
+            setattr(tg, name, getattr(mb.Telegram, name).__get__(tg))
+        tg.show(self.dir / "r.md")
+        self.assertEqual((sent, files), (["# R\n\nok"], []))

@@ -355,6 +355,11 @@ public class AgentService extends Service {
             note("with you");
             if (pending.size() > n) scheduleFlush(1000);
             nudgePull();  // the radio is up anyway: see whether the desk left anything
+            boolean cheap = charging || "wifi".equals(net);
+            if (!cheap && hasLoc(pending.subList(0, n))) {  // the desk answers a fix in seconds (an errand nearby): look again
+                io.postDelayed(this::nudgePull, 25_000);
+                io.postDelayed(this::nudgePull, 60_000);
+            }
         } catch (Exception e) {
             flushFailures++;
             long backoff = Math.min(30_000L * (1L << Math.min(flushFailures, 5)), 15 * 60_000L);
@@ -439,6 +444,11 @@ public class AgentService extends Service {
         }
     }
 
+    private static boolean hasLoc(List<JSONObject> evs) {
+        for (JSONObject e : evs) if ("loc".equals(e.optString("type"))) return true;
+        return false;
+    }
+
     private void nudgePull() {
         synchronized (pullLock) { pullLock.notifyAll(); }
     }
@@ -454,7 +464,11 @@ public class AgentService extends Service {
                 buzz(msg.optString("text", "mochi"));
                 break;
             case "ask":
-                ask(msg.optString("ask_id"), msg.optString("text"), msg.optJSONArray("options"));
+                ask(msg.optString("ask_id"), msg.optString("text"), msg.optJSONArray("options"),
+                    msg.optString("link", ""), msg.optBoolean("buzz", false));
+                break;
+            case "close":
+                nm.cancel(1000 + (msg.optString("ask_id").hashCode() & 0xffff));
                 break;
             case "photo":
                 io.post(() -> capture("photo", msg));
@@ -521,11 +535,15 @@ public class AgentService extends Service {
         nm.notify((int) (System.currentTimeMillis() & 0xffff), n);
     }
 
-    private void ask(String askId, String text, JSONArray options) {
+    private void ask(String askId, String text, JSONArray options, String link, boolean strong) {
         int nid = 1000 + (askId.hashCode() & 0xffff);
         Notification.Builder b = new Notification.Builder(this, CH_ASKS)
-                .setSmallIcon(R.mipmap.ic_launcher).setContentTitle("Mochi asks").setContentText(text)
+                .setSmallIcon(R.mipmap.ic_launcher).setContentTitle(strong ? "Mochi" : "Mochi asks").setContentText(text)
                 .setStyle(new Notification.BigTextStyle().bigText(text)).setAutoCancel(false);
+        if (link.startsWith("geo:") || link.startsWith("https://")) {  // a tap on the body: the place, in Maps
+            Intent open = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(link)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            b.setContentIntent(PendingIntent.getActivity(this, nid * 8 + 7, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT));
+        }
         List<String> opts = new ArrayList<>();
         if (options != null) for (int i = 0; i < Math.min(3, options.length()); i++) opts.add(options.optString(i));
         if (opts.isEmpty()) { opts.add("Yes"); opts.add("Not now"); }
@@ -537,7 +555,9 @@ public class AgentService extends Service {
             b.addAction(new Notification.Action.Builder(null, o, pi).build());
         }
         nm.notify(nid, b.build());
-        getSystemService(VibratorManager.class).getDefaultVibrator().vibrate(VibrationEffect.createOneShot(150, VibrationEffect.DEFAULT_AMPLITUDE));
+        getSystemService(VibratorManager.class).getDefaultVibrator().vibrate(strong
+                ? VibrationEffect.createWaveform(new long[]{0, 120, 80, 120, 80, 240}, -1)  // the buzz: meant to be felt in a pocket
+                : VibrationEffect.createOneShot(150, VibrationEffect.DEFAULT_AMPLITUDE));
     }
 
     private void reply(Intent i) {

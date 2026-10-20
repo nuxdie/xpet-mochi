@@ -58,6 +58,28 @@ class Matching(unittest.TestCase):
         self.assertFalse(mv.safe_page("file:///etc/passwd"))
 
 
+class Identities(unittest.TestCase):
+    def test_username_and_email_field(self):
+        self.assertEqual(mv.identities({"username": "artem"}, [{"name": "Email", "value": "a@x.com", "type": 0}]),
+                         ("a@x.com", "artem"))
+
+    def test_email_and_username_field(self):
+        self.assertEqual(mv.identities({"username": "a@x.com"}, [{"name": "Username", "value": "artem", "type": 0}]),
+                         ("a@x.com", "artem"))
+        self.assertEqual(mv.identities({"username": "a@x.com"}, [{"name": "Логин", "value": "artem", "type": 1}]),
+                         ("a@x.com", "artem"))
+
+    def test_only_custom_fields(self):
+        self.assertEqual(mv.identities({}, [{"name": "PIN", "value": "1234", "type": 1},
+                                            {"name": "e-mail", "value": "a@x.com", "type": 0}]), ("a@x.com", ""))
+
+    def test_nothing_else(self):
+        self.assertEqual(mv.identities({"username": "artem"}, None), ("", "artem"))
+        self.assertEqual(mv.identities({"username": "artem"}, [{"name": "Email", "value": "not one", "type": 0},
+                                                               {"name": "Remember", "value": "true", "type": 2}]),
+                         ("", "artem"))
+
+
 class Codes(unittest.TestCase):
     def test_rfc6238(self):
         key = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # "12345678901234567890"
