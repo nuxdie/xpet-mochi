@@ -20,6 +20,7 @@ done
 adb shell dumpsys deviceidle whitelist +$PKG >/dev/null
 adb shell cmd notification allow_listener $PKG/.NotifListener >/dev/null   # the shade, and what's playing
 adb shell cmd appops set $PKG SYSTEM_ALERT_WINDOW allow 2>/dev/null || true
+adb shell dpm set-active-admin $PKG/.LockAdmin >/dev/null 2>&1 || true   # force-lock, for the sleep wall
 adb shell am start -W -n $PKG/.MainActivity >/dev/null   # a launch takes the app out of the "stopped" state, so boot works
 if [ "${1:-}" != "--no-pair" ]; then
     CFG=$(mochi-phone pair)

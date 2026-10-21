@@ -102,6 +102,7 @@ class Bot:
         Returns the id of the message that carries the buttons (the last one)."""
         chunks = split_text(text) or ["(empty)"]
         mid = None
+        self.sent_ids = []  # every chunk's id, so a reply to any of them can be traced back
         for i, chunk in enumerate(chunks):
             params = {"chat_id": self.owner, "text": chunk, "disable_notification": not buzz}
             if reply_to and i == 0:
@@ -109,6 +110,7 @@ class Bot:
             if buttons and i == len(chunks) - 1:
                 params["reply_markup"] = keyboard(buttons)
             mid = self.api("sendMessage", **params)["message_id"]
+            self.sent_ids.append(mid)
         return mid
 
     def send_file(self, path, caption="", buzz=False, reply_to=None, photo=False):
@@ -149,6 +151,10 @@ class Bot:
         dest_dir.mkdir(parents=True, exist_ok=True)
         name = safe_name(att["name"]) or f"file{Path(info['file_path']).suffix}"
         dest = dest_dir / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{name}"
+        n = 1
+        while dest.exists():  # an album lands several photo.jpg within the same second
+            n += 1
+            dest = dest_dir / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{Path(name).stem}-{n}{Path(name).suffix}"
         with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as f:
             while True:
                 chunk = r.read(1 << 16)

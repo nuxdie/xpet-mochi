@@ -1,30 +1,43 @@
 #!/usr/bin/env python3
 """mochi-mail — Mochi's outbound mail, through msmtp (~/.msmtprc, Gmail SMTP).
 
-    mochi-mail draft  --account NAME --to a@b.c [--cc ...] --subject "..." [--in-reply-to '<id>'] < body.txt
-    mochi-mail send   --draft FILE [--dry-run]
-    mochi-mail send   --account NAME --to a@b.c --subject "..." [--in-reply-to '<id>'] [--dry-run] < body.txt
-    mochi-mail archive   QUERY [--dry-run] [--max N]
+    mochi-mail draft  --account NAME --to a@b.c [--cc ...] --subject "..." [--in-reply-to '<id>'] [--attach FILE]... < body.txt
+    mochi-mail send   --draft FILE [--attach FILE]... [--dry-run]
+    mochi-mail send   --account NAME --to a@b.c --subject "..." [--in-reply-to '<id>'] [--attach FILE]... [--dry-run] < body.txt
+    mochi-mail archive   QUERY --why "what was done" [--asked] [--dry-run] [--max N]
     mochi-mail unarchive QUERY [--dry-run] [--max N]
     mochi-mail log    [N]
 
-A draft is a small file: header lines (From, To, Cc, Subject, In-Reply-To), a blank line, the body. `draft` writes one
+A draft is a small file: header lines (From, To, Cc, Subject, In-Reply-To, and one Attach: line per file), a blank
+line, the body. `draft` writes one
 into reports/drafts/ in Mochi's workspace and prints its path, so a run can show it to the human behind "Show me" and
 send it later with `send --draft`. `send` builds a proper message (Date, Message-ID, UTF-8), hands it to
 `msmtp -a ACCOUNT -t`, and appends a line to mail-sent.log. Gmail files its own copy in Sent Mail, which the next
 mbsync pull brings back into the local Maildir. Accounts come from the "mail" section of ~/.config/mochi/sources.json.
+
+Attachments (`--attach`, or `Attach:` lines in a draft) must be files inside Mochi's workspace, outside memory/ (the
+dossier never leaves): reports/, drive/, inbox/, phone/media/, ... A relative path is read against the workspace. A
+file from elsewhere (the NAS, their home) is copied into the workspace first, which makes the choice deliberate.
+At most 20 MB together, since Gmail refuses more than 25 MB once encoded. The log names every attached file.
 
 `archive` is Gmail's Archive: QUERY is notmuch syntax (`id:...`, `thread:...`, `from:greenhouse subject:received`),
 matched against what is in the inbox (unarchive: against what is not), and/or Gmail thread ids as `gmail:HEX` (the
 ids the Gmail web UI and API use). Each match takes its whole thread with it, as in Gmail. Over IMAP with the same app passwords mbsync uses (~/.config/mochi/mail/NAME.pass), it only removes
 the \\Inbox label (`STORE -X-GM-LABELS`): nothing is flagged deleted, moved to Trash or expunged, so `unarchive`
 puts back exactly what was taken. The local notmuch "inbox" tag follows at once; every change goes into the log.
+
+An archive must be a decision, not a guess: every inbox message in the threads it takes must have been read with
+`mochi-sense mail show` in the last 30 days (mail-seen.json), and `--why` says what was done about it ("rejection
+logged in open-loops", "date in calendar", "newsletter, nothing to do"). `--asked` is for an archive they asked for
+in so many words (a chat, a yes to a listed ask); it skips the reading check, and `--why` then quotes them. Gmail
+thread ids (`gmail:HEX`) cannot be checked against what was read, so they need `--asked`.
 """
 
 import argparse
 import datetime as dt
 import imaplib
 import json
+import mimetypes
 import os
 import re
 import subprocess
@@ -40,7 +53,10 @@ DRAFTS = WORK / "reports" / "drafts"
 LOG = WORK / "mail-sent.log"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "mochi" / "sources.json"
 MAX_RECIPIENTS = 10
+MAX_ATTACH = 20 * 1024 * 1024  # all attachments together; base64 grows it by a third, Gmail's cap is 25 MB
 MAX_ARCHIVE = 50  # more than this in one go needs --max: a query that broad is probably a mistake
+SEEN = WORK / "mail-seen.json"  # written by `mochi-sense mail show`: message id -> when Mochi read it
+SEEN_DAYS = 30
 
 
 def accounts():
@@ -72,15 +88,32 @@ def split_addrs(value):
 def read_draft(path):
     text = Path(path).read_text()
     head, _, body = text.partition("\n\n")
-    headers = {}
+    headers, attach = {}, []
     for line in head.splitlines():
         if ":" in line:
             k, v = line.split(":", 1)
-            headers[k.strip().lower()] = v.strip()
-    return headers, body.strip() + "\n"
+            if k.strip().lower() == "attach":  # one per file, so it may repeat
+                attach.append(v.strip())
+            else:
+                headers[k.strip().lower()] = v.strip()
+    return headers, body.strip() + "\n", attach
 
 
-def build(account, to, cc, subject, body, in_reply_to=None):
+def attachment_path(name):
+    """A file Mochi may attach: inside the workspace, not under memory/. Exits with the reason otherwise."""
+    p = Path(name).expanduser()
+    p = (p if p.is_absolute() else WORK / p).resolve()
+    work = WORK.resolve()
+    if not p.is_relative_to(work):
+        sys.exit(f"mochi-mail: {name}: attachments come from the workspace ({work}); copy the file there first")
+    if p.is_relative_to(work / "memory"):
+        sys.exit(f"mochi-mail: {name}: nothing from memory/ leaves this machine")
+    if not p.is_file():
+        sys.exit(f"mochi-mail: {name}: no such file")
+    return p
+
+
+def build(account, to, cc, subject, body, in_reply_to=None, attach=()):
     acc = accounts()
     if account not in acc:
         sys.exit(f"mochi-mail: unknown account {account!r} (known: {', '.join(acc) or 'none'}; see {CONFIG})")
@@ -109,23 +142,42 @@ def build(account, to, cc, subject, body, in_reply_to=None):
         msg["References"] = in_reply_to
     msg["User-Agent"] = "Mochi (mochi-mail)"
     msg.set_content(body)
+    files = [attachment_path(f) for f in attach]
+    if sum(f.stat().st_size for f in files) > MAX_ATTACH:
+        sys.exit(f"mochi-mail: attachments over {MAX_ATTACH // 2**20} MB together; Gmail would refuse the mail")
+    for f in files:
+        ctype, enc = mimetypes.guess_type(f.name)
+        maintype, subtype = (ctype if ctype and not enc else "application/octet-stream").split("/", 1)
+        msg.add_attachment(f.read_bytes(), maintype=maintype, subtype=subtype, filename=f.name)
     return msg
+
+
+def attachments(msg):
+    return [(p.get_filename(), len(p.get_content())) for p in msg.iter_attachments()]
 
 
 def send(msg, account, dry_run):
     raw = msg.as_bytes()
+    files = attachments(msg)
     if dry_run:
-        sys.stdout.write(raw.decode("utf-8", "replace"))
+        if files:  # the headers and the text, not pages of base64
+            print("".join(f"{k}: {v}\n" for k, v in msg.items()), end="")
+            print("\n" + msg.get_body(("plain",)).get_content(), end="")
+            for name, size in files:
+                print(f"[attached: {name}, {size / 1024:.1f} KB]")
+        else:
+            sys.stdout.write(raw.decode("utf-8", "replace"))
         print(f"\n--- dry run: not sent (would use msmtp -a {account})")
         return 0
     p = subprocess.run(["msmtp", "-a", account, "-t"], input=raw, capture_output=True, timeout=60)
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG, "a") as f:
         f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M} {'sent' if p.returncode == 0 else 'FAILED'} account={account} "
-                f"to={msg['To']}{(' cc=' + msg['Cc']) if msg.get('Cc') else ''} subject={msg['Subject']!r} id={msg['Message-ID']}\n")
+                f"to={msg['To']}{(' cc=' + msg['Cc']) if msg.get('Cc') else ''} subject={msg['Subject']!r} "
+                f"{''.join(f'attach={n!r} ' for n, _ in files)}id={msg['Message-ID']}\n")
     if p.returncode != 0:
         sys.exit(f"mochi-mail: msmtp failed: {p.stderr.decode(errors='replace').strip()[-400:]}")
-    print(f"sent to {msg['To']} from {account} ({msg['Message-ID']})")
+    print(f"sent to {msg['To']} from {account}{f' with {len(files)} attachment(s)' if files else ''} ({msg['Message-ID']})")
     return 0
 
 
@@ -148,6 +200,25 @@ def notmuch_ids(query):
     if p.returncode != 0:
         sys.exit(f"mochi-mail: notmuch search failed: {p.stderr.strip()[-300:]}")
     return json.loads(p.stdout or "[]")
+
+
+def seen_ids():
+    try:
+        seen = json.loads(SEEN.read_text())
+    except (OSError, ValueError):
+        return set()
+    now = dt.datetime.now().timestamp()
+    return {k for k, v in seen.items() if now - v < SEEN_DAYS * 86400}
+
+
+def thread_mates(ids):
+    """Every inbox message in the threads of these message ids: what an archive really takes."""
+    if not ids:
+        return []
+    q = " or ".join('id:"' + m.replace('"', '""') + '"' for m in ids)
+    p = subprocess.run(["notmuch", "search", "--output=threads", q], capture_output=True, text=True, timeout=60)
+    threads = p.stdout.split()
+    return notmuch_ids(f"tag:inbox and ({' or '.join(threads)})") if threads else list(ids)
 
 
 def imap_quote(s):
@@ -238,6 +309,17 @@ def cmd_archive(a, archive):
     side = "tag:inbox" if archive else "not tag:inbox"
     per = {name: notmuch_ids(f"tag:{name} and {side} and ({query})") if query else [] for name in accts}
     n = sum(len(v) for v in per.values()) + len(gmail)
+    if not a.why.strip():
+        sys.exit("mochi-mail: --why is required: what was done about this mail, or why it needs nothing")
+    if archive and not a.asked:
+        if gmail:
+            sys.exit("mochi-mail: gmail: thread ids can't be checked against what you read; use id:/thread: or --asked")
+        seen = seen_ids()
+        unread = [m for m in thread_mates([i for ids in per.values() for i in ids]) if m not in seen]
+        if unread:
+            sys.exit(f"mochi-mail: not archived: {len(unread)} message(s) you haven't read. Read each first "
+                     "(mochi-sense mail show 'id:...'), act on it, then archive:\n"
+                     + "\n".join(f"  id:{m}" for m in unread[:20]))
     if not n:
         print(f"nothing {'in' if archive else 'archived outside'} the inbox matches: {query}")
         return 0
@@ -256,7 +338,8 @@ def cmd_archive(a, archive):
         if found:
             subprocess.run(["notmuch", "tag", "-inbox" if archive else "+inbox", "--",
                             " or ".join('id:"' + m.replace('"', '""') + '"' for m in found)], capture_output=True, timeout=60)
-        log_line(f"{verb} account={name} n={len(done)} query={' '.join(a.query)!r} "
+        log_line(f"{verb} account={name} n={len(done)}{' asked' if a.asked else ''} why={a.why.strip()[:200]!r} "
+                 f"query={' '.join(a.query)!r} "
                  + "; ".join(f"{s[:60]!r} <{m}>" for m, s in done))
     if a.dry_run:
         print("--- dry run: nothing changed")
@@ -275,10 +358,14 @@ def main():
         s.add_argument("--subject", default="")
         s.add_argument("--in-reply-to", default="")
         s.add_argument("--body-file", help="body text (default: stdin)")
+        s.add_argument("--attach", action="append", default=[], metavar="FILE",
+                       help="attach a file from the workspace (repeatable; with --draft, added to its Attach: lines)")
         s.add_argument("--dry-run", action="store_true")
     for name in ("archive", "unarchive"):
         s = sub.add_parser(name)
         s.add_argument("query", nargs="+", help="notmuch query ('id:abc@x', 'from:greenhouse') and/or gmail:HEX thread ids")
+        s.add_argument("--why", default="", help="required: what was done about it, or why it needs nothing (logged)")
+        s.add_argument("--asked", action="store_true", help="they asked for exactly this; skips the read-it-first check")
         s.add_argument("--dry-run", action="store_true")
         s.add_argument("--max", type=int, default=MAX_ARCHIVE)
     lg = sub.add_parser("log")
@@ -296,16 +383,17 @@ def main():
         return 0
 
     if a.draft:
-        headers, body = read_draft(a.draft)
+        headers, body, attach = read_draft(a.draft)
         account = a.account or account_for(headers.get("from", ""))
         if not account:
             sys.exit("mochi-mail: the draft's From address matches no account; pass --account")
-        msg = build(account, headers.get("to", ""), headers.get("cc", ""), headers.get("subject", ""), body, headers.get("in-reply-to") or None)
+        msg = build(account, headers.get("to", ""), headers.get("cc", ""), headers.get("subject", ""), body, headers.get("in-reply-to") or None,
+                    attach + a.attach)
     else:
         if not a.account or not a.to:
             sys.exit("mochi-mail: --account and --to are required (or --draft FILE)")
         body = Path(a.body_file).read_text() if a.body_file else sys.stdin.read()
-        msg = build(a.account, a.to, a.cc, a.subject, body, a.in_reply_to or None)
+        msg = build(a.account, a.to, a.cc, a.subject, body, a.in_reply_to or None, a.attach)
         account = a.account
 
     if a.cmd == "draft":
@@ -318,7 +406,8 @@ def main():
         lines.append(f"Subject: {msg['Subject']}")
         if msg.get("In-Reply-To"):
             lines.append(f"In-Reply-To: {msg['In-Reply-To']}")
-        path.write_text("\n".join(lines) + "\n\n" + msg.get_content())
+        lines += [f"Attach: {attachment_path(f)}" for f in a.attach]
+        path.write_text("\n".join(lines) + "\n\n" + msg.get_body(("plain",)).get_content())
         print(path)
         return 0
     return send(msg, account, a.dry_run)

@@ -5,6 +5,7 @@
 #include "art3d.hpp"
 #include "ipc.hpp"
 #include "wardrobe.hpp"
+#include "clock_sheet.hpp"
 
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -2169,7 +2170,7 @@ bool compositorRunning(Display* dpy) {
 }
 
 void usage() {
-    puts("usage: xpet [--name NAME] [--reset] [--no-details] [--sheet FILE.png] [--strip ACTION FILE.png]\n"
+    puts("usage: xpet [--name NAME] [--reset] [--no-details] [--sheet FILE.png] [--strip ACTION FILE.png] [--clock-sheet DIR]\n"
          "       xpet --send JSON|TEXT     send a message to the running pig\n"
          "       xpet --send-hook          forward a Claude Code hook (JSON on stdin)\n"
          "       xpet --ask [TEXT]         ask the brain (mochi-brain) to do something\n"
@@ -2281,6 +2282,7 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--sheet" && i + 1 < argc) { writeSheet(argv[++i]); return 0; }
         else if (a == "--strip" && i + 2 < argc) return writeStrip(argv[i + 1], argv[i + 2]);
+        else if (a == "--clock-sheet" && i + 1 < argc) return clocksheet::write(argv[++i]);
         else if (a == "--send" && i + 1 < argc) return sendCommand(argv[++i]);
         else if (a == "--send-hook") return sendHook();
         else if (a == "--ask") {

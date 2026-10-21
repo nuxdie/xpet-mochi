@@ -4,8 +4,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     package="app.mochi.agent"
-    android:versionCode="3"
-    android:versionName="0.3">
+    android:versionCode="4"
+    android:versionName="0.4">
 
     <uses-sdk android:minSdkVersion="33" android:targetSdkVersion="35" />
 
@@ -61,6 +61,15 @@
         </receiver>
 
         <receiver android:name=".ActionReceiver" android:exported="false" />
+
+        <!-- force-lock only, for the sleep wall's "lock" -->
+        <receiver android:name=".LockAdmin" android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data android:name="android.app.device_admin" android:resource="@xml/lock_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
 
         <service android:name=".NotifListener" android:exported="true"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">

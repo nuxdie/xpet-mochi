@@ -131,6 +131,27 @@ def uri_matches(uri, match, page):
     return False
 
 
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+EMAIL_NAME = re.compile(r"e-?mail|почт", re.I)
+USER_NAME = re.compile(r"user|login|логин|nick|account|customer|client", re.I)
+
+
+def identities(login, fields):
+    """The email and the plain username of a login, wherever the item keeps them: Bitwarden's Username holds one, and
+    often a custom field ("Email", "Username", "Login") holds the other. Either may be empty."""
+    user = (login.get("username") or "").strip()
+    email = user if EMAIL_RE.match(user) else ""
+    name = "" if email else user
+    texts = [(f.get("name") or "", (f.get("value") or "").strip()) for f in fields or []
+             if f.get("type") in (0, 1, None) and (f.get("value") or "").strip()]
+    if not email:
+        email = next((v for n, v in texts if EMAIL_NAME.search(n) and EMAIL_RE.match(v)), "") or \
+            next((v for _n, v in texts if EMAIL_RE.match(v)), "")
+    if not name:
+        name = next((v for n, v in texts if USER_NAME.search(n) and not EMAIL_NAME.search(n) and not EMAIL_RE.match(v)), "")
+    return email, name
+
+
 def matching(items, page):
     return [it for it in items if any(uri_matches(u.get("uri"), u.get("match"), page) for u in it["uris"])]
 
@@ -308,19 +329,35 @@ FILL_JS = r"""(function (a) {
   if (!user && !pw) user = inputs.find(e => texty(e) && e !== otp &&
     (e.type === "email" || /user|login|email|e-?mail|account|identifier/i.test(label(e)))) || null;
   if (a.probe) return {ok: true, has: !!(pw || otp || user)};
+  // The login keeps an email and/or a plain username (one in Username, the other in a custom field): a field that
+  // plainly asks for one gets that one, any other field gets Bitwarden's Username, else whichever there is.
+  const asksEmail = e => e.type === "email" || e.autocomplete === "email" ||
+    (/e-?mail|почт/i.test(label(e)) && !/user|login|логин/i.test(label(e)));
+  const asksName = e => e.type !== "email" && !/mail|почт/i.test(label(e)) &&
+    /user.?name|nick|логин|login.?(name|id)|customer|client/i.test(label(e));
+  const idFor = e => (asksEmail(e) && a.email) || (asksName(e) && a.login) || a.username || a.email || a.login;
+  const kind = (e, v) => v === a.email && v !== a.login ? "email" : "username";
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
   const set = (e, v) => { e.focus(); setter.call(e, v);
     e.dispatchEvent(new Event("input", {bubbles: true})); e.dispatchEvent(new Event("change", {bubbles: true})); };
   const filled = []; let last = null;
+  const fillId = e => { const v = idFor(e); if (v && e.value !== v) { set(e, v); filled.push(kind(e, v)); } return !!v; };
   if (pw && a.password) {
-    if (user && a.username && user.value !== a.username) { set(user, a.username); filled.push("username"); }
+    if (user) {
+      fillId(user);
+      // a form that asks for both, the email and the username, each in its own empty field before the password
+      const other = inputs.slice(0, inputs.indexOf(pw)).find(e => e !== user && e !== otp && texty(e) && !e.value &&
+        (asksEmail(user) ? asksName(e) : asksEmail(e)));
+      if (other && idFor(other) !== user.value) fillId(other);
+    }
     set(pw, a.password); filled.push("password"); last = pw;
   } else if (otp && a.totp) {
     set(otp, a.totp); filled.push("one-time code"); last = otp;
   } else if (otp) {
     return {ok: false, error: "the page wants a one-time code and this login has no authenticator key"};
-  } else if (user && a.username) {
-    set(user, a.username); filled.push("username"); last = user;
+  } else if (user && fillId(user)) {
+    if (!filled.length) filled.push("username (already there)");
+    last = user;
   } else {
     return {ok: false, error: "no login fields on this page"};
   }
@@ -363,7 +400,8 @@ def probe(frame):
 
 
 def fill_page(frame, host, item, submit=True):
-    args = {"host": host, "username": item.get("username") or "", "password": item.get("password") or "",
+    args = {"host": host, "username": item.get("username") or "", "email": item.get("email") or "",
+            "login": item.get("login") or "", "password": item.get("password") or "",
             "totp": totp(item.get("totp")) or "", "submit": submit}
     c = CDP(frame[1])
     try:
@@ -435,7 +473,7 @@ def peer_pid(conn):
 
 
 def label(item):
-    user = item.get("username") or ""
+    user = item.get("username") or item.get("email") or item.get("login") or ""
     return f"{item['name']} · {user}" if user and user.lower() not in item["name"].lower() else item["name"]
 
 
@@ -500,7 +538,9 @@ class Vault:
             lg = it.get("login") or {}
             if it.get("type") != 1 or it.get("deletedDate") or not (lg.get("password") or lg.get("totp")):
                 continue
+            email, name = identities(lg, it.get("fields"))  # other custom fields (PINs, answers) are not kept
             items.append({"id": it["id"], "name": it.get("name") or "(unnamed)", "username": lg.get("username") or "",
+                          "email": email, "login": name,
                           "password": lg.get("password") or "", "totp": lg.get("totp") or "",
                           "uris": [{"uri": u.get("uri"), "match": u.get("match")} for u in lg.get("uris") or []]})
         with self.lock:
@@ -575,7 +615,8 @@ class Vault:
         host = urlsplit(url).hostname or ""
         items = matching(self.items, url)
         if account:
-            items = [it for it in items if account.lower() in (it["name"] + " " + it["username"]).lower()]
+            items = [it for it in items if account.lower() in " ".join(
+                [it["name"], it["username"], it.get("email", ""), it.get("login", "")]).lower()]
         if not items:
             return False, f"no login of theirs is saved for {host}" + (f" matching {account!r}" if account else "")
         leased = [it for it in items if self.leases.get((host, it["id"]), 0) > time.time()]
