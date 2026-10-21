@@ -977,6 +977,8 @@ public:
             anim.action = art3d::Action::Idle;  // woken mid-dream
         if (anim.action == art3d::Action::Chase && (!grounded() || st == St::Drag || std::fabs(vx) > 0.1))
             anim.action = art3d::Action::Idle;  // picked up or off somewhere: no spinning on the move
+        if (anim.action == art3d::Action::Whoops && st == St::Drag)
+            anim.action = art3d::Action::Idle;  // caught before it dropped: no running on the air in your hand
         if (st == St::Sleep && !lyingDown() && tick % 40 == 0) spawn(1);
         updateActivity();
         if (bubbleLeft > 0) bubbleLeft -= dt;
@@ -1111,7 +1113,8 @@ public:
             anim.start(art3d::Action::Snuffle, 1.4);
         }
         bool perking = anim.action == art3d::Action::Perk && anim.actionT > anim.actionLen * art3d::PERK_LOOK;  // looking round at you
-        bool talkingToYou = bubbleLeft > 0 || happyLeft > 0 || askHop > 0 || perking || (closeupOn() && closeT < CLOSE_IN + CLOSE_STARE);
+        bool uhoh = hanging && anim.actionT > anim.actionLen * art3d::WHOOPS_LOOK && anim.actionT < anim.actionLen * art3d::WHOOPS_RUN;  // the look at you before the drop
+        bool talkingToYou = bubbleLeft > 0 || happyLeft > 0 || askHop > 0 || perking || uhoh || (closeupOn() && closeT < CLOSE_IN + CLOSE_STARE);
         double ptrD = std::hypot(ptrX - headX, ptrY - headY);
         bool ptrFresh = t - ptrMovedAt < 0.5 && ptrD > 90 && ptrD < 1100;
         bool winFresh = activeWin && t - winActivityAt < 1.0 && std::hypot(activeCx - headX, activeCy - headY) < 1800;
@@ -1293,6 +1296,8 @@ private:
     double placedAt = 0, stayUntil = 0;   // put down by hand: it stays there a while
     bool launching = false;                // crouched to jump: launchVx/Vy wait for the crouch to finish (tryJump)
     double launchVx = 0, launchVy = 0;
+    bool hanging = false;                  // its window went: standing on thin air until Whoops ends (whoops())
+    double whoopsAt = -1e9;
     double bubX = -1, bubY = -1;           // where the bubble hangs: eased toward the head so it doesn't jiggle
     double previewUntil = 0, nextBlink = 3, snuffleAt = 0;
     double winFocusAt = 0, lastVisit = 0;
@@ -1750,6 +1755,7 @@ private:
     void set(St n, double secs = 0) {
         if (n != St::Walk) edgeDecided = walkOff = false;
         launching = false;  // anything else that happens to it mid-crouch (picked up, called to work) calls the jump off
+        hanging = false;    // and picked up off thin air, it's in your hand, not about to drop
         if (n == St::Air || n == St::Drag || n == St::Away) plat = 0;
         st = n;
         stLeft = secs;
@@ -1840,6 +1846,10 @@ private:
     }
 
     void airStep() {
+        if (hanging) {  // on thin air: no gravity until it has noticed (Whoops ends, or something cut it short)
+            if (anim.action == art3d::Action::Whoops) return;
+            hanging = false;
+        }
         vy = std::min(vy + GRAVITY, MAX_FALL);
         if (std::fabs(vx) > 1) dir = vx > 0 ? 1 : -1;
         double nx = px + vx, ny = py + vy;
@@ -1871,7 +1881,7 @@ private:
         // Ride along with the window we're standing on.
         if (plat != FLOOR) {
             auto it = D.rects.find(plat);
-            if (it == D.rects.end()) { fall(); return; }
+            if (it == D.rects.end()) { whoops(); return; }
             px += it->second.x - platX;
             py += it->second.y - platY;
             rideDx += it->second.x - platX;
@@ -1915,6 +1925,21 @@ private:
         }
         // Walking may have carried us off the ledge.
         if (grounded() && !D.segAt(plat, px, py)) fall();
+    }
+
+    // The window it stood on is gone (closed, minimised, another workspace). Like a cartoon it doesn't fall at once:
+    // it stands on thin air a moment, looks down, looks round at you, legs start running, and then it drops. Only
+    // from a plain moment (not asleep, crouched to jump, at work, under a panel), and once a minute at most, so
+    // closing a few windows in a row or flipping workspaces doesn't make a routine of it: otherwise it just falls.
+    void whoops() {
+        double t = now();
+        bool plain = st == St::Idle || st == St::Sit || st == St::Walk || st == St::Play;
+        if (!plain || lyingDown() || launching || menu.open || closeupOn() || hidden || t - whoopsAt < 60) { fall(); return; }
+        whoopsAt = t;
+        vx = vy = 0;
+        set(St::Air);
+        hanging = true;  // after set(), which clears it
+        anim.start(art3d::Action::Whoops, art3d::WHOOPS_SECS);
     }
 
     void fall() {
@@ -1975,7 +2000,7 @@ private:
 
     art::Pose currentPose() const {
         switch (st) {
-            case St::Air: return art::Pose::Fall;
+            case St::Air: return hanging ? art::Pose::Stand : art::Pose::Fall;  // standing on nothing, not yet noticed
             case St::Drag: return art::Pose::Dangle;
             case St::Sit: return art::Pose::Sit;
             case St::Sleep: return lyingDown() ? art::Pose::Stand : art::Pose::Sleep;  // Bedtime does the lying down

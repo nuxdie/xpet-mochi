@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -166,8 +166,12 @@ inline const ActionInfo ACTIONS[] = {
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
     {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},         {"stir", Action::Stir, 2.8},
     {"chase", Action::Chase, 3.0},     {"sneeze", Action::Sneeze, 2.0},       {"ride", Action::Ride, 2.0},
-    {"leap", Action::Leap, 1.3},
+    {"leap", Action::Leap, 1.3},       {"whoops", Action::Whoops, 1.2},
 };
+// Whoops: the window it stood on has gone, and like a cartoon it doesn't notice at once. The pet holds it in the air
+// for the whole action (standing on nothing) and lets it drop at the end; from WHOOPS_LOOK to WHOOPS_RUN it looks round
+// at you (the pet points the eyes), then its legs start running on the air.
+constexpr double WHOOPS_LOOK = 0.42, WHOOPS_RUN = 0.74, WHOOPS_SECS = 1.2;
 // Sneeze: two breaths in, the sneeze at SNEEZE_CHOO, then a shake of the head. The eyes squeeze shut from SNEEZE_SHUT
 // to SNEEZE_OPEN (the pet closes them, the rig can't).
 constexpr double SNEEZE_CHOO = 0.52, SNEEZE_SHUT = 0.38, SNEEZE_OPEN = 0.66, SNEEZE_SECS = 2.0;
@@ -836,6 +840,34 @@ inline Rig actionRig(Action a, double p, double t) {
             r.ear = 18 * in + 40 * choo + 20 * std::fabs(std::sin(t * 19 + 0.8)) * shakeoff;
             r.earSwing = -12 * in + 35 * choo;
             r.tail = 45 * choo;
+            break;
+        }
+        case Action::Whoops: {  // the floor's gone: it looks down, looks at you, then its legs run on the air
+            // Held in the air by the pet the whole time, on nothing. An ear twitches (something's off), the shadow goes
+            // as the floor did, the head goes down over the edge to look, and comes back up to you (the pet turns it):
+            // ears drooping, a sheepish tilt, a gulp. Then the legs start running, ears flying up, and the pet drops it.
+            double down = smoothstep((p - 0.1) / 0.1) * (1 - smoothstep((p - WHOOPS_LOOK + 0.04) / 0.06));
+            double uhoh = smoothstep((p - WHOOPS_LOOK + 0.04) / 0.06) * (1 - smoothstep((p - WHOOPS_RUN) / 0.05));
+            double gulp = env((p - 0.55) / 0.1);
+            double run = smoothstep((p - WHOOPS_RUN) / 0.05);
+            double fling = smoothstep((p - 0.88) / 0.12);
+            double a = 38 * std::sin(t * 28) * run;  // diagonal pairs, as in the walk, only much faster
+            r.leg[0] = r.leg[3] = a;
+            r.leg[1] = r.leg[2] = -a;
+            double la = std::max(0.0, std::cos(t * 28)) * 1.4 * run, lb = std::max(0.0, -std::cos(t * 28)) * 1.4 * run;
+            r.legLift[0] = r.legLift[3] = la; r.legLift[1] = r.legLift[2] = lb;
+            r.headPitch = 34 * down + 9 * gulp - 6 * run;
+            r.neck = 0.8 * down;  // peering over the edge
+            r.bodyPitch = -6 * down - 4 * run;
+            r.headRoll = 8 * uhoh;
+            r.scaleY = 1 - 0.05 * uhoh - 0.06 * gulp;
+            r.scaleXZ = 1 + 0.03 * uhoh;
+            r.snout = 1 - 0.1 * gulp;
+            r.shadow = 1 - smoothstep((p - 0.05) / 0.25);
+            r.earFlick = 30 * env((p - 0.02) / 0.1);
+            r.ear = -16 * uhoh + 45 * fling;
+            r.earSwing = 16 * down - 4 * uhoh;
+            r.tail = 30 * std::sin(t * 24) * run;
             break;
         }
         case Action::Ride: {  // a window ride played out on the spot: it starts (rocked back), then stops (thrown forward)
