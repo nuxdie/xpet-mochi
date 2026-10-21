@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -166,6 +166,7 @@ inline const ActionInfo ACTIONS[] = {
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
     {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},         {"stir", Action::Stir, 2.8},
     {"chase", Action::Chase, 3.0},     {"sneeze", Action::Sneeze, 2.0},       {"ride", Action::Ride, 2.0},
+    {"leap", Action::Leap, 1.3},
 };
 // Sneeze: two breaths in, the sneeze at SNEEZE_CHOO, then a shake of the head. The eyes squeeze shut from SNEEZE_SHUT
 // to SNEEZE_OPEN (the pet closes them, the rig can't).
@@ -188,6 +189,9 @@ constexpr double PERK_LOOK = 0.1, PERK_GLAD = 0.3;
 constexpr double CHEER_TURN = 0.15, CHEER_SECS = 2.0;
 // Jump starts with a crouch on the ground: it leaves the floor this far in (0.3 s of the 0.75).
 constexpr double JUMP_CROUCH = 0.4, JUMP_SECS = 0.75;
+// Leap: the same for a big climb (LEAP_RISE px up or more): 0.65 s of crouch and pounce wiggle before it goes.
+constexpr double LEAP_CROUCH = 0.5, LEAP_SECS = 1.3, LEAP_RISE = 200;
+inline double takeoffAt(Action a) { return a == Action::Leap ? LEAP_CROUCH : JUMP_CROUCH; }
 inline const ActionInfo* actionNamed(const std::string& name) {
     for (const ActionInfo& a : ACTIONS)
         if (name == a.name) return &a;
@@ -477,6 +481,36 @@ inline double rideJolt(double t, double peak) {
     return peak * std::exp(-RIDE_Z * RIDE_W * t) * std::sin(wd * t) / top;
 }
 
+// Wind up, then spring: a crouch on the ground, a stretch on take-off. Up to c of the way through it is still on the
+// ground (the pet holds the take-off till then): it sinks low, eyes up at where it's going, and a little rump wiggle
+// while it gathers. Then the crouch lets go at once and the stretch snaps in as it leaves, held through the climb and
+// eased out in the air. `big` 0 is a hop up to the next ledge (Jump); 1 is a leap up most of a window (Leap): it looks
+// up first, sinks a good deal lower and longer, and the gathering turns into a proper pounce wiggle, rump swinging and
+// hind hooves treading, before a bigger spring. `secs` keeps the snap of the release the same length in both.
+inline Rig jumpRig(double p, double t, double c, double secs, double big) {
+    Rig r;
+    const double w = secs / JUMP_SECS;  // p-windows below are tuned for the Jump's length
+    double crouch = smoothstep(p / (0.75 * c)) * (1 - smoothstep((p - c) / (0.07 / w)));
+    double gather = smoothstep((p - 0.45 * c) / (0.3 * c)) * (1 - smoothstep((p - c) / (0.05 / w)));
+    double look = smoothstep(p / (0.25 * c)) * (1 - smoothstep((p - c) / (0.07 / w)));  // eyes on the ledge first
+    double s = smoothstep((p - c) / (0.06 / w)) * smoothstep((1 - p) / (0.5 * (1 - c)));
+    double wig = std::sin(t * 26) * gather;
+    r.scaleY = 1 - (0.22 + 0.1 * big) * crouch + (0.2 + 0.08 * big) * s;
+    r.scaleXZ = 1 + (0.1 + 0.05 * big) * crouch - (0.08 + 0.03 * big) * s;
+    r.bodyY = -(0.9 + 0.6 * big) * crouch;
+    for (double& sp : r.splay) sp = (10 + 5 * big) * crouch;
+    r.bodyRoll = (3 + 4 * big) * wig;
+    r.bodyX = 0.35 * big * wig;  // the rump swings side to side
+    r.leg[2] = (25 + 10 * big) * s + 12 * big * wig;  // treading: hind hooves in turn
+    r.leg[3] = (25 + 10 * big) * s - 12 * big * wig;
+    r.leg[0] = r.leg[1] = -(20 + 12 * big) * s;  // reaching for the ledge
+    r.headPitch = -8 * crouch - 14 * big * look - (12 + 6 * big) * s;
+    r.tail = 25 * crouch + (15 + 15 * big) * wig;
+    r.earSwing = -10 * crouch - 14 * s;  // swept back by the take-off
+    r.ear = -10 * s - 6 * big * crouch;  // and laid flat while it aims
+    return r;
+}
+
 // One-shot overlays. p runs 0 → 1 over the action's length.
 inline Rig actionRig(Action a, double p, double t) {
     Rig r;
@@ -563,27 +597,8 @@ inline Rig actionRig(Action a, double p, double t) {
             r.ear = -22 * g + 10 * up;  // they slap down on impact and bounce up with the rebound
             break;
         }
-        case Action::Jump: {  // wind up, then spring: a crouch on the ground, a stretch on take-off
-            // Up to JUMP_CROUCH it is still on the ground (the pet holds the take-off till then): it sinks low, eyes
-            // up at where it's going, and a little rump wiggle while it gathers. Then the crouch lets go at once and
-            // the stretch snaps in as it leaves, held through the climb and eased out in the air.
-            constexpr double c = JUMP_CROUCH;
-            double crouch = smoothstep(p / (0.75 * c)) * (1 - smoothstep((p - c) / 0.07));
-            double gather = smoothstep((p - 0.45 * c) / (0.3 * c)) * (1 - smoothstep((p - c) / 0.05));
-            double s = smoothstep((p - c) / 0.06) * smoothstep((1 - p) / (0.5 * (1 - c)));
-            r.scaleY = 1 - 0.22 * crouch + 0.2 * s;
-            r.scaleXZ = 1 + 0.1 * crouch - 0.08 * s;
-            r.bodyY = -0.9 * crouch;
-            for (double& sp : r.splay) sp = 10 * crouch;
-            r.bodyRoll = 3 * std::sin(t * 26) * gather;
-            r.leg[2] = r.leg[3] = 25 * s;
-            r.leg[0] = r.leg[1] = -20 * s;
-            r.headPitch = -8 * crouch - 12 * s;
-            r.tail = 25 * crouch + 15 * std::sin(t * 26) * gather;
-            r.earSwing = -10 * crouch - 14 * s;  // swept back by the take-off
-            r.ear = -10 * s;
-            break;
-        }
+        case Action::Jump: return jumpRig(p, t, JUMP_CROUCH, JUMP_SECS, 0);
+        case Action::Leap: return jumpRig(p, t, LEAP_CROUCH, LEAP_SECS, 1);
         case Action::Wiggle:  // a happy butt wiggle
             r.bodyRoll = 7 * std::sin(t * 18) * e;
             r.bodyX = 0.4 * std::sin(t * 18) * e;

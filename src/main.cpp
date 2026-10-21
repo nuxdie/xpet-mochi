@@ -1809,11 +1809,12 @@ private:
         vx = 0;
         set(St::Idle, 5);  // crouching on the spot; set() calls off any earlier launch, so this goes first
         launching = true;
-        anim.start(art3d::Action::Jump, art3d::JUMP_SECS);
+        if (h >= art3d::LEAP_RISE) anim.start(art3d::Action::Leap, art3d::LEAP_SECS);  // a big climb: a longer wind-up
+        else anim.start(art3d::Action::Jump, art3d::JUMP_SECS);
         return true;
     }
 
-    // The crouch is done: spring. (groundStep calls this once the Jump action reaches JUMP_CROUCH.)
+    // The crouch is done: spring. (groundStep calls this once the Jump or Leap action reaches its takeoffAt.)
     void launch() {
         vx = launchVx;
         vy = launchVy;
@@ -1882,8 +1883,8 @@ private:
         if (!sg) { fall(); return; }
         if (menu.open || closeupOn()) return;  // a panel is up, or it's at the glass: no wandering off
         if (launching) {  // crouched for a jump: spring once the wind-up is done; if something cut in, let it go
-            if (anim.action != art3d::Action::Jump) launching = false;
-            else if (anim.actionT >= anim.actionLen * art3d::JUMP_CROUCH) { launch(); return; }
+            if (anim.action != art3d::Action::Jump && anim.action != art3d::Action::Leap) launching = false;
+            else if (anim.actionT >= anim.actionLen * art3d::takeoffAt(anim.action)) { launch(); return; }
             else return;
         }
 
