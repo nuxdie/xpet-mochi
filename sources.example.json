@@ -17,6 +17,8 @@
  "youtube": {"channel": "@yourhandle or UC… channel id"},
  "telegram": {"token_file": "~/.config/mochi/telegram.token", "owner_id": 0},
  "browser": {"chrome": "google-chrome", "port": 9333},
+ "music": {"nas_root": "~/share", "downloads": "Downloads", "music": "Music"},
+ "torrent": {"tracker": "https://rutracker.org", "deluge": {"url": "https://host/deluge/", "auth_file": "~/.config/mochi/deluge.env"}},
  "sms": {"device": ""},
  "tasks": {"client_file": "~/.config/mochi/google-oauth-client.json", "token_file": "~/.config/mochi/google-tasks.token.json"},
  "mail": {

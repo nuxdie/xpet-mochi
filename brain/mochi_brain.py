@@ -183,6 +183,10 @@ READ_TOOLS = [
     # its cache lives in the workspace), in both Google accounts
     "Bash(mochi-calendar calendars:*)", "Bash(mochi-calendar agenda:*)", "Bash(mochi-calendar search:*)",
     "Bash(mochi-calendar show:*)", "Bash(mochi-calendar log:*)", "Bash(mochi-contacts:*)", "Bash(mochi-google accounts)",
+    # rutracker with their account (brain/mochi_torrent.py, through Mochi's Chrome) and what their Deluge is doing:
+    # looking changes nothing; adding a download is approved-only (TORRENT_TOOLS)
+    "Bash(mochi-torrent search:*)", "Bash(mochi-torrent show:*)", "Bash(mochi-torrent status:*)", "Bash(mochi-torrent log:*)",
+    "Bash(mochi-music status)", "Bash(mochi-music log:*)",  # the lossless → MP3 320 conversion list (brain/mochi_music.py)
     "mcp__claude_ai_Gmail__search_threads", "mcp__claude_ai_Gmail__get_thread",
     "mcp__claude_ai_Gmail__get_message", "mcp__claude_ai_Gmail__list_labels",
     "mcp__claude_ai_Gmail__list_drafts", "mcp__claude_ai_Gmail__get_draft",
@@ -236,6 +240,10 @@ VAULT_TOOLS = ["Bash(mochi-vault fill:*)", "Bash(mochi-vault status)", "Bash(moc
 # A Telegram message in their name, from their own account, through mochi-tg (brain/mochi_tg.py): every send is a
 # question on their phone first (Send / Deny), like a vault fill, and is logged. Only runs they asked for or approved.
 TG_SEND_TOOLS = ["Bash(mochi-tg send:*)"]
+# A download on their Deluge (brain/mochi_torrent.py): the .torrent fetched with their rutracker account, logged. Only in
+# runs they asked for or approved; CLAUDE.md "Their downloads" has the consent rule (the mail rule, exactly).
+TORRENT_TOOLS = ["Bash(mochi-torrent add:*)", "Bash(mochi-music queue:*)", "Bash(mochi-music sync:*)",
+                 "Bash(mochi-music convert:*)"]  # and putting a lossless download on the conversion list, or converting one
 # Their calendars and Drive change through mochi-calendar and mochi-drive (both accounts, logged); the claude.ai
 # connectors' write tools saw one account only and are in NEVER so a run reaches for the right door at once.
 CHANGE_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash"]
@@ -246,6 +254,7 @@ NEVER = [  # denied at every level, including things you approved
     "Bash(bw:*)", "Bash(mochi-vault unlock:*)", "Bash(mochi-vault serve:*)",  # the vault is theirs to open
     "Bash(mochi-vault remember:*)", "Bash(mochi-vault forget:*)", "Bash(secret-tool:*)",
     "Bash(mochi-tg auth:*)", "Bash(mochi-tg logout:*)",  # their Telegram account is theirs to sign in to
+    "Bash(mochi-vault export:*)", "Bash(mochi-torrent setup:*)",  # a login copied out of the vault is their setup step
     "mcp__claude_ai_Gmail__send_message", "mcp__claude_ai_Gmail__reply", "mcp__claude_ai_Gmail__forward",
     "mcp__claude_ai_Gmail__trash_message", "mcp__claude_ai_Gmail__trash_thread",
     "mcp__claude_ai_Gmail__delete_draft", "mcp__claude_ai_Gmail__mark_message_spam",
@@ -274,7 +283,7 @@ LEVELS = {
     "workshop": READ_TOOLS + OWN_FILES + WORKSHOP_TOOLS,  # its notes and its own body; nothing else
     "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS
                 + PHONE_CAPTURE_TOOLS
-                + VAULT_TOOLS + DRIVE_CHANGE_TOOLS + TG_SEND_TOOLS + BOX_TOOLS,
+                + VAULT_TOOLS + DRIVE_CHANGE_TOOLS + TG_SEND_TOOLS + TORRENT_TOOLS + BOX_TOOLS,
 }
 
 BLOCK = '```json\n{"say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}\n```'
@@ -1894,7 +1903,11 @@ class Telegram:
             return
         self.relay.bump("vault_asks")
         accounts = [str(a)[:60] for a in (m.get("accounts") or [])][:8]
-        text = f"🔑 Mochi wants to sign in to {str(m.get('host'))[:80]}\n{str(m.get('why') or '')[:300]}".rstrip()
+        host, why = str(m.get("host"))[:80], str(m.get("why") or "")[:300]
+        if m.get("kind") == "copy":  # `mochi-vault export`: your own setup step, a login copied into Mochi's config
+            text = f"🔑 Copy your login for {host} into Mochi's config file?\n{why}".rstrip()
+        else:
+            text = f"🔑 Mochi wants to sign in to {host}\n{why}".rstrip()
         rows = [[(a, f"v:{rid}:{i}")] for i, a in enumerate(accounts)] + [[("Deny", f"v:{rid}:x")]]
         mid = self.send(text, buttons=rows, buzz=not self.quiet_now())
         if not mid:

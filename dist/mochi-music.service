@@ -1,0 +1,9 @@
+[Unit]
+Description=Mochi music: convert lossless albums that arrived on the NAS to MP3 320 (mochi-music sync)
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=6h
+ExecStart=%h/.local/bin/mochi-music sync

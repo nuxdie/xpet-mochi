@@ -179,5 +179,53 @@ class Flow(unittest.TestCase):
         self.assertLess(time.time() - t0, 2)
 
 
+class Export(unittest.TestCase):
+    """export: a login copied into a file under the config dir, after the tap; nowhere else; nothing printed."""
+
+    def setUp(self):
+        self.asked = []
+        self.v = mv.Vault(bw="/bin/false", relay_pid=lambda: RELAY, notify=self.notify)
+        self.v.items = [item("d", "seedbox", "https://box.example"), item("a", "GitHub", "github.com")]
+        self.answer = None
+
+    def notify(self, **m):
+        if m["event"] == "vault_ask":
+            self.asked.append(m)
+            if self.answer:
+                choice, pid = self.answer
+                threading.Timer(0.05, lambda: self.v.decide(m["id"], choice, pid=pid)).start()
+        return True
+
+    def test_allow_writes_the_file_600(self):
+        self.answer = (0, RELAY)
+        to = Path(TMP) / "mochi" / "deluge.env"
+        ok, msg = self.v.export("https://box.example/deluge/", str(to), "Deluge's HTTP login", timeout=2)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.asked[0]["kind"], "copy")
+        self.assertEqual(self.asked[0]["host"], "box.example")
+        self.assertEqual(oct(to.stat().st_mode & 0o777), "0o600")
+        text = to.read_text()
+        self.assertIn("USERNAME=me@example.com\n", text)
+        self.assertIn("PASSWORD=pw-d\n", text)
+        self.assertNotIn("pw-", msg + repr(self.asked))  # the secret goes into the file only
+
+    def test_only_under_the_config_dir(self):
+        ok, msg = self.v.export("https://box.example/", str(Path(TMP) / "elsewhere.env"), "x", timeout=1)
+        self.assertFalse(ok)
+        self.assertIn("under", msg)
+        self.assertEqual(self.asked, [])
+
+    def test_deny_and_no_login(self):
+        self.answer = (None, RELAY)
+        ok, _ = self.v.export("https://box.example/", str(Path(TMP) / "mochi" / "x.env"), "x", timeout=2)
+        self.assertFalse(ok)
+        self.assertFalse((Path(TMP) / "mochi" / "x.env").exists())
+        ok, msg = self.v.export("https://nobody.example/", str(Path(TMP) / "mochi" / "x.env"), "x", timeout=1)
+        self.assertFalse(ok)
+        self.assertIn("no login", msg)
+        ok, msg = self.v.export("https://box.example/", str(Path(TMP) / "mochi" / "x.env"), "  ", timeout=1)
+        self.assertFalse(ok)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,10 @@
     mochi-vault has URL               how many of your logins match a site (no names, no secrets)
     mochi-vault fill --why TEXT [--page URL-PART] [--account TEXT]
                                       Mochi: sign in on the page open in its Chrome, once you allow it on your phone
+    mochi-vault export URL --to FILE --why TEXT [--account TEXT]
+                                      setup: copy one login (USERNAME=, PASSWORD= lines) into a file under
+                                      ~/.config/mochi, for a tool that must hold it itself (Deluge's HTTP auth);
+                                      asked on your phone the same way; never allowed in Mochi's runs
     mochi-vault serve                 the service itself (mochi-vault.service)
 
 How it holds together. `serve` runs as its own user service and is the only thing that ever has your logins. On
@@ -59,6 +63,7 @@ from urllib.parse import parse_qs, urlsplit
 HOME = Path.home()
 WORK = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share") / "mochi"
 LOG_FILE = WORK / "actions.log"
+CONF_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "mochi"  # the only place `export` writes
 RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 SOCK = RUNTIME / "mochi-vault.sock"
 BRAIN_SOCK = RUNTIME / "mochi-brain.sock"
@@ -642,15 +647,64 @@ class Vault:
                       f"see where it landed; a next step on this site (a code, a second page) can fill again "
                       f"without asking for {LEASE_MINUTES} minutes.")
 
-    def ask(self, host, why, items, timeout):
+    def export(self, url, to, why, account="", timeout=ASK_TIMEOUT):
+        """Copy one login into a file under ~/.config/mochi, for a tool that has to hold it itself (Deluge behind
+        HTTP auth: no page to fill). Asked on their phone like a fill; written 0600; the values are never printed.
+        A setup step for them, not for Mochi's runs (the relay never allows it there)."""
+        if self.items is None:
+            return False, "the vault is locked; ask them to run `mochi-vault unlock` in a terminal"
+        why = (why or "").strip()
+        if not why:
+            return False, "say what it's for (--why): it goes on their phone with the question"
+        path = Path(os.path.expanduser(to or ""))
+        try:
+            path.resolve().relative_to(CONF_DIR.resolve())
+        except ValueError:
+            return False, f"a login is copied only into a file under {CONF_DIR}"
+        if path.is_dir() or not path.name:
+            return False, "--to names a file"
+        if not safe_page(url):
+            return False, f"not for {url.split('?')[0]}: only https (or plain http on the local network)"
+        host = urlsplit(url).hostname or ""
+        items = matching(self.items, url)
+        if account:
+            items = [it for it in items if account.lower() in " ".join(
+                [it["name"], it["username"], it.get("email", ""), it.get("login", "")]).lower()]
+        if not items:
+            return False, f"no login of theirs is saved for {host}" + (f" matching {account!r}" if account else "")
+        ok, item = self.ask(host, why, items, timeout, kind="copy")
+        if not ok:
+            return False, item
+        keys = [("USERNAME", item.get("username") or ""), ("EMAIL", item.get("email") or ""),
+                ("LOGIN", item.get("login") or ""), ("PASSWORD", item.get("password") or "")]
+        keys = [(k, v) for k, v in keys if v and "\n" not in v]
+        text = (f"# {label(item)} for {host}: copied by `mochi-vault export` {dt.datetime.now():%Y-%m-%d %H:%M} ({why[:80]})\n"
+                + "".join(f"{k}={v}\n" for k, v in keys))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            os.chmod(tmp, 0o600)
+            tmp.replace(path)
+        except OSError as e:
+            return False, f"couldn't write {path}: {e}"
+        finally:
+            text = None
+        log(f"copied the login {label(item)} for {host} into {path} ({why[:80]})")
+        return True, f"copied the login {item['name']} for {host} into {path} ({', '.join(k for k, _ in keys)}; mode 600)"
+
+    def ask(self, host, why, items, timeout, kind="fill"):
         rid = secrets.token_hex(8)
         req = {"event": threading.Event(), "choice": None, "items": items, "reason": ""}
         with self.lock:
             self.pending[rid] = req
         try:
-            if not self.notify(event="vault_ask", id=rid, host=host, why=why[:300], accounts=[label(i) for i in items]):
+            if not self.notify(event="vault_ask", id=rid, host=host, why=why[:300], accounts=[label(i) for i in items],
+                               kind=kind):
                 return False, "mochi-brain isn't running, so there's no way to ask them"
-            log(f"asking to sign in on {host} ({len(items)} matching) for: {why[:80]}")
+            log(f"asking to {'copy the login for' if kind == 'copy' else 'sign in on'} {host} ({len(items)} matching) for: {why[:80]}")
             if not req["event"].wait(timeout):
                 self.notify(event="vault_done", id=rid, label="⌛ no answer in time")
                 return False, "they didn't answer in time"
@@ -708,6 +762,9 @@ class Vault:
             elif cmd == "fill":
                 ok, msg = self.fill(str(m.get("why") or ""), str(m.get("page") or ""), str(m.get("account") or ""),
                                     bool(m.get("submit", True)))
+            elif cmd == "export":
+                ok, msg = self.export(str(m.get("url") or ""), str(m.get("to") or ""), str(m.get("why") or ""),
+                                      str(m.get("account") or ""))
             elif cmd == "decide":
                 ok, msg = self.decide(str(m.get("id") or ""), m.get("choice"), str(m.get("reason") or ""), peer_pid(conn))
             else:
@@ -801,6 +858,11 @@ def main():
     f.add_argument("--page", default="", help="part of the tab's address, when more than one tab could be meant")
     f.add_argument("--account", default="", help="part of the login's name or username, when they have several")
     f.add_argument("--no-submit", action="store_true", help="fill but don't submit")
+    e = sub.add_parser("export", help="copy one login into a file under ~/.config/mochi (asked on your phone)")
+    e.add_argument("url", help="the site, as a URL: which of your logins")
+    e.add_argument("--to", required=True, help="the file to write (USERNAME=, PASSWORD= lines, mode 600)")
+    e.add_argument("--why", required=True, help="what it's for; shown on your phone")
+    e.add_argument("--account", default="", help="part of the login's name or username, when you have several")
     a = ap.parse_args()
     if a.cmd == "serve":
         Vault().serve()
@@ -826,6 +888,8 @@ def main():
     elif a.cmd == "fill":
         r = request({"cmd": "fill", "why": a.why, "page": a.page, "account": a.account, "submit": not a.no_submit},
                     timeout=ASK_TIMEOUT + 90)
+    elif a.cmd == "export":
+        r = request({"cmd": "export", "url": a.url, "to": a.to, "why": a.why, "account": a.account}, timeout=ASK_TIMEOUT + 90)
     elif a.cmd == "has":
         r = request({"cmd": "has", "url": a.url})
     else:
