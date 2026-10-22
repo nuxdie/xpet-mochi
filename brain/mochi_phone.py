@@ -23,7 +23,8 @@ sender's static key mixed in (the receiver knows who sealed it). The relay token
   mochi-phone media [--days N]   the pictures and clips that came back, with transcripts
   mochi-phone transcribe FILE    (what `serve` does for clips: faster-whisper in Mochi's tools venv)
   mochi-phone log                what was sent
-  mochi-phone tracks [--dry-run] each finished outing as a GPX into wanderer on sff (Uber Eats shifts as Biking)
+  mochi-phone tracks [--dry-run] each finished outing as a GPX into wanderer on sff: walk/bike/transit by speed,
+                                 Uber Eats shifts as Biking, named after the calendar event it went to
   mochi-phone place NAME [--here | LAT LON] [--radius M] | place --list   named places ("home" first): the zones
 
 Config: ~/.config/mochi/phone.json (relay, tokens, keys, home). Data: ~/.local/share/mochi/phone/.
@@ -840,16 +841,99 @@ def outings(cfg):
             >= TRACK_MIN_LEN]
 
 
-def gpx(trip, name):
+def gpx(trip, name, kind="walking"):
     def iso(t):
         return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     pts = "\n".join(f'      <trkpt lat="{e["lat"]:.6f}" lon="{e["lon"]:.6f}">'
                     + (f'<ele>{e["alt"]:.0f}</ele>' if e.get("alt") is not None else "")
                     + f'<time>{iso(e["t"])}</time></trkpt>' for e in trip)
+    name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return (f'<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="mochi-phone" '
             f'xmlns="http://www.topografix.com/GPX/1/1">\n  <metadata><name>{name}</name><time>{iso(trip[0]["t"])}'
-            f'</time></metadata>\n  <trk><name>{name}</name><type>walking</type>\n    <trkseg>\n{pts}\n    </trkseg>\n'
+            f'</time></metadata>\n  <trk><name>{name}</name><type>{kind}</type>\n    <trkseg>\n{pts}\n    </trkseg>\n'
             f'  </trk>\n</gpx>\n')
+
+
+# How they travelled, from the speed between fixes (the phone seldom sends its own): mode -> (phrase for the name,
+# wanderer category, GPX type). Wanderer has no transit category, so a tram or train ride goes under Other.
+TRAVEL = {"walk": ("on foot", "Walking", "walking"), "bike": ("by bike", "Biking", "cycling"),
+          "transit": ("by transit", "Other", "transit")}
+
+
+def travel_mode(trip):
+    """walk / bike / transit for an outing. A leg faster than 30 km/h for 200 m in all is a tram, train or car; most of
+    the moving distance at 7–30 km/h is a bike; the rest is on foot. A slow tram still reads as a bike."""
+    legs = []
+    for a, b in zip(trip, trip[1:]):
+        d, s = distance_m(a["lat"], a["lon"], b["lat"], b["lon"]), b["t"] - a["t"]
+        if s <= 0 or d < max(a.get("acc") or 0, b.get("acc") or 0):
+            continue  # a jump inside the fix's own accuracy is jitter, not movement
+        legs.append((d, d / s * 3.6))
+    moving = sum(d for d, _ in legs)
+    if sum(d for d, kmh in legs if kmh > 30) >= 200:
+        return "transit"
+    if moving and sum(d for d, kmh in legs if 7 <= kmh <= 30) > moving / 2:
+        return "bike"
+    return "walk"
+
+
+# ---- the plan behind an outing: a calendar event they went to names the trail ("match those with calendar invites",
+# 2026-10-20). Only their plans count, never the log calendars (how the time went) or the background ones.
+TRACK_LOG_CALS = {"sleep", "building", "spending", "sidetracking"}
+TRACK_SKIP_CALS = ("Holidays", "F1 Calendar")
+TRACK_LEAVE_BEFORE = 2 * 3600   # an outing that starts this long before an event is them going to it
+
+
+def plans_between(d0, d1):
+    """Their timed plans from day d0 to day d1 inclusive, as (start ts, end ts, title); [] when the calendar is out of
+    reach (the outing is then just 'Out'). Video calls and events they declined don't count: nobody went anywhere."""
+    try:
+        p = subprocess.run(["mochi-calendar", "agenda", "--json", "--from", d0.isoformat(), "--days",
+                            str((d1 - d0).days + 1)], capture_output=True, text=True, timeout=90)
+        evs = json.loads(p.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return []
+    out = []
+    for ev in evs:
+        cal = ev.get("calendar", "")
+        s, e = ev.get("start", {}).get("dateTime"), ev.get("end", {}).get("dateTime")
+        loc = (ev.get("location") or "").lower()
+        if (cal in TRACK_LOG_CALS or cal.startswith(TRACK_SKIP_CALS) or ev.get("status") == "cancelled"
+                or not s or not e  # all day: not a time they went somewhere
+                or ev.get("hangoutLink") or ev.get("conferenceData")  # a video call (a Maps link as location is a place)
+                or any(h in loc for h in ("meet.google", "zoom.us", "teams.microsoft", "whereby", "meet.jit.si"))
+                or any(x.get("self") and x.get("responseStatus") == "declined" for x in ev.get("attendees") or [])):
+            continue
+        title = " ".join((ev.get("summary") or "").split())
+        if title:
+            out.append((dt.datetime.fromisoformat(s).timestamp(), dt.datetime.fromisoformat(e).timestamp(), title))
+    return sorted(out)
+
+
+def plan_for(trip, plans):
+    """The event(s) this outing was for: they set out at most two hours before it (or a quarter of an hour into it,
+    GPS at the door) and were still out when it began. A whole day out with a meeting in the middle, or something
+    that was already running at home when they left (a visit), keeps its plain name."""
+    t0, t1 = trip[0]["t"], trip[-1]["t"]
+    hits = []
+    for s, e, title in plans:
+        if s - TRACK_LEAVE_BEFORE <= t0 <= s + 900 and t1 >= s and e - s <= 12 * 3600 and title not in hits:
+            hits.append(title)
+    return " + ".join(short(h, 48) for h in hits[:2]) or None
+
+
+def short(s, n):
+    """s cut to n characters at a word, with an ellipsis."""
+    if len(s) <= n:
+        return s
+    cut = s[:n].rsplit(" ", 1)[0] if " " in s[:n] else s[:n]
+    return cut.rstrip(" -–,:") + "…"
+
+
+def trail_name(trip, plan, mode, shift):
+    start, end = dt.datetime.fromtimestamp(trip[0]["t"]), dt.datetime.fromtimestamp(trip[-1]["t"])
+    head = "Uber Eats shift" if shift else f"{plan} ({TRAVEL[mode][0]})" if plan else f"Out {TRAVEL[mode][0]}"
+    return f"{head} {start:%a %-d %b %H:%M}–{end:%H:%M}"
 
 
 UBER_APP = "com.ubercab.driver"          # a notification from it during an outing: the outing was a courier shift
@@ -872,26 +956,30 @@ def uber_times():
 
 def tracks(args):
     """mochi-phone tracks [--dry-run]: write each finished outing not sent yet as a GPX and copy it into wanderer's
-    upload folder on sff, which imports it as a trail of theirs; then name and categorise what was imported (an
-    Uber Eats shift is Biking, the rest Walking). Run by mochi-tracks.timer."""
+    upload folder on sff, which imports it as a trail of theirs; then name and categorise what was imported: an Uber
+    Eats shift is Biking, the rest Walking / Biking / Other (transit) by the speed between fixes, and an outing that
+    went to something in their calendar is named after it ("dental cleaning (by bike) Wed 14 Oct 13:19–14:04").
+    Run by mochi-tracks.timer."""
     dry = "--dry-run" in args
     st = jload(TRACKS_STATE, {"sent": []})
     st.setdefault("fix", [])
     uber = uber_times()
+    todo = [t for t in outings(load_config()) if str(t[0]["t"]) not in st["sent"]]
+    plans = []
+    if todo:  # one calendar call for all of them
+        days = [dt.date.fromtimestamp(t[0]["t"]) for t in todo] + [dt.date.fromtimestamp(t[-1]["t"]) for t in todo]
+        plans = plans_between(min(days), max(days))
     new = []
-    for trip in outings(load_config()):
+    for trip in todo:
         oid = str(trip[0]["t"])
-        if oid in st["sent"]:
-            continue
         t0, t1 = trip[0]["t"], trip[-1]["t"]
         shift = any(t0 - 3600 <= u <= t1 for u in uber)  # the check-in reminder comes an hour before the shift
-        start = dt.datetime.fromtimestamp(t0)
-        name = (f"{'Uber Eats shift' if shift else 'Out'} {start:%a %-d %b %H:%M}"
-                f"–{dt.datetime.fromtimestamp(t1):%H:%M}")
+        mode = "bike" if shift else travel_mode(trip)
+        name = trail_name(trip, None if shift else plan_for(trip, plans), mode, shift)
         TRACKS.mkdir(parents=True, exist_ok=True)
-        path = TRACKS / f"{start:%Y%m%d-%H%M}.gpx"
-        path.write_text(gpx(trip, name))
-        new.append((oid, path, name, len(trip), "Biking" if shift else "Walking"))
+        path = TRACKS / f"{dt.datetime.fromtimestamp(t0):%Y%m%d-%H%M}.gpx"
+        path.write_text(gpx(trip, name, TRAVEL[mode][2]))
+        new.append((oid, path, name, len(trip), TRAVEL[mode][1]))
     if dry:
         return "\n".join(f"would send {p.name}: {n} ({k} fixes, {c})" for _, p, n, k, c in new) or "no new outings"
     lines = []

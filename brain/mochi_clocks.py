@@ -12,6 +12,9 @@ request carrying the token from ~/.config/mochi/clocks.json (made on first start
 
   GET  /clock?room=kitchen         what to show: asks, an urgent line, whether a run is going, the sheet's version
   GET  /clock/sheet.png|json       the pig, drawn by `xpet --clock-sheet` in today's costume (redrawn each day)
+  GET  /clock/calendar.ics         the next few days of their plan calendars (not the log ones), titles and times only,
+                                   for the clock's event horizon; the token may come as ?token=, since the clock's
+                                   feed reader sends no headers (its CALENDAR_URL in ~/.config/mochi-clock.env)
   POST /clock/answer               {"id", "label", "room"}: a tap on an ask's option, handed to the relay as an
                                    answer from "clock-<room>", exactly like a click on the desktop pig
   POST /clock/seen                 {"room", "what", "lux"?}: a touch, the kitchen lights going on or off, or
@@ -65,6 +68,9 @@ MEDIA = WORK / "clock" / "media"
 INDEX = WORK / "clock" / "captures.json"
 MAX_SECONDS = 120
 MOTION_EVERY = 60  # a moving room is noted at most this often (the Pi sends more)
+# The calendars that are their time spent, not their plans: never on a wall. F1 is hidden, so agenda skips it anyway.
+LOG_CALENDARS = {"building", "spending", "sidetracking", "sleep", "f1 calendar 2018"}
+CALENDAR_EVERY = 5 * 60  # the clocks ask every ten minutes; Google is asked at most this often
 
 
 def config():
@@ -90,6 +96,38 @@ def clock_options(options):
     return [o for o in options or [] if o.lower() not in DESK_ONLY]
 
 
+def ics_text(s):
+    s = " ".join(str(s).split())
+    return s.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
+
+
+def ics(events):
+    """An iCalendar of the agenda's events (mochi-calendar's --json): title, start, end and nothing else (no place,
+    guests or notes: guests stand in that kitchen). Declined invites stay off; timed events go in UTC."""
+    out = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//mochi//clocks//EN"]
+    for ev in events:
+        if ev.get("status") == "cancelled" or str(ev.get("calendar", "")).lower() in LOG_CALENDARS:
+            continue
+        me = next((x for x in ev.get("attendees", []) if x.get("self")), None)
+        if me and me.get("responseStatus") == "declined":
+            continue
+        s, e = ev.get("start", {}), ev.get("end", {})
+        out += ["BEGIN:VEVENT", f"UID:{ev.get('id', '')}@mochi"]
+        if "date" in s:
+            out.append(f"DTSTART;VALUE=DATE:{s['date'].replace('-', '')}")
+            out.append(f"DTEND;VALUE=DATE:{e.get('date', s['date']).replace('-', '')}")
+        elif s.get("dateTime"):
+            for key, v in (("DTSTART", s), ("DTEND", e if e.get("dateTime") else s)):
+                t = dt.datetime.fromisoformat(v["dateTime"].replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+                out.append(f"{key}:{t:%Y%m%dT%H%M%SZ}")
+        else:
+            out.pop(), out.pop()
+            continue
+        out += [f"SUMMARY:{ics_text(ev.get('summary') or 'busy')}", "END:VEVENT"]
+    out.append("END:VCALENDAR")
+    return ("\r\n".join(out) + "\r\n").encode()
+
+
 class Clocks:
     """The relay's side of the clocks. `asks` returns the relay's pending asks ({id: ask}), `busy` the kind of the run
     going (or None); a tap on an answer goes to the relay's own socket `sock`, as the pig would send it."""
@@ -103,6 +141,28 @@ class Clocks:
         self.seen = self.load_seen()
         self.drawing = False
         self.cfg = config()
+        self.cal = (0.0, None)  # (when, the .ics bytes): the last good calendar feed
+        self.cal_lock = threading.Lock()
+
+    def calendar(self):
+        """The plan calendars from yesterday to four days out, as the clock's feed reader wants them. A failed fetch
+        serves the last good feed (or none), so a Google hiccup doesn't empty the horizon."""
+        with self.cal_lock:  # both clocks ask at once: one fetch
+            at, body = self.cal
+            if body is not None and time.time() - at < CALENDAR_EVERY:
+                return body
+            cmd = shutil.which("mochi-calendar") or str(HOME / ".local/bin/mochi-calendar")
+            since = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+            try:
+                p = subprocess.run([cmd, "agenda", "--from", since, "--days", "5", "--json"],
+                                   capture_output=True, text=True, timeout=60)
+                if p.returncode != 0:
+                    raise OSError((p.stderr or p.stdout).strip()[:200])
+                body = ics(json.loads(p.stdout))
+                self.cal = (time.time(), body)
+            except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+                self.log(f"clocks: calendar not fetched: {e}")
+            return body
 
     # -- what the relay tells the clocks
 
@@ -288,8 +348,11 @@ class Clocks:
                 pass
 
             def authorized(self):
-                got = self.headers.get("Authorization", "").removeprefix("Bearer ").encode()
-                return hmac.compare_digest(got, token)
+                got = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                u = urlparse(self.path)
+                if not got and u.path == "/clock/calendar.ics":  # the clock's feed reader can't send a header
+                    got = (parse_qs(u.query).get("token") or [""])[0]
+                return hmac.compare_digest(got.encode(), token)
 
             def reply(self, code, body=b"", ctype="application/json"):
                 self.send_response(code)
@@ -322,6 +385,9 @@ class Clocks:
                     except OSError:
                         return self.reply(404)
                     return self.reply(200, data, "image/png" if f.suffix == ".png" else "application/json")
+                if u.path == "/clock/calendar.ics":
+                    body = clocks.calendar()
+                    return self.reply(200, body, "text/calendar") if body is not None else self.reply(503)
                 self.reply(404)
 
             def do_POST(self):
