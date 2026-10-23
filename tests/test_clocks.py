@@ -81,6 +81,26 @@ class Server(unittest.TestCase):
             self.call("/clock?room=kitchen", token="wrong")
         self.assertEqual(e.exception.code, 401)
 
+    def test_calendar_feed_token_in_query_plans_only(self):
+        self.clocks.cal = (time.time(), mc.ics([
+            {"calendar": "life", "summary": "dentist, upstairs", "location": "somewhere",
+             "start": {"dateTime": "2026-10-22T15:00:00+02:00"}, "end": {"dateTime": "2026-10-22T16:00:00+02:00"}},
+            {"calendar": "Family", "summary": "trip", "start": {"date": "2026-10-23"}, "end": {"date": "2026-10-25"}},
+            {"calendar": "sleep", "summary": "slept", "start": {"date": "2026-10-22"}, "end": {"date": "2026-10-23"}},
+            {"calendar": "artem@tsatsin.com", "summary": "skipped call", "attendees": [
+                {"self": True, "responseStatus": "declined"}],
+             "start": {"dateTime": "2026-10-22T10:00:00Z"}, "end": {"dateTime": "2026-10-22T11:00:00Z"}}]))
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/clock/calendar.ics?token=sekrit", timeout=3) as r:
+            t = r.read().decode()
+        self.assertIn("DTSTART:20261022T130000Z\r\nDTEND:20261022T140000Z\r\nSUMMARY:dentist\\, upstairs", t)
+        self.assertIn("DTSTART;VALUE=DATE:20261023\r\nDTEND;VALUE=DATE:20261025", t)
+        self.assertNotIn("slept", t)
+        self.assertNotIn("skipped", t)
+        self.assertNotIn("somewhere", t)
+        with self.assertRaises(urllib.error.HTTPError) as e:  # the query token is for the feed alone
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/clock?room=kitchen&token=sekrit", timeout=3)
+        self.assertEqual(e.exception.code, 401)
+
     def test_feed_urgent_first_and_no_desk_only_options(self):
         f = self.call("/clock?room=kitchen")
         self.assertEqual([a["id"] for a in f["asks"]], ["disk", "vat", "brief"])

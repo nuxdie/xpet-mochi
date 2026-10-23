@@ -447,6 +447,34 @@ there in every round, task and chat:
 - a round may look and click; typing into forms, uploads and `evaluate_script` are only in runs you approved or chats;
 - screenshots can only be written under `reports/` in its workspace. `mochi-browser status` shows the whole chain.
 
+### Your downloads (mochi-torrent)
+
+`brain/mochi_torrent.py` (installed as `mochi-torrent`) lets Mochi search rutracker.org with your account and add
+downloads on your Deluge. rutracker sits behind Cloudflare and shows its search to members only, so the tool doesn't
+fetch pages itself: it opens a tab in Mochi's Chrome (started hidden if it isn't up), reads the page there, and closes
+the tab; log Mochi's Chrome into rutracker once (`mochi-browser open https://rutracker.org/forum/login.php`, or let
+Mochi do it with `mochi-vault fill` in a run you asked for) and the profile keeps the session. `search WORDS [--sort
+seeds|date|size]`, `show TOPIC` (size, seeds, magnet, the description's start) and `status [--all]` (what Deluge is
+doing, where downloads land, labels) are allowed in every run; `add TOPIC|MAGNET [--to DIR] [--label L] [--paused]
+--why TEXT` downloads the .torrent inside that tab (it carries your passkey) and hands it to Deluge's web JSON-RPC
+base64, only in runs you asked for or approved. Nothing removes a torrent; every add is in `mochi-torrent log`.
+
+Deluge's side: `"torrent": {"deluge": {"url": "https://host/deluge/"}}` in `sources.json`, then `mochi-torrent
+setup` once: it asks on your phone (through mochi-vault, like a sign-in) to copy your Bitwarden login for that host
+into `~/.config/mochi/deluge.env` (mode 600; `mochi-vault export`, a command the relay never allows Mochi), then tries
+Deluge's own web password (that one, or the default) and stores what worked. The brief's rule is the mail rule: Mochi
+adds on its own only what you asked for in so many words; a wish it noticed becomes an ask.
+
+**Lossless to MP3 320** (`brain/mochi_music.py`, installed as `mochi-music`). Your seedbox mirrors finished downloads
+into `Downloads/` on the NAS, whose home share is mounted at `~/share` (`music.nas_root` in `sources.json`).
+`mochi-torrent add ... --convert` or `mochi-music queue TORRENT` puts a lossless download on a list;
+`dist/mochi-music.timer` runs `mochi-music sync` every 15 minutes, which converts each entry once Deluge reports it
+finished and the folder on the NAS is complete: FLAC/APE/ALAC/WavPack/WAV to MP3 320 CBR with tags (ffmpeg, three at a
+time), a single image with a .cue split into tracks, covers copied, into `Music/<folder name minus the format tags>`.
+The source stays where it is (seeding), nothing is deleted, every album is a line in `mochi-music log`, and a
+finished batch pokes the relay (`mochi-brain --trigger`) so Mochi can tell you. `mochi-music convert DIR` does one
+folder by hand.
+
 ## Talking to it
 
 The pig listens on a user-only Unix datagram socket (`$XDG_RUNTIME_DIR/xpet.sock`), one flat JSON object per message:

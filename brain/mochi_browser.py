@@ -344,8 +344,10 @@ def in_use():
     lock = PROFILE / "SingletonLock"
     try:
         pid = int(os.readlink(lock).rpartition("-")[2])
-        os.kill(pid, 0)
-        return True
+        # a Chrome killed outright leaves its lock behind, and the pid may be live again as something else (or a
+        # zombie): only a process that is a Chrome on this profile counts
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        return f"user-data-dir={PROFILE}" in cmd
     except (OSError, ValueError):
         return False
 

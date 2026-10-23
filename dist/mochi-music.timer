@@ -1,0 +1,11 @@
+[Unit]
+Description=Look every 15 minutes for lossless albums to convert (mochi-music)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=1min
+Unit=mochi-music.service
+
+[Install]
+WantedBy=timers.target
