@@ -984,6 +984,8 @@ public:
             anim.action = art3d::Action::Idle;  // caught before it dropped: no running on the air in your hand
         if (rolling() && (st != St::Idle || !grounded() || std::fabs(vx) > 0.1 || closeupOn()))
             anim.action = art3d::Action::Idle;  // picked up or called away mid-rub: up at once (a pop, accepted)
+        if (anim.action == art3d::Action::Rub && (st != St::Idle || !grounded() || std::fabs(vx) > 0.1))
+            anim.action = art3d::Action::Idle;  // picked up off its scratching post, or off somewhere
         if (st == St::Sleep && !lyingDown() && tick % 40 == 0) spawn(1);
         updateActivity();
         if (bubbleLeft > 0) bubbleLeft -= dt;
@@ -1173,6 +1175,10 @@ public:
         if (anim.action == art3d::Action::Sneeze && anim.actionT > anim.actionLen * art3d::SNEEZE_SHUT &&
             anim.actionT < anim.actionLen * art3d::SNEEZE_OPEN)
             eyes = art::Eyes::Closed;  // nobody sneezes with their eyes open
+        if (anim.action == art3d::Action::Rub) {  // a good scratch: content, and eyes shut in the best of it
+            double q = anim.actionT / anim.actionLen;
+            if (q > art3d::RUB_FROM && q < art3d::RUB_TO) eyes = q > art3d::RUB_BLISS && q < art3d::RUB_BLISS_END ? art::Eyes::Closed : art::Eyes::Happy;
+        }
         bool mirror = dir < 0;
         art::Prop prop = art::Prop::Nothing;
         if (working) {
@@ -1308,6 +1314,8 @@ private:
     double launchVx = 0, launchVy = 0;
     bool hanging = false;                  // its window went: standing on thin air until Whoops ends (whoops())
     double whoopsAt = -1e9;
+    static constexpr double RUB_GAP = 240;  // a scratch on the screen's edge: at most one in four minutes (rubOnEdge)
+    double rubbedAt = -1e9;
     // the belly rub: this many pets within ten seconds roll it over, not twice within ROLL_GAP; rubs extend the lie-down
     static constexpr size_t ROLL_PETS = 4;
     static constexpr double ROLL_GAP = 120;
@@ -1995,6 +2003,19 @@ private:
         anim.start(art3d::Action::Whoops, art3d::WHOOPS_SECS);
     }
 
+    // Strolling into the edge of the screen (the bezel, the side of a monitor taller than the next): now and then,
+    // instead of just turning back, it backs up to it and scratches its rump on it like a pig on a post. Only on a
+    // plain walk (not chasing your pointer), nothing else going on, and not twice within RUB_GAP.
+    void rubOnEdge() {
+        double t = now();
+        if (anim.busy() || !grounded() || deskProp != art::Prop::Nothing || menu.open || closeupOn() || hidden ||
+            t - rubbedAt < RUB_GAP || !chance(0.35))
+            return;
+        rubbedAt = t;
+        set(St::Idle, art3d::RUB_SECS + 0.3);  // the walk turned it round already (dir), so the pet swings its rump in
+        anim.start(art3d::Action::Rub, art3d::RUB_SECS);
+    }
+
     void fall() {
         vy = 0;
         if (st != St::Walk && st != St::Play) vx = 0;
@@ -2005,7 +2026,12 @@ private:
         double nx = px + dir * speed;
         // Blocked: turn round and stand. vx must go to zero here, or a pig blocked on both sides (chasing the
         // pointer at a screen edge, a ledge shorter than its margins) keeps the walk pose and runs on the spot.
-        if (!D.inMonitors(nx + dir * 20, py - 10)) { dir = -dir; vx = 0; return; }
+        if (!D.inMonitors(nx + dir * 20, py - 10)) {
+            dir = -dir;  // its back to the edge now: sometimes that's the moment for a good scratch on it
+            vx = 0;
+            if (st == St::Walk) rubOnEdge();
+            return;
+        }
         double margin = sg.id == FLOOR ? 20 : 4;
         bool pastEdge = dir > 0 ? nx > sg.x2 - margin : nx < sg.x1 + margin;
         if (pastEdge && sg.id != FLOOR) {
@@ -2235,6 +2261,11 @@ int writeStrip(const std::string& name, const char* path) {
                 f.pose = art3d::Pose::Stand; f.prop = art3d::Prop::Nothing;
                 if (row == 2) f.yaw = 150;
                 if (p > 0.3 && p < 0.9) f.eyes = art::Eyes::Happy;
+            }
+            if (a->action == art3d::Action::Rub) {  // standing, back to an edge on either side: the third row the other way
+                f.pose = art3d::Pose::Stand; f.prop = art3d::Prop::Nothing;
+                if (row == 2) f.yaw = 150;
+                if (p > art3d::RUB_FROM && p < art3d::RUB_TO) f.eyes = p > art3d::RUB_BLISS && p < art3d::RUB_BLISS_END ? art::Eyes::Closed : art::Eyes::Happy;
             }
             if (a->action == art3d::Action::Sneeze && p > art3d::SNEEZE_SHUT && p < art3d::SNEEZE_OPEN) f.eyes = art::Eyes::Closed;
             f.t = 1.0 + p * a->secs;

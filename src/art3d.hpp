@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops, Roll };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops, Roll, Rub };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -167,7 +167,12 @@ inline const ActionInfo ACTIONS[] = {
     {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},         {"stir", Action::Stir, 2.8},
     {"chase", Action::Chase, 3.0},     {"sneeze", Action::Sneeze, 2.0},       {"ride", Action::Ride, 2.0},
     {"leap", Action::Leap, 1.3},       {"whoops", Action::Whoops, 1.2},     {"roll", Action::Roll, 4.2},
+    {"rub", Action::Rub, 3.6},
 };
+// Rub: walking into the edge of the screen it sometimes turns round, backs up to it and scratches its rump on it, the
+// way pigs use a post. The pet turns it (its back to the edge) over the first moments; it rubs from RUB_FROM to RUB_TO,
+// eyes happy, shut in the best of it (RUB_BLISS to RUB_BLISS_END), then a shake and it's done.
+constexpr double RUB_FROM = 0.18, RUB_TO = 0.82, RUB_BLISS = 0.48, RUB_BLISS_END = 0.7, RUB_SECS = 3.6;
 // Roll: petted a few times in a row it flops onto its side for a belly rub, belly toward you, and gets back up.
 // ROLL_OVER is how far over it goes (degrees; 90 is flat on its side, a little more tips the belly up toward you);
 // from ROLL_RUB_FROM to ROLL_RUB_TO it lies there with its legs out, and a pet then keeps it there a little longer
@@ -565,6 +570,37 @@ inline Rig actionRig(Action a, double p, double t, int flank = 1) {
             r.tail = 40 * std::sin(t * 14) * rub + 20 * std::sin(t * 12) * fold;
             r.ear = 35 * rub + (20 + 25 * std::sin(t * 30 + 2.2)) * shake - 6 * fold;  // flopped out; flapping in the shake
             r.earSwing = 8 * rub;
+            break;
+        }
+        case Action::Rub: {  // backed up to the edge of the screen, scratching its rump on it, then a shake
+            // The pet has turned it round, back to the edge, by the time the rub starts. It shuffles back against it,
+            // then works its rump up and down (a half-squat on the hind legs and back up, about one and a half strokes
+            // a second) with the rump sweeping side to side across the edge, nose up, ears back, tail going. The strokes
+            // get deeper in the best of it (the pet shuts the eyes), and it ends with a shake: that's better.
+            // The front hooves stay planted: dropping the body by bodyY, it pitches nose-up just enough to keep the
+            // front hips at their height (the pivot is the rear-bottom corner, front hips 14 ahead of it), and the hind
+            // legs swing forward under it until they reach the floor from the lowered rear hips (2 ahead of the pivot).
+            double back = smoothstep((p - 0.1) / 0.1) * (1 - smoothstep((p - RUB_TO) / 0.06));
+            double rub = smoothstep((p - RUB_FROM) / 0.08) * (1 - smoothstep((p - RUB_TO) / 0.08));
+            double bliss = env((p - RUB_BLISS + 0.06) / (RUB_BLISS_END - RUB_BLISS + 0.12));
+            double shake = env((p - 0.84) / 0.16);
+            double d = 0.5 - 0.5 * std::cos(t * 6);  // 0 up, 1 down: the stroke, about one a second
+            r.bodyY = -(0.3 + (2.6 + 0.7 * bliss) * d) * rub;  // down to a half-sit against the edge, and back up
+            double pitch = std::asin(std::clamp(-r.bodyY / 14, 0.0, 1.0));
+            r.bodyPitch = pitch / DEG;
+            double rearHip = 6 + r.bodyY + 2 * std::sin(pitch);
+            r.leg[2] = r.leg[3] = std::acos(std::clamp(rearHip / 6, -1.0, 1.0)) / DEG;
+            r.leg[0] = r.leg[1] = 8 * back;  // braced, pushing back
+            r.bodyX = -0.7 * back;           // up against the edge
+            r.yaw = 6 * std::sin(t * 4) * rub;  // the rump sweeps across it
+            r.bodyRoll = 4 * std::sin(t * 4 + 0.5) * rub + 13 * std::sin(t * 32) * shake;
+            r.headPitch = -12 * rub - 8 * bliss;
+            r.headRoll = 7 * std::sin(t * 2.5) * rub + 22 * std::sin(t * 32 + 1.2) * shake;
+            r.headYaw = 8 * std::sin(t * 16) * shake;
+            r.snout = 1 + 0.12 * bliss;
+            r.tail = 25 * std::sin(t * 8) * rub + 40 * std::sin(t * 30) * shake;
+            r.ear = (-6 + 8 * d) * rub + (25 + 30 * std::sin(t * 32 + 2.2)) * shake;  // flopping with each stroke
+            r.earSwing = -12 * rub;
             break;
         }
         case Action::Sniff:  // nose to the ground, snout working
