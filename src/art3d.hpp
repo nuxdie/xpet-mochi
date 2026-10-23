@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops, Roll };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -166,8 +166,13 @@ inline const ActionInfo ACTIONS[] = {
     {"rouse", Action::Rouse, 3.0},     {"bedtime", Action::Bedtime, 3.2},   {"perk", Action::Perk, 2.2},
     {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},         {"stir", Action::Stir, 2.8},
     {"chase", Action::Chase, 3.0},     {"sneeze", Action::Sneeze, 2.0},       {"ride", Action::Ride, 2.0},
-    {"leap", Action::Leap, 1.3},       {"whoops", Action::Whoops, 1.2},
+    {"leap", Action::Leap, 1.3},       {"whoops", Action::Whoops, 1.2},     {"roll", Action::Roll, 4.2},
 };
+// Roll: petted a few times in a row it flops onto its side for a belly rub, belly toward you, and gets back up.
+// ROLL_OVER is how far over it goes (degrees; 90 is flat on its side, a little more tips the belly up toward you);
+// from ROLL_RUB_FROM to ROLL_RUB_TO it lies there with its legs out, and a pet then keeps it there a little longer
+// (main.cpp onPet). The side it rolls to follows which flank faces you (Frame::flank).
+constexpr double ROLL_OVER = 100, ROLL_RUB_FROM = 0.38, ROLL_RUB_TO = 0.76, ROLL_SECS = 4.2;
 // Whoops: the window it stood on has gone, and like a cartoon it doesn't notice at once. The pet holds it in the air
 // for the whole action (standing on nothing) and lets it drop at the end; from WHOOPS_LOOK to WHOOPS_RUN it looks round
 // at you (the pet points the eyes), then its legs start running on the air.
@@ -220,6 +225,7 @@ struct Frame {
     double lookX = 0, lookY = 0, lookW = 0;  // a point to look at, relative to the head (screen px), and how much to care
     int lookKind = 0;                         // 0 nothing, 1 that point, 2 you (out of the screen)
     const Costume* costume = nullptr;         // what it's wearing today (wardrobe.hpp), if anything
+    int flank = 0;                            // which flank faces you: +1 its +z side (yaw near 30), -1 (near 150); 0: work it out from yaw
 };
 
 // Every number that moves. Base + motion + actions add up into one of these each frame.
@@ -515,11 +521,52 @@ inline Rig jumpRig(double p, double t, double c, double secs, double big) {
     return r;
 }
 
-// One-shot overlays. p runs 0 → 1 over the action's length.
-inline Rig actionRig(Action a, double p, double t) {
+// One-shot overlays. p runs 0 → 1 over the action's length. `flank` is the side of the pig toward you (Frame::flank,
+// resolved), for the one action that cares which way it falls.
+inline Rig actionRig(Action a, double p, double t, int flank = 1) {
     Rig r;
     double e = env(p);
     switch (a) {
+        case Action::Roll: {  // flops over onto its side for a belly rub, legs in the air, then springs back up
+            // Belly toward you: it rolls away from the flank you see. Four beats: a quick dip; it drops onto folded legs
+            // and rolls over in one motion (about the body's centre, bodyY keeping the lowest point on the floor as it
+            // turns); on its side the legs come out and paddle, the body wriggles against the floor, the head twists up
+            // toward you, tail going; then, legs tucked again, it flips back the way it came and gets up with a small
+            // shake. The pet keeps it in the rub longer while you pet it (onPet). Ends at zero.
+            const double k = flank < 0 ? -1 : 1;
+            double dip = env(p / 0.1);
+            double sink = smoothstep((p - 0.05) / 0.14);                                            // down onto folded legs
+            double over = smoothstep((p - 0.12) / 0.24) * (1 - smoothstep((p - 0.82) / 0.1));      // over, and back
+            double out = smoothstep((p - 0.3) / 0.1) * (1 - smoothstep((p - ROLL_RUB_TO) / 0.06));  // legs out of the fold
+            double rub = smoothstep((p - ROLL_RUB_FROM) / 0.08) * (1 - smoothstep((p - ROLL_RUB_TO) / 0.06));
+            double up = smoothstep((p - 0.9) / 0.08);  // back on its feet
+            double shake = env((p - 0.9) / 0.1), settle = env((p - 0.93) / 0.07);
+            double fold = sink * (1 - out) * (1 - up), down = sink * (1 - up);
+            double th = ROLL_OVER * over * DEG;
+            // The body's lowest point stays on the floor as it turns: half 4 tall, half 5 wide, plus the folded legs
+            // (2 thick) while they're still under it. Standing height is 10 (legs 6, half the body).
+            double rest = 4 * std::fabs(std::cos(th)) + 5 * std::fabs(std::sin(th)) + 2 * std::max(0.0, std::cos(th)) * fold;
+            r.centred = 1 - smoothstep((p - 0.96) / 0.04);
+            r.bodyY = (rest - 10) * down + (0.3 + 0.15 * std::fabs(std::sin(t * 9))) * rub;
+            r.bodyRoll = -k * (ROLL_OVER * over + 5 * std::sin(t * 9) * rub) + 6 * std::sin(t * 30) * shake;
+            r.bodyPitch = 3 * std::sin(t * 4.5) * rub;  // rocking head to tail
+            r.bodyX = 0.3 * std::sin(t * 9) * rub;      // shuffling against the floor
+            r.scaleY = 1 - 0.06 * dip - 0.08 * settle;
+            r.scaleXZ = 1 + 0.03 * dip + 0.04 * settle;
+            r.leg[0] = 90 * fold + 18 * std::sin(t * 7) * rub;  // folded as in Sleep; out, they paddle in turn
+            r.leg[1] = 90 * fold - 18 * std::sin(t * 7) * rub;
+            r.leg[2] = -90 * fold + 22 * std::sin(t * 7 + 0.6) * rub;
+            r.leg[3] = -90 * fold - 22 * std::sin(t * 7 + 0.6) * rub;
+            for (int i = 0; i < 4; ++i) r.splay[i] = (i % 2 ? -1 : 1) * (8 + 8 * std::max(0.0, std::sin(t * 7 + i * 1.5))) * rub;  // spread, kicking
+            r.headPitch = 6 * dip - 4 * rub;
+            r.headRoll = k * (10 + 4 * std::sin(t * 3)) * rub + 18 * std::sin(t * 30) * shake;  // head twisted back toward upright
+            r.headYaw = k * (25 + 5 * std::sin(t * 3)) * rub;                                   // nose up at you
+            r.snout = 1 + 0.08 * std::fabs(std::sin(t * 6)) * rub;
+            r.tail = 40 * std::sin(t * 14) * rub + 20 * std::sin(t * 12) * fold;
+            r.ear = 35 * rub + (20 + 25 * std::sin(t * 30 + 2.2)) * shake - 6 * fold;  // flopped out; flapping in the shake
+            r.earSwing = 8 * rub;
+            break;
+        }
         case Action::Sniff:  // nose to the ground, snout working
             r.headPitch = 38 * e;
             r.bodyY = -0.6 * e;
@@ -943,11 +990,12 @@ struct Animator {
         }
         if (action != Action::Idle) {
             actionT += dt;
-            r = r + actionRig(action, actionT / actionLen, f.t);
+            int flank = f.flank ? f.flank : (std::cos(f.yaw * DEG) >= 0 ? 1 : -1);  // the side toward the camera (at +z)
+            r = r + actionRig(action, actionT / actionLen, f.t, flank);
             if (actionT >= actionLen) {
                 // Where it ended becomes the base, which eases on to the pose from there: most actions end at zero,
                 // but one that finishes in another shape (Bedtime, lying down) then hands over without a pop.
-                Rig end = actionRig(action, 1.0, f.t);
+                Rig end = actionRig(action, 1.0, f.t, flank);
                 end.yaw = 0;  // a whole turn is no turn
                 base = base + end;
                 action = Action::Idle;
@@ -1384,7 +1432,7 @@ inline HeadPos renderStill(cairo_t* cr, const Frame& f, double cx, double baseY,
     for (int i = 0; i < 60; ++i) { g.t = f.t - (60 - i) / 30.0; a.update(g); }
     g.t = f.t;
     Rig r = a.update(g);
-    if (act != Action::Idle) r = r + actionRig(act, actP, g.t);
+    if (act != Action::Idle) r = r + actionRig(act, actP, g.t, g.flank ? g.flank : (std::cos(g.yaw * DEG) >= 0 ? 1 : -1));
     return render(cr, g, r + extra, cx, baseY, scale);
 }
 

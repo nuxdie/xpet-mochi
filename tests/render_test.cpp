@@ -103,6 +103,13 @@ int main() {
                 snprintf(name, sizeof name, "stir-%s@%.0f-%.2f", c ? c->name.c_str() : "bare", yaw, p);
                 frame(name, f, Action::Stir, p);  // asleep, the ear up and the head off its chin
             }
+    for (const Costume* c : dressed)  // rolled over for a belly rub: on its side, legs out, a hat lying along the floor
+        for (double yaw : {30.0, 90.0, 150.0, 315.0})
+            for (double p : {0.2, 0.45, 0.6, 0.85}) {
+                Frame f; f.yaw = yaw; f.t = 1.1 + p; f.costume = c;
+                char name[96]; snprintf(name, sizeof name, "roll-%s@%.0f-%.2f", c ? c->name.c_str() : "bare", yaw, p);
+                frame(name, f, Action::Roll, p);
+            }
     for (const Costume* c : dressed)  // cheering at the desk: turned round to you, reared up, hooves high
         for (double p : {0.4, 0.55}) {
             Frame f; f.pose = Pose::Sit; f.prop = Prop::Laptop; f.yaw = 90; f.t = 1.1; f.costume = c;

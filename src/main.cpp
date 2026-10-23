@@ -751,8 +751,11 @@ public:
             return;
         }
         if (ev == "trick") {  // any action in art3d::ACTIONS, by name: for trying things out, and for the brain
-            if (const art3d::ActionInfo* a = art3d::actionNamed(get("name")); a && grounded() && st != St::Sleep)
-                anim.start(a->action, atof(get("secs").c_str()) > 0 ? clampd(atof(get("secs").c_str()), 0.2, 10) : a->secs);
+            if (const art3d::ActionInfo* a = art3d::actionNamed(get("name")); a && grounded() && st != St::Sleep) {
+                if (a->action == art3d::Action::Roll) {  // needs the pet's own setup (standing still, no desk)
+                    if ((st == St::Idle || st == St::Sit) && deskProp == art::Prop::Nothing) rollOver();
+                } else anim.start(a->action, atof(get("secs").c_str()) > 0 ? clampd(atof(get("secs").c_str()), 0.2, 10) : a->secs);
+            }
             return;
         }
         if (ev == "wear") {  // a costume by name, "none", or "auto" (back to the calendar in wardrobe.hpp)
@@ -979,6 +982,8 @@ public:
             anim.action = art3d::Action::Idle;  // picked up or off somewhere: no spinning on the move
         if (anim.action == art3d::Action::Whoops && st == St::Drag)
             anim.action = art3d::Action::Idle;  // caught before it dropped: no running on the air in your hand
+        if (rolling() && (st != St::Idle || !grounded() || std::fabs(vx) > 0.1 || closeupOn()))
+            anim.action = art3d::Action::Idle;  // picked up or called away mid-rub: up at once (a pop, accepted)
         if (st == St::Sleep && !lyingDown() && tick % 40 == 0) spawn(1);
         updateActivity();
         if (bubbleLeft > 0) bubbleLeft -= dt;
@@ -1163,6 +1168,8 @@ public:
         if (lyingDown() && anim.actionT > anim.actionLen * art3d::BEDTIME_EYES) eyes = art::Eyes::Closed;
         bool chasing = anim.action == art3d::Action::Chase;
         if (chasing && anim.actionT > anim.actionLen * art3d::CHASE_SPIN) eyes = art::Eyes::Happy;  // this is fun
+        bool rolled = rolling();
+        if (rolled && anim.actionT > anim.actionLen * 0.3 && anim.actionT < anim.actionLen * 0.9) eyes = art::Eyes::Happy;  // bliss
         if (anim.action == art3d::Action::Sneeze && anim.actionT > anim.actionLen * art3d::SNEEZE_SHUT &&
             anim.actionT < anim.actionLen * art3d::SNEEZE_OPEN)
             eyes = art::Eyes::Closed;  // nobody sneezes with their eyes open
@@ -1197,7 +1204,9 @@ public:
         // A cheer turns round to you even at the desk (it's showing you the job is done), then back to the work.
         bool cheering = anim.action == art3d::Action::Cheer;
         bool faceYou = (((bubbleLeft > 0 || happyLeft > 0) && !atDesk) || cheering) && !lyingDown() && !chasing && (pose == art::Pose::Stand || pose == art::Pose::Sit);
-        double targetYaw = closeupOn() ? (backingOff ? 270 : 90) : faceYou ? 90 : atDesk ? deskYaw : (mirror ? 150 : 30);
+        // Rolled over it stays put, whichever way it was facing (petted, that's usually toward you, which reads best:
+        // face to you, legs out to one side); the rig rolls it belly toward the flank you see.
+        double targetYaw = rolled ? yaw : closeupOn() ? (backingOff ? 270 : 90) : faceYou ? 90 : atDesk ? deskYaw : (mirror ? 150 : 30);
         double turn = std::fmod(targetYaw - yaw + 540, 360) - 180;  // shortest way round
         yaw = std::fmod(yaw + turn * 0.16 + 360, 360);
         art3d::Frame fr;
@@ -1207,9 +1216,10 @@ public:
         fr.tint = dayTint();
         fr.talking = bubbleLeft > 0; fr.happy = happyLeft > 0; fr.hungry = s.food < 25 && !working;
         fr.progress = st == St::Eat ? 1 - clampd(stLeft / 4, 0, 1) : 0;
-        fr.lookX = lookX; fr.lookY = lookY; fr.lookW = lyingDown() || chasing ? 0 : lookW; fr.lookKind = lookKind;  // no glances mid-turn
+        fr.lookX = lookX; fr.lookY = lookY; fr.lookW = lyingDown() || chasing || rolled ? 0 : lookW; fr.lookKind = lookKind;  // no glances mid-turn
         fr.propX = deskX; fr.propZ = deskZ; fr.propYaw = deskPropYaw;
         fr.costume = costume;
+        fr.flank = rollFlank;  // which way a roll goes (settled when it starts, so the side can't flip mid-roll)
         art3d::Rig rig = anim.update(fr) + rideLean();
         // In the air the pig spins about its middle: draw it a bit higher so nothing leaves the window.
         airLift += ((st == St::Air || st == St::Drag ? 30.0 : 0.0) - airLift) * 0.25;
@@ -1298,6 +1308,11 @@ private:
     double launchVx = 0, launchVy = 0;
     bool hanging = false;                  // its window went: standing on thin air until Whoops ends (whoops())
     double whoopsAt = -1e9;
+    // the belly rub: this many pets within ten seconds roll it over, not twice within ROLL_GAP; rubs extend the lie-down
+    static constexpr size_t ROLL_PETS = 4;
+    static constexpr double ROLL_GAP = 120;
+    double rolledAt = -1e9;
+    int rubs = 0, rollFlank = 1;
     double bubX = -1, bubY = -1;           // where the bubble hangs: eased toward the head so it doesn't jiggle
     double previewUntil = 0, nextBlink = 3, snuffleAt = 0;
     double winFocusAt = 0, lastVisit = 0;
@@ -1552,6 +1567,7 @@ private:
 
     void onPet() {
         double t = now();
+        if (rolling()) { bellyRub(); return; }  // on its side already: this is the belly rub it rolled over for
         petTimes.push_back(t);
         while (!petTimes.empty() && t - petTimes.front() > 10) petTimes.pop_front();
         if (st == St::Sleep) {
@@ -1570,9 +1586,46 @@ private:
         s.fun += 4;
         s.clamp();
         happyLeft = 1.5;
-        anim.start(chance(0.7) ? art3d::Action::Nuzzle : art3d::Action::Wiggle, 1.3);
         spawn(0);
+        // Kept at it (a few pets in a row), it flops over for a belly rub: standing on the floor with nothing else going
+        // on, and not again for a while. Sitting, it gets up first, so the next pet rolls it; at its desk, never.
+        if (petTimes.size() >= ROLL_PETS && canRoll()) { rollOver(); return; }
+        if (petTimes.size() >= ROLL_PETS - 1 && st == St::Sit && deskProp == art::Prop::Nothing) set(St::Idle, 10);
+        anim.start(chance(0.7) ? art3d::Action::Nuzzle : art3d::Action::Wiggle, 1.3);
         if (chance(0.35)) say(pick(lines::pet), 2);
+    }
+
+    // The belly rub (art3d Action::Roll). It rolls about its middle, so only from a settled stand (a sitting body still
+    // easing up would hop as the pivot moved); the spin would sweep through the laptop, so not beside the desk.
+    bool rolling() const { return anim.action == art3d::Action::Roll; }
+    bool canRoll() const {
+        return st == St::Idle && grounded() && deskProp == art::Prop::Nothing && !menu.open && !closeupOn() && !hidden &&
+               std::fabs(anim.base.bodyPitch) < 2 && now() - rolledAt > ROLL_GAP;
+    }
+    void rollOver() {
+        rolledAt = now();
+        rubs = 0;
+        // Belly toward the flank you see; facing you (where it usually is when petted) that's a toss-up, so it flops
+        // toward your hand. Settled here, not per frame: at yaw 90 the sign would flicker and the roll with it.
+        double c = std::cos(yaw * M_PI / 180);
+        rollFlank = std::fabs(c) < 0.1 ? (ptrX < px ? 1 : -1) : c > 0 ? 1 : -1;
+        petTimes.clear();  // the rub that follows is never "too much"
+        set(St::Idle, art3d::ROLL_SECS + 1);  // no wandering off while it's on its side
+        anim.start(art3d::Action::Roll, art3d::ROLL_SECS);
+        idleActionIn = frand(6, 12);  // not another trick straight after
+    }
+    // A pet while it lies there: hearts, and the rub goes on a little longer (up to a point: it does get up eventually).
+    void bellyRub() {
+        s.fun += 2;
+        s.clamp();
+        happyLeft = 1.5;
+        spawn(0);
+        double len = anim.actionLen;
+        if (anim.actionT > len * art3d::ROLL_RUB_FROM && anim.actionT < len * art3d::ROLL_RUB_TO && rubs < 8) {
+            anim.actionT = std::min(anim.actionT, len * 0.5);
+            ++rubs;
+        }
+        stLeft = std::max(stLeft, len - anim.actionT + 1);
     }
 
     // Where the pig and its bubble are, in root coordinates: the panel keeps out of this.
@@ -2178,6 +2231,11 @@ int writeStrip(const std::string& name, const char* path) {
                 if (row == 2) f.yaw = 150;
             }
             double p = (i + 0.5) / N;
+            if (a->action == art3d::Action::Roll) {  // only ever standing, never at the desk: the third row is the other flank
+                f.pose = art3d::Pose::Stand; f.prop = art3d::Prop::Nothing;
+                if (row == 2) f.yaw = 150;
+                if (p > 0.3 && p < 0.9) f.eyes = art::Eyes::Happy;
+            }
             if (a->action == art3d::Action::Sneeze && p > art3d::SNEEZE_SHUT && p < art3d::SNEEZE_OPEN) f.eyes = art::Eyes::Closed;
             f.t = 1.0 + p * a->secs;
             f.costume = wardrobe::today();
