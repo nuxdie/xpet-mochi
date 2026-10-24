@@ -37,6 +37,13 @@ The leader runs `mochi-brain` as the relay and `mochi-leader.target` (mochi-phon
 music, NAS index), and on the LAN publishes `mochi.local` for the wall clocks. Elsewhere `mochi-brain` is a follower:
 what the pig or the command line says there is appended to `handoff/NODE.jsonl` and the leader acts on it.
 
+## The outside watchdog
+
+Whoever leads pings healthchecks.io (check "Mochi", ping URL in `ha.json` → `watchdog`) every minute with one
+line on every node's health. Silence for 5 min + 10 min grace and healthchecks.io mails him and messages him on
+Telegram through its own bot: that covers every machine dark at once, cloud included, which no node can report.
+`mochi-ha watchdog API_KEY` (re)creates the check with all the project's channels; the key isn't kept.
+
 ## Commands
 
     mochi-ha status            who leads, every node's health, sync state, conflicts

@@ -23,6 +23,7 @@ the LAN the name mochi.local points at this node (the wall clocks talk to it).
   mochi-ha hold [REASON]    this node never leads (gaming, maintenance); hands over if it leads now
   mochi-ha release          undo hold
   mochi-ha prefer NODE      ask NODE to lead now if it is healthy (a hold on every better node, for an hour)
+  mochi-ha watchdog API_KEY create the healthchecks.io check (the outside watchdog) and keep its ping URL in ha.json
 
 Config (synced): ~/.config/mochi/ha.json  {"relay", "token", "nodes": {NAME: {"prio", "lan"}}}
 This node's name: ~/.config/mochi-ha/node (not synced; written by ha/deploy.sh)
@@ -36,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -64,6 +66,10 @@ STARTUP = 20          # after the daemon starts: listen this long before decidin
 AUTH_SICK = 15 * 60   # a Claude login failure this recent makes the node sick (another one's login may work)
 ALARM_AFTER = 15 * 60  # nobody has led this long: the owner hears it on Telegram (once, then every ALARM_AGAIN)
 ALARM_AGAIN = 6 * 3600
+PING_EVERY = 60       # the leader pings the outside watchdog (healthchecks.io) this often
+WATCHDOG_TIMEOUT = 5 * 60  # healthchecks.io: no ping this long, plus the grace, and it mails/pings him
+WATCHDOG_GRACE = 10 * 60
+HC_API = "https://healthchecks.io/api/v3"
 NET_PROBES = (("api.anthropic.com", 443), ("api.telegram.org", 443))
 
 
@@ -439,7 +445,27 @@ class HA:
             self.as_standby(others)
         self.write_role()
         self.alarm(bool(others) or self.leader)
+        if self.leader and not self.yielding and now() - getattr(self, "pinged", 0) >= PING_EVERY:
+            self.pinged = now()
+            threading.Thread(target=self.ping_watchdog, daemon=True).start()
 
+    def ping_watchdog(self):
+        """The outside watchdog: whoever leads pings healthchecks.io every minute. If every machine is dark or sick
+        (the cloud box included, which nothing here could report), the pings stop and healthchecks.io tells him."""
+        url = ((load_json(CLUSTER) or {}).get("watchdog") or {}).get("ping_url")  # fresh: set up while running
+        if not url:
+            return
+        body = f"{self.me} leads, term {self.term}; " + "; ".join(
+            f"{n}: {'ok' if v['b'].get('healthy') else v['b'].get('why')}" for n, v in sorted(self.view.items()))
+        try:
+            urllib.request.urlopen(urllib.request.Request(url, data=body.encode()[:2000]), timeout=10).read()
+            if getattr(self, "ping_trouble", ""):
+                log("watchdog: pinging again")
+            self.ping_trouble = ""
+        except OSError as e:
+            if not getattr(self, "ping_trouble", ""):
+                log(f"watchdog: ping failed: {e}")
+            self.ping_trouble = str(e)[:80]
     def alarm(self, someone_leads):
         """Nobody leads for ALARM_AFTER: the alive node that comes first tells the owner on Telegram, through the bot
         (a send, not a poll: it can't disturb a leader that is still polling somewhere)."""
@@ -672,6 +698,39 @@ def status():
     return 0
 
 
+def watchdog_setup(key):
+    """Creates (or finds, by name) the check "Mochi" in his healthchecks.io project with every notification channel
+    he set up there, and keeps its ping URL in ha.json (synced, so every node pings it when it leads). The API key
+    is not kept."""
+    if not key:
+        print("usage: mochi-ha watchdog API_KEY   (healthchecks.io: project Settings → API Access → read-write key)",
+              file=sys.stderr)
+        return 1
+    spec = {"name": "Mochi", "slug": "mochi", "timeout": WATCHDOG_TIMEOUT, "grace": WATCHDOG_GRACE,
+            "unique": ["name"], "channels": "*", "tags": "mochi",
+            "desc": "Pinged every minute by whichever of Mochi's machines leads (desk, sff, cloud). Silence means no "
+                    "machine can think: all off, all sick, or the internet gone everywhere. `mochi-ha status`."}
+    req = urllib.request.Request(f"{HC_API}/checks/", data=json.dumps(spec).encode(), method="POST",
+                                 headers={"X-Api-Key": key, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            check = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        print(f"healthchecks.io said {e.code}: {e.read()[:200].decode(errors='replace')}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"can't reach healthchecks.io: {e}", file=sys.stderr)
+        return 1
+    cfg = load_json(CLUSTER) or {}
+    cfg["watchdog"] = {"ping_url": check["ping_url"], "check": check.get("name"), "set": now()}
+    write_json(CLUSTER, cfg)
+    os.chmod(CLUSTER, 0o600)
+    chans = check.get("channels") or ""
+    print(f"check '{check.get('name')}' ready: timeout {WATCHDOG_TIMEOUT // 60} min + grace {WATCHDOG_GRACE // 60} min; "
+          f"notifies: {'its channels' if chans else 'NO channel yet (add one: Integrations, then re-run this)'}")
+    return 0
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "status"
     if cmd == "serve":
@@ -703,6 +762,8 @@ def main(argv):
         else:
             print(f"{me} doesn't come before {argv[2]}; nothing to do here")
         return 0
+    if cmd == "watchdog":
+        return watchdog_setup(argv[2] if len(argv) > 2 else "")
     print(__doc__)
     return 0 if cmd in ("-h", "--help", "help") else 1
 

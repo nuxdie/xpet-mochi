@@ -312,6 +312,26 @@ class Election(unittest.TestCase):
         self.assertEqual(self.sim.leaders(), ["desk"])
 
 
+class Watchdog(unittest.TestCase):
+    def test_only_the_leader_pings(self):
+        Clock.t = 1_000_000.0
+        sim = Sim()
+        pinged = []
+        try:
+            for n in sim.nodes.values():
+                n.ha.ping_watchdog = lambda name=n.name: pinged.append(name)
+            old = HA.threading.Thread
+            HA.threading.Thread = lambda target, daemon: type("T", (), {"start": lambda s: target()})()
+            try:
+                sim.run(300)
+            finally:
+                HA.threading.Thread = old
+        finally:
+            sim.close()
+        self.assertEqual(set(pinged), {"desk"})
+        self.assertLessEqual(len(pinged), 300 // HA.PING_EVERY + 1)
+
+
 class RoleFile(unittest.TestCase):
     def test_a_killed_daemons_leader_file_is_not_believed(self):
         with tempfile.TemporaryDirectory() as d:
