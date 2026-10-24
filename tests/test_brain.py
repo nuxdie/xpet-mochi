@@ -989,3 +989,60 @@ class LogConflicts(unittest.TestCase):
                          ['{"t": 50, "kind": "done"}', '{"t": 100, "kind": "ask"}'])
         self.assertEqual(sorted(p.name for p in root.rglob("*sync-conflict*")),
                          ["life.sync-conflict-20261025-002228-XWEZ2ER.md"], "markdown is Mochi's to merge")
+
+
+class TelegramLive(unittest.TestCase):
+    """When the archive can't be read (the cloud node), the feed reads Telegram itself through mochi-tg counts."""
+
+    def test_their_own_and_quiet_chats_dont_count(self):
+        f = mb.Feed({}, lambda *a: None)
+        base = {"ok": True, "dialogs": {"1": {"top": 10, "unread": 0, "out": False, "name": "Nastya", "kind": "user"},
+                                        "2": {"top": 20, "unread": 0, "out": False, "name": "Bot", "kind": "bot"},
+                                        "3": {"top": 30, "unread": 0, "out": False, "name": "Me", "kind": "user"}}}
+        f.take(base, t=1000, src="tglive")
+        self.assertEqual(f.state["new"], {}, "the first look is a baseline")
+        nxt = {"ok": True, "dialogs": {"1": {"top": 14, "unread": 3, "out": False, "name": "Nastya", "kind": "user"},
+                                       "2": {"top": 25, "unread": 5, "out": False, "name": "Bot", "kind": "bot"},
+                                       "3": {"top": 31, "unread": 0, "out": True, "name": "Me", "kind": "user"}}}
+        f.take(nxt, t=1120, src="tglive")
+        self.assertEqual(list(f.state["new"]), ["1"])
+        self.assertEqual((f.state["new"]["1"]["n"], f.state["new"]["1"]["live"]), (3, True))
+        f.take(nxt, t=1240, src="tglive")  # nothing moved
+        self.assertEqual(f.state["new"]["1"]["n"], 3)
+
+    def test_catchup_reads_live_chats_with_mochi_tg(self):
+        r = type("R", (), {})()
+        r.state = {"asks": {}, "last_round": 0, "counts": {}}
+        r.feed = mb.Feed({}, lambda *a: None)
+        r.tasks, r.tg = queue.Queue(), type("T", (), {"on": False})()
+        r.away = lambda: True
+        r.activity = type("A", (), {"idle": type("I", (), {"seconds": lambda s: 0})()})()
+        r.bump = lambda what: None
+        mb.Relay.start_catchup(r, [("1", {"name": "Nastya", "kind": "user", "n": 3, "since": 1000, "live": True}),
+                                   ("2", {"name": "Denis", "kind": "user", "n": 1, "since": 1000})])
+        p = r.tasks.get_nowait()["prompt"]
+        self.assertIn("`mochi-tg read 1 --limit 15`", p)
+        self.assertIn("`mochi-sense telegram dialog 2 --since", p)
+
+
+class InWindows(unittest.TestCase):
+    def relay(self, windows):
+        r = type("R", (), {})()
+        r.role = {"leader": True, "node": "sff", "windows": windows}
+        r.state = {"counts": {"day": mb.today()}}
+        r.count = lambda what: 0
+        r.bump = lambda what: None
+        r.in_windows = mb.Relay.in_windows.__get__(r)
+        return r
+
+    def test_no_buzz_while_gaming_unless_critical(self):
+        r = self.relay({"idle": 5, "app": "ELDEN RING", "age": 20})
+        tg = mb.Telegram.__new__(mb.Telegram)
+        tg.relay, tg.on = r, True
+        tg.quiet_now = lambda: False
+        self.assertFalse(tg.may_buzz(True))
+        self.assertTrue(tg.may_buzz(True, critical=True))
+        r2 = self.relay({"idle": 3600, "app": "Steam", "age": 20})  # Windows on, nobody touching it
+        tg.relay = r2
+        self.assertIsNone(r2.in_windows())
+        self.assertTrue(tg.may_buzz(True))

@@ -70,6 +70,8 @@ PING_EVERY = 60       # the leader pings the outside watchdog (healthchecks.io) 
 WATCHDOG_TIMEOUT = 5 * 60  # healthchecks.io: no ping this long, plus the grace, and it mails/pings him
 WATCHDOG_GRACE = 10 * 60
 HC_API = "https://healthchecks.io/api/v3"
+TOKEN_LIFE = 365 * 86400     # `claude setup-token` tokens last a year
+TOKEN_WARN = 30 * 86400      # he hears about it this long before, then weekly until the file is replaced
 NET_PROBES = (("api.anthropic.com", 443), ("api.telegram.org", 443))
 
 
@@ -292,6 +294,7 @@ class HA:
         self.st = Syncthing()
         self.avahi = None
         self.relay_trouble = ""
+        self.seat_seen = None   # the Windows seat agent's last beacon, fresh, or None
         self.lock = threading.Lock()
 
     # -- the beacon
@@ -337,8 +340,14 @@ class HA:
                     seen[n] = {"b": b, "age": 0.0, "via": "lan"}
             except (OSError, ValueError):
                 pass
+        self.set_view(seen)
+
+    def set_view(self, seen):
         with self.lock:
-            self.view = {n: v for n, v in seen.items() if v["age"] <= FRESH}
+            # the Windows seat agent's beacon says he's at the PC; it is not a node (never leads, never counted)
+            seat = seen.pop("windows", None)
+            self.seat_seen = seat if seat and seat["age"] <= 150 and not seat["b"].get("test") else None
+            self.view = {n: v for n, v in seen.items() if v["age"] <= FRESH and not v["b"].get("seat_only")}
 
     def serve_lan(self):
         ha = self
@@ -445,9 +454,35 @@ class HA:
             self.as_standby(others)
         self.write_role()
         self.alarm(bool(others) or self.leader)
+        if self.leader and now() - getattr(self, "token_checked", 0) >= 6 * 3600:
+            self.token_checked = now()
+            self.token_reminder()
         if self.leader and not self.yielding and now() - getattr(self, "pinged", 0) >= PING_EVERY:
             self.pinged = now()
             threading.Thread(target=self.ping_watchdog, daemon=True).start()
+
+    def token_reminder(self):
+        """The standbys' Claude token (claude-oauth.token, from `claude setup-token`) runs out a year after it was
+        made: the leader tells him on Telegram a month ahead, then weekly, until a new one is in the file."""
+        tok = CONF / "mochi" / "claude-oauth.token"
+        try:
+            made = tok.stat().st_mtime
+        except OSError:
+            return
+        left = made + TOKEN_LIFE - now()
+        if left > TOKEN_WARN:
+            return
+        told = self.local.get("token_told") or {}
+        if told.get("made") == made and now() - float(told.get("at") or 0) < 7 * 86400:
+            return
+        when = time.strftime("%d %b %Y", time.localtime(made + TOKEN_LIFE))
+        text = ("The Claude login my standby machines use " + (f"runs out around {when} ({int(left // 86400)} days)"
+                if left > 0 else f"ran out around {when}: sff and the cloud can't take over") + ". On the desk: "
+                "`claude setup-token`, then `install -m600 /dev/stdin ~/.config/mochi/claude-oauth.token`, paste it, "
+                "Ctrl-D. It syncs to the others.")
+        if self.telegram(text):
+            self.local["token_told"] = {"made": made, "at": now()}
+            write_json(LOCAL / "state.json", self.local)
 
     def ping_watchdog(self):
         """The outside watchdog: whoever leads pings healthchecks.io every minute. If every machine is dark or sick
@@ -620,8 +655,18 @@ class HA:
         write_json(ROLE_FILE, {"leader": self.leader and not self.yielding, "draining": bool(self.yielding),
                                "node": self.me, "leader_node": lead, "term": term, "since": self.lead_since,
                                "healthy": self.healthy, "why": self.why, "caps": self.caps, "nodes": nodes,
-                               "seat": self.seat, "pid": os.getpid(),
+                               "seat": self.seat, "pid": os.getpid(), "windows": self.windows(),
                                "at": now()})
+
+    def windows(self):
+        """He's at the desk PC booted into Windows (the seat agent, ha/windows/): idle seconds and the app in front,
+        or None (not in Windows, agent paused or not running)."""
+        w = self.seat_seen
+        if not w or w["b"].get("paused"):
+            return None
+        b = w["b"]
+        return {"idle": int(b.get("idle") or 0) + int(w["age"]), "app": str(b.get("app") or "")[:60],
+                "fullscreen": bool(b.get("fullscreen")), "age": round(w["age"])}
 
     def leader_services(self, on):
         try:

@@ -22,6 +22,8 @@ p = "/etc/mochi-relay/tokens.json"
 t = json.load(open(p))
 if not t.get("ha"):
     t["ha"] = secrets.token_urlsafe(32)
+if not t.get("seat"):  # the Windows seat agent (ha/windows/): may only PUT /v1/beacon/windows
+    t["seat"] = secrets.token_urlsafe(32)
     json.dump(t, open(p, "w"))
 PY
 ufw allow 443/tcp comment 'mochi relay' >/dev/null

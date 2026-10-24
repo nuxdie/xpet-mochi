@@ -104,7 +104,8 @@ def server():
         return p
     pats = [str(HOME / ".local/share/fnm/node-versions/*/installation/bin/chrome-devtools-mcp"),
             str(HOME / ".nvm/versions/node/*/bin/chrome-devtools-mcp"),
-            str(HOME / ".npm-global/bin/chrome-devtools-mcp"), "/usr/local/bin/chrome-devtools-mcp"]
+            str(HOME / ".npm-global/bin/chrome-devtools-mcp"), "/usr/local/bin/chrome-devtools-mcp",
+            str(HOME / ".local/share/node/bin/chrome-devtools-mcp")]  # sff: a plain Node tarball (ha/deploy.sh)
     hits = sorted(h for pat in pats for h in glob.glob(pat))
     return hits[-1] if hits else ""
 

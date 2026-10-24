@@ -37,6 +37,19 @@ The leader runs `mochi-brain` as the relay and `mochi-leader.target` (mochi-phon
 music, NAS index), and on the LAN publishes `mochi.local` for the wall clocks. Elsewhere `mochi-brain` is a follower:
 what the pig or the command line says there is appended to `handoff/NODE.jsonl` and the leader acts on it.
 
+## Away from the desk
+
+- **Browser on sff:** peppy's Chrome through `mochi-box-tunnel` (always on there) and the desk's Node +
+  chrome-devtools-mcp in `~/.local/share/node`. The desk's own Chrome (his logins, vault, Messages) stays desk-only.
+- **Telegram on the cloud:** the archive lives on sff, so the feed reads Telegram itself (`mochi-tg counts`, every
+  2 min) and catch-ups read with `mochi-tg read ID`; at home the same kicks in after the archive is down 10 min.
+- **Windows:** `ha/windows/mochi-seat.ps1` (installed from Linux by `ha/windows/install.sh` into the Windows
+  partition: `%LOCALAPPDATA%\Mochi` + a Startup launcher) posts idle time and the app in front every minute as
+  beacon `windows`, with the relay's "seat" token (that one PUT only). mochi-ha passes it on as `windows` in the role
+  file (never a node); the brain shows `you.in_windows` and doesn't buzz the phone but for critical things.
+- **Token reminder:** the leader messages him on Telegram 30 days before `claude-oauth.token` turns a year old,
+  then weekly until it's replaced.
+
 ## The outside watchdog
 
 Whoever leads pings healthchecks.io (check "Mochi", ping URL in `ha.json` → `watchdog`) every minute with one

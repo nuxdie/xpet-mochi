@@ -33,7 +33,7 @@ echo "$FOLDERS" | while read -r fid path; do
   mkdir -p "$path"
   case $fid in
     mochi-work) printf '%s\n' '// per machine, never synced (see ha/README.md)' chrome workshop browser.lock '*.tmp' '*.lock' \
-                  'mcp-*.json' senses/cache '.ha-local' > "$path/.stignore" ;;
+                  'mcp-*.json' browser.json box/viewer.pid senses/cache '.ha-local' > "$path/.stignore" ;;
     mochi-config) printf '%s\n' xpet-repo '*.tmp' > "$path/.stignore" ;;
   esac
   if ! echo "$have_fold" | grep -qx "$fid"; then

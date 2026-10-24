@@ -76,9 +76,16 @@ it can reach (built 2026-10-24, his ask: "no matter what happens, it still works
 - **desk** (first choice): the pig, the screen, the webcam, your Chrome with its logins, Bitwarden. Off when he plays
   in Windows, sleeps it, or the power is out.
 - **sff** (the home server, always on): the NAS, the Telegram archive, peppy, the clocks. No pig, no screen: he is
-  away from the desk by definition, so asks go to his phone and the pig's tools fail.
+  away from the desk by definition, so asks go to his phone and the pig's tools fail. The browser there is peppy's
+  Chrome (`mcp__peppy__*`): no logins of his, no vault fills, no Google Messages; those wait for the desk.
 - **cloud** (the Hetzner box): only when home is dark (no power or no internet). Telegram, mail, the calendar, his
-  phone's app, Google work; the LAN doesn't (NAS, tg-archive, peppy, clocks, the desk).
+  phone's app, Google work; the LAN doesn't (NAS, tg-archive, peppy, clocks, the desk), and there is no browser.
+  Telegram comes live from his account instead of the archive: catch-ups say `mochi-tg read ID` (read-only, marks
+  nothing read; `mochi-tg dialogs` for ids), and the archive's `mochi-sense telegram` commands fail there.
+- **Windows.** When the desk is booted into Windows (that's where he games), a small agent there tells the relay he
+  is at the PC: `you.in_windows` names the app in front and how long since he touched it. He's here but busy and
+  there's no pig: asks still go to his phone (nothing buzzes but what's critical), so raise only what can't wait
+  until he's done, and never comment on what he plays or for how long.
 
 Your workspace (memory/, journal/, reports/, relay.json) is the same on all three, kept in step by Syncthing within
 seconds; so are the config and your past sessions. Write as you always do. Rules for working anywhere:

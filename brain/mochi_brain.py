@@ -163,7 +163,8 @@ READ_TOOLS = [
     "Bash(pdftotext:*)", "Bash(notmuch search:*)", "Bash(notmuch show:*)", "Bash(notmuch count:*)",
     "Bash(notmuch address:*)", "Bash(jq:*)", "Bash(column:*)", "Bash(nl:*)", "Bash(diff:*)", "Bash(sha256sum:*)",
     # Telegram as them (brain/mochi_tg.py): who they can write to, and what went out; sending is approved-only
-    "Bash(mochi-tg status)", "Bash(mochi-tg dialogs:*)", "Bash(mochi-tg log:*)",
+    "Bash(mochi-tg status)", "Bash(mochi-tg dialogs:*)", "Bash(mochi-tg log:*)", "Bash(mochi-tg read:*)",
+    "Bash(mochi-tg counts:*)",
     # their text messages through KDE Connect (brain/mochi_sms.py): reading never changes anything on the phone
     "Bash(mochi-sms status)", "Bash(mochi-sms threads:*)", "Bash(mochi-sms read:*)", "Bash(mochi-sms recent:*)",
     "Bash(mochi-sms unread)", "Bash(mochi-sms search:*)", "Bash(mochi-sms sync:*)", "Bash(mochi-sms contacts:*)",
@@ -807,13 +808,15 @@ def browser_args(headed):
     `headed` only matters when there is no nested display to hide it on: a chat then gets a plain window."""
     if not BROWSER:
         return []
-    try:
-        BROWSER.ensure(headed=headed)
-        path = BROWSER.write_config(headed=headed)
-    except Exception as e:
-        log(f"browser: no config ({e})")
-        return []
-    paths = [str(path)] if path else []
+    paths = []
+    if own_chrome_here():
+        try:
+            BROWSER.ensure(headed=headed)
+            path = BROWSER.write_config(headed=headed)
+        except Exception as e:
+            log(f"browser: no config ({e})")
+            return []
+        paths = [str(path)] if path else []
     try:  # the box's Chrome (peppy's real screen and GPU), when the box is up: mcp__peppy__*
         box = BOX and BOX.write_mcp_config((BROWSER.mcp_config(headed) or {}).get("mcpServers", {}).get("chrome"))
         if box:
@@ -821,6 +824,22 @@ def browser_args(headed):
     except Exception as e:
         log(f"browser: no box config ({e})")
     return ["--mcp-config"] + paths if paths else []
+
+
+TG_LIVE = shutil.which("mochi-tg") or str(HOME / ".local/bin/mochi-tg")
+TG_LIVE_AFTER = 10 * 60  # the archive unreadable this long at home: read Telegram itself (mochi-tg) meanwhile
+
+
+def archive_here():
+    """The Telegram archive (on sff) is reachable from this node: at home. Not from the cloud."""
+    r = node_role()
+    return r is None or "tg-archive" in (r.get("caps") or [])
+
+
+def own_chrome_here():
+    """Mochi's Chrome (its profile, his logins in it) lives on the desk; on sff and the cloud only peppy's is near."""
+    r = node_role()
+    return r is None or "chrome" in (r.get("caps") or [])
 
 
 def notify(text):
@@ -1352,12 +1371,12 @@ class Feed:
 
     LABELS = {"telegram": "their Telegram archive", "mail": "their local mail index",
               "calls": "the recorded-calls folder on the NAS", "calendar": "their Google calendars (CalDAV)",
-              "phone": "their phone (mochi-phone)"}
+              "phone": "their phone (mochi-phone)", "tglive": "Telegram itself (mochi-tg, their account)"}
 
     def __init__(self, state, fire):
         self.state, self.fire = state, fire
         for k, v in {"counts": {}, "new": {}, "items": {}, "down": {}, "last_poll": 0, "last_catchup": 0,
-                     "mail_seen": None, "calls": None, "cal": None, "phone_seen": None}.items():
+                     "mail_seen": None, "calls": None, "cal": None, "phone_seen": None, "tglive": None}.items():
             state.setdefault(k, v)
         for k in ("down_since", "told_down"):  # from before the feed had more than Telegram
             state.pop(k, None)
@@ -1372,7 +1391,7 @@ class Feed:
             return set()
 
     COMMANDS = {"telegram": ["telegram", "counts"], "mail": ["mail", "feed"], "calls": ["calls", "feed"],
-                "calendar": ["calendar", "feed"], "phone": ["phone", "feed"]}
+                "calendar": ["calendar", "feed"], "phone": ["phone", "feed"], "tglive": ["counts"]}
 
     def poll_async(self, src):
         if src in self.polling:
@@ -1381,7 +1400,8 @@ class Feed:
 
         def go():
             try:
-                code, out, err = run([SENSE, *self.COMMANDS[src]], timeout=150)
+                exe = TG_LIVE if src == "tglive" else SENSE
+                code, out, err = run([exe, *self.COMMANDS[src]], timeout=150)
                 try:
                     data = json.loads(out)
                 except ValueError:
@@ -1443,6 +1463,25 @@ class Feed:
             e["last"] = t
         st["last_poll"] = t
 
+    def take_tglive(self, data, t):
+        """Telegram straight from their account (mochi-tg counts), for when the archive can't be read: on the cloud
+        node it never can (it lives on sff), and at home it may be down. A dialog whose newest message moved on and
+        isn't theirs is new, like a chat that grew in the archive; the catch-up reads it with `mochi-tg read`."""
+        st, mute = self.state, self.mute()
+        old, cur = st["tglive"], {}
+        for did, d in (data.get("dialogs") or {}).items():
+            cur[did] = int(d.get("top") or 0)
+            if old is None or did not in old or cur[did] <= old[did] or d.get("out"):
+                continue
+            if d.get("kind") not in FEED_KINDS or d.get("archived") or did in mute:
+                continue
+            e = st["new"].setdefault(did, {"name": d.get("name") or did, "kind": d.get("kind"), "n": 0, "first": t,
+                                           "since": (st.get("last_poll") or t) - 300})
+            e["live"] = True
+            e["n"] = max(e["n"] + 1, int(d.get("unread") or 0))
+            e["last"] = t
+        st["tglive"] = dict(old or {}, **cur)
+
     def take_mail(self, data, t):
         msgs = data.get("messages") or {}
         seen = self.state["mail_seen"]
@@ -1461,7 +1500,8 @@ class Feed:
         per sender per hour keeps a chatty evening to one item). Telegram messages arrive here too, as a backup: they
         count only while the archive is unreadable; otherwise the archive's own feed raises the chat."""
         items, seen = data.get("items") or {}, self.state["phone_seen"]
-        tg_down = bool(self.state["down"].get("telegram", {}).get("since"))
+        tg_down = bool(self.state["down"].get("telegram", {}).get("since")) or (
+            not archive_here() and bool(self.state["down"].get("tglive", {}).get("since")))
         if seen is not None:
             seen = set(seen)
             for key, it in items.items():
@@ -1826,6 +1866,8 @@ class Telegram:
         if not urgent or not self.on:
             return False
         if self.quiet_now() and not critical:
+            return False
+        if self.relay.in_windows() and not critical:  # gaming at the PC: it arrives, silently
             return False
         if self.relay.count("tg_buzz") >= TG_AUDIBLE_PER_DAY:
             return False
@@ -2319,7 +2361,11 @@ class Relay:
                     self.watchers.check()
                     self.watches.check()
                 if due("feed", FEED_EVERY):
-                    self.feed.poll_async("telegram")
+                    if archive_here():
+                        self.feed.poll_async("telegram")
+                    down = (self.feed.state["down"].get("telegram") or {}).get("since")
+                    if not archive_here() or (down and now() - down >= TG_LIVE_AFTER):
+                        self.feed.poll_async("tglive")  # Telegram itself, through their account
                 if due("feed-slow", SLOW_FEED_EVERY):
                     self.feed.poll_async("calls")
                     self.feed.poll_async("calendar")
@@ -2594,6 +2640,12 @@ class Relay:
 
     # -- when to run a round (the only decision made here)
 
+    def in_windows(self):
+        """He's at the desk PC, booted into Windows (the seat agent, ha/windows/), and has touched it lately: there's
+        no pig there, so to the relay that is still "away" (asks go to the phone), but nothing buzzes."""
+        w = (getattr(self, "role", None) or {}).get("windows")
+        return w if w and w.get("idle", 1e9) < AWAY_AFTER else None
+
     def away(self):
         if not self.activity.idle.ok or (self.role is not None and not self.role.get("seat")):
             return True  # not the machine he sits at (sff, the cloud): nobody is here, whatever its screen says
@@ -2769,7 +2821,9 @@ class Relay:
         self.feed.state["last_catchup"] = now()
         hours = round(min(6.0, max(0.25, (now() - last_look) / 3600)), 2)
         lines = [f"- Telegram, {e['name']} ({e['kind']}, id {did}): {e['n']} new message(s); read them with "
-                 f"`mochi-sense telegram dialog {did} --since {dt.datetime.fromtimestamp(e['since']):%Y-%m-%dT%H:%M} --chars 400`"
+                 + (f"`mochi-tg read {did} --limit {min(50, max(15, e['n'] + 5))}` (live from Telegram: the archive "
+                    f"isn't reachable from here)" if e.get("live") else
+                    f"`mochi-sense telegram dialog {did} --since {dt.datetime.fromtimestamp(e['since']):%Y-%m-%dT%H:%M} --chars 400`")
                  for did, e in chats]
         lines += [f"- {it['line']}" for _, it in items[:40]]
         if len(items) > 40:
@@ -2792,14 +2846,19 @@ class Relay:
         return {
             "hostname": socket.gethostname(),
             "where_you_run": self.where(),
-            "you": dict(self.activity.summary(60), away=self.away(),
+            "you": dict(self.activity.summary(60), away=self.away(), in_windows=(
+                        f"at the PC in Windows right now ({self.in_windows()['app'] or 'an app'} in front, "
+                        f"idle {self.in_windows()['idle']}s): no pig, so asks go to the phone, silently; most likely "
+                        f"playing (see CLAUDE.md 'Where you run')") if self.in_windows() else False,
                         away_for=human_age(now() - self.state["away_since"]) if self.away() and self.state["away_since"] else ""),
             "browser": (("your own Chrome is available as the mcp__chrome__* tools" +
                          (" and is on their screen right now (they see what you do; `mochi-browser hide` takes it off)"
                           if BROWSER.shown() else
                           " (hidden, yours alone, logins persist in your profile; `mochi-browser show` puts it on "
-                          "their screen when a page needs them)")) if BROWSER and BROWSER.server()
-                        else "not available (mochi-browser needs chrome-devtools-mcp)"),
+                          "their screen when a page needs them)")) if BROWSER and BROWSER.server() and own_chrome_here()
+                        else "your own Chrome is on the desk, not here: peppy's (mcp__peppy__*) is the browser now, "
+                             "when the box is up; no vault fills, no Google Messages, no logins of his"
+                        if BROWSER and BROWSER.server() else "not available (mochi-browser needs chrome-devtools-mcp)"),
             "telegram": ("connected: while they're away your asks and reports go to their phone as messages with buttons, "
                          "and they can message you back; keep what crosses the wire short and vague (it passes through "
                          "Telegram's servers). Files: what they send you lands in inbox/; `files` in your block, or a "

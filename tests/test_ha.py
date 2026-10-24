@@ -143,7 +143,7 @@ class Sim:
             for n, other in self.nodes.items():
                 if n != node.name and other.up and other.lan and CFG["nodes"][n].get("lan"):
                     seen[n] = {"b": other.ha.beacon(), "age": 0.0, "via": "lan"}
-        node.ha.view = {n: v for n, v in seen.items() if v["age"] <= HA.FRESH}
+        node.ha.set_view(seen)
 
     def sync(self, src):
         """Syncthing: the leader's state reaches every node it can reach, at once."""
@@ -310,6 +310,69 @@ class Election(unittest.TestCase):
                 self.assertLessEqual(len(self.sim.leaders()), 1, f"at {Clock.t}: {self.sim.leaders()}")
         self.sim.run(400)
         self.assertEqual(self.sim.leaders(), ["desk"])
+
+
+class WindowsSeat(unittest.TestCase):
+    def test_presence_not_a_node(self):
+        Clock.t = 1_000_000.0
+        sim = Sim()
+        try:
+            sim.run(200)
+            sim.power("desk", False)  # booted into Windows
+            sim.run(150)
+            sim.relay["windows"] = (Clock.t, {"node": "windows", "seat_only": True, "healthy": False, "prio": 99,
+                                              "idle": 4, "app": "ELDEN RING", "fullscreen": True})
+            sim.run(10)
+            self.assertEqual(sim.leaders(), ["sff"])
+            sff = sim.nodes["sff"]
+            sff.paths()
+            role = HA.load_json(HA.ROLE_FILE)
+            self.assertNotIn("windows", role["nodes"])
+            self.assertEqual(role["windows"]["app"], "ELDEN RING")
+            self.assertLess(role["windows"]["idle"], 30)
+            sim.run(200)  # the agent stopped (Windows shut down): stale
+            sff.paths()
+            self.assertIsNone(HA.load_json(HA.ROLE_FILE)["windows"])
+        finally:
+            sim.close()
+
+
+class TokenReminder(unittest.TestCase):
+    def test_a_month_ahead_then_weekly_until_replaced(self):
+        import os
+        Clock.t = 1_000_000.0
+        sim = Sim()
+        try:
+            desk = sim.nodes["desk"]
+            told = []
+            desk.ha.telegram = lambda text: told.append(text) or True
+            with tempfile.TemporaryDirectory() as d:
+                old = HA.CONF
+                HA.CONF = Path(d)
+                (Path(d) / "mochi").mkdir()
+                tok = Path(d) / "mochi/claude-oauth.token"
+                tok.write_text("x")
+                os.utime(tok, (Clock.t - 300 * 86400, Clock.t - 300 * 86400))
+                try:
+                    desk.paths()
+                    desk.ha.token_reminder()
+                    self.assertEqual(told, [], "65 days left: quiet")
+                    Clock.t += 40 * 86400
+                    desk.ha.token_reminder()
+                    desk.ha.token_reminder()
+                    self.assertEqual(len(told), 1)
+                    self.assertIn("25 days", told[0])
+                    Clock.t += 8 * 86400
+                    desk.ha.token_reminder()
+                    self.assertEqual(len(told), 2, "again a week later")
+                    os.utime(tok, (Clock.t, Clock.t))  # replaced
+                    Clock.t += 86400
+                    desk.ha.token_reminder()
+                    self.assertEqual(len(told), 2)
+                finally:
+                    HA.CONF = old
+        finally:
+            sim.close()
 
 
 class Watchdog(unittest.TestCase):

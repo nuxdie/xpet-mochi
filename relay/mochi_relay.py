@@ -13,7 +13,7 @@ than KEEP_DAYS. Stdlib only, one process, ~20 MB, meant to sit next to a Minecra
   GET  /v1/beacons                    every node's last heartbeat              -> {"node": {"at", "beacon"}}
 
 Beacons are the brain nodes' heartbeats for choosing which one leads (see ha/mochi_ha.py); they take the "ha"
-token, are held in memory only, and are the one thing here that isn't opaque (no secrets in them, by design).
+token (the Windows seat agent's own "seat" token: its one beacon only), are held in memory only, and are the one thing here that isn't opaque (no secrets in them, by design).
 
 Auth: `Authorization: Bearer TOKEN`, tokens in /etc/mochi-relay/tokens.json ({"desk": "...", "phone": "..."}).
 TLS: /etc/mochi-relay/tls/fullchain.pem + privkey.pem (copied there by certbot's deploy hook); without them it
@@ -144,7 +144,10 @@ class Handler(BaseHTTPRequestHandler):
         self.route()
 
     def beacon(self, parts):
-        if self.who() != "ha":
+        who = self.who()
+        # "seat": the little agent on his Windows install may only say he's at the PC (PUT /v1/beacon/windows)
+        seat_ok = who == "seat" and self.command == "PUT" and parts == ["v1", "beacon", "windows"]
+        if who != "ha" and not seat_ok:
             return self.send(401, {"error": "bad token"})
         if parts == ["v1", "beacons"] and self.command == "GET":
             return self.send(200, BEACONS)

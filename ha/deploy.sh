@@ -27,6 +27,8 @@ cp -a "$HOME"/.local/bin/mochi-* "$STAGE/bin/"
 CLAUDE_REAL=$(readlink -f "$HOME/.local/bin/claude")
 cp "$REPO/dist/mochi-ha.service" "$REPO/dist/mochi-leader.target" "$REPO/dist/mochi-mail.service" \
    "$REPO/dist/mochi-mail.timer" "$STAGE/units/"
+# sff reaches peppy's Chrome (and screen) through the same tunnel as the desk, so it has a browser when it leads
+[ "$NODE" = sff ] && cp "$REPO/dist/mochi-box-tunnel.service" "$STAGE/units/"
 for u in $LEADER_UNITS; do
   cp "$UNITS/$u" "$STAGE/units/"
   case $u in *.timer) cp "$UNITS/${u%.timer}.service" "$STAGE/units/" ;; esac
@@ -82,6 +84,11 @@ if [ "$NODE" != desk ]; then
   # Mochi's own key for this node (mochi-mc, mochi-box); authorized on the other machines from the desk
   [ -f .ssh/mochi_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -C "mochi@$NODE" -f .ssh/mochi_ed25519
   # Telegram as him and yt-dlp (no whisper here: transcribing stays on the desk)
+  if [ "$NODE" = sff ] && [ ! -x .local/share/node/bin/chrome-devtools-mcp ]; then  # the desk's Node and MCP server
+    mkdir -p .local/share/node
+    curl -fsSL "https://nodejs.org/dist/v24.13.0/node-v24.13.0-linux-x64.tar.xz" | tar xJ -C .local/share/node --strip-components=1
+    PATH=$HOME/.local/share/node/bin:$PATH .local/share/node/bin/npm install -g --silent chrome-devtools-mcp@1.10.1
+  fi
   if [ -x .local/bin/uv ]; then  # sff: Debian 11's python 3.9 is too old for some tools; python3 is this venv's
     [ -x .local/share/mochi-tools/bin/python3 ] || .local/bin/uv venv -q -p 3.12 .local/share/mochi-tools
     VIRTUAL_ENV=$HOME/.local/share/mochi-tools .local/bin/uv pip install -q -U cryptography markdown pillow telethon yt-dlp
@@ -113,6 +120,7 @@ done
 systemctl --user daemon-reload
 if [ "$NODE" != desk ]; then
   systemctl --user enable mochi-brain.service mochi-mail.timer >/dev/null 2>&1
+  if [ -f "$U/mochi-box-tunnel.service" ]; then systemctl --user enable --now mochi-box-tunnel.service >/dev/null 2>&1; fi
   systemctl --user start mochi-mail.timer
   systemctl --user restart mochi-brain.service
 fi
