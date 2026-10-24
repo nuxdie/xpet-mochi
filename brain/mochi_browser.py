@@ -30,9 +30,12 @@ X display number, default the first free one from 77), `size` ("WIDTHxHEIGHT" of
 """
 
 import argparse
+import contextlib
+import fcntl
 import glob
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -45,7 +48,8 @@ HOME = Path.home()
 WORK = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share") / "mochi"
 PROFILE = WORK / "chrome"
 REPORTS = WORK / "reports"
-STATE = WORK / "browser.json"  # the nested X server a Chrome is running on: {"display": ":77", "xephyr": pid}
+STATE = WORK / "browser.json"  # the nested X server a Chrome is running on: {"display": ":77", "xephyr": pid, "window": id}
+LOCK = WORK / "browser.lock"  # launch and stop take it: two runs overlapping must not trample the state file
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "mochi" / "sources.json"
 CONFIG_FILES = {False: WORK / "mcp-chrome.json", True: WORK / "mcp-chrome-headed.json"}
 TITLE = "Mochi's browser"  # the nested server's window on your screen; how it's found again
@@ -175,19 +179,82 @@ def free_display():
     return ""
 
 
-def window():
-    """The nested server's window on your screen (wmctrl id), or ""."""
-    if not nested():
-        return ""
+def windows():
+    """Every window on your screen with the nested server's title (wmctrl ids), oldest first."""
     try:
         out = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
-        return ""
+        return []
+    found = []
     for line in out.splitlines():
         parts = line.split(None, 3)
         if len(parts) == 4 and parts[3] == TITLE:
-            return parts[0]
-    return ""
+            found.append(parts[0])
+    return found
+
+
+def window():
+    """The nested server's window on your screen (wmctrl id), or "". The one the state file names: a stray server's
+    window has the same title, and hiding that one instead left ours on the screen for a whole run."""
+    s = nested()
+    if not s:
+        return ""
+    ids = windows()
+    if s.get("window") in ids:
+        return s["window"]
+    return ids[0] if ids else ""
+
+
+@contextlib.contextmanager
+def locked():
+    """One launch or stop at a time, across processes (runs overlap: an ask's thread beside the worker's round)."""
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOCK, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def strays():
+    """Nested servers of ours (by their title) that the state file doesn't own: left behind when a run's teardown and
+    the next run's start overlapped, or by an interrupted one."""
+    own = nested().get("xephyr")
+    try:
+        out = subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", "--", f"-title {TITLE}"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids = []
+    for tok in out.split():
+        try:
+            pid = int(tok)
+            if pid != own and Path(f"/proc/{pid}/comm").read_text().strip() == "Xephyr":
+                pids.append(pid)
+        except (ValueError, OSError):
+            pass
+    return pids
+
+
+def _kill_xephyr(pid):
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(40):  # Xephyr takes a moment to go; it isn't our child, so poll
+            if not alive(pid) or Path(f"/proc/{pid}/comm").read_text().strip() != "Xephyr":
+                return
+            time.sleep(0.05)
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def reap():
+    """Kill the stray nested servers (their windows go with them). How many."""
+    pids = strays()
+    for pid in pids:
+        _kill_xephyr(pid)
+    return len(pids)
 
 
 def shown():
@@ -243,11 +310,13 @@ def show():
 
 def start_nested():
     """Start Xephyr, hide its window the moment it appears, give it the host's keyboard layout. The display, or ""."""
+    reap()
     disp = free_display()
     if not disp:
         return ""
     w, h = size()
     STATE.parent.mkdir(parents=True, exist_ok=True)
+    before = set(windows())
     try:
         p = subprocess.Popen(["Xephyr", disp, "-screen", f"{w}x{h}", "-title", TITLE, "-nolisten", "tcp", "-br",
                               "-noreset", "-no-host-grab"], start_new_session=True,
@@ -256,7 +325,10 @@ def start_nested():
         return ""
     STATE.write_text(json.dumps({"display": disp, "xephyr": p.pid}))
     for _ in range(250):  # its window maps within a few tens of ms; hide it before anyone notices
-        if hide():
+        new = [x for x in windows() if x not in before]
+        if new:
+            STATE.write_text(json.dumps({"display": disp, "xephyr": p.pid, "window": new[0]}))
+            hide()
             break
         if p.poll() is not None:
             break
@@ -281,23 +353,19 @@ def start_nested():
 def stop_nested():
     s = nested()
     if s:
-        pid = int(s["xephyr"])
-        try:
-            os.kill(pid, signal.SIGTERM)
-            for _ in range(40):  # Xephyr takes a moment to go; it isn't our child, so poll
-                if not alive(pid) or Path(f"/proc/{pid}/comm").read_text().strip() != "Xephyr":
-                    break
-                time.sleep(0.05)
-            else:
-                os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+        _kill_xephyr(int(s["xephyr"]))
     STATE.unlink(missing_ok=True)
+    reap()
 
 
 # ---- Chrome ---------------------------------------------------------------------------------------------
 
 def launch(headless=False):
+    with locked():
+        return _launch(headless)
+
+
+def _launch(headless=False):
     """Start Mochi's Chrome with the debugging port (localhost only) and wait for it. True once it answers.
     On the hidden nested display when that's possible (`headless` is then moot); else headless or a plain window."""
     exe = chrome()
@@ -356,16 +424,34 @@ def kill_chrome():
     subprocess.run(["pkill", "-f", "--", f"user-data-dir={PROFILE} --remote-debugging-port={port()}"], check=False)
 
 
-def chat_alive():
-    """Is a chat (an interactive Claude with the headed config on its command line) still running?"""
+def _seen(mark):
+    """A Claude of ours with `mark` on its command line? Only a claude binary counts: a shell that merely mentions the
+    file (a grep for it, say) must not keep the browser alive."""
     try:
-        return subprocess.run(["pgrep", "-f", CHAT_MARK], capture_output=True, timeout=5).returncode == 0
+        return subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", rf"^\S*claude .*{re.escape(mark)}"],
+                              capture_output=True, timeout=5).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
 
+def chat_alive():
+    """Is a chat (an interactive Claude with the headed config on its command line) still running?"""
+    return _seen(CHAT_MARK)
+
+
+def run_alive():
+    """Is another run (a Claude with the run config on its command line) still using the browser? The run whose end
+    this is has already exited, so any one seen is somebody else's: an ask's thread beside the worker's round."""
+    return _seen(CONFIG_FILES[False].name)
+
+
 def stop():
-    """After a run: close the browser, unless it's on their screen or a chat is still using it."""
+    """After a run: close the browser, unless it's on their screen or a chat or another run is still using it."""
+    with locked():
+        _stop()
+
+
+def _stop():
     v = running()
     if not v:
         return
@@ -374,7 +460,7 @@ def stop():
         return
     if not nested():
         return  # a plain visible window (theirs): stays
-    if shown() or chat_alive():
+    if shown() or chat_alive() or run_alive():
         return
     kill_chrome()
     time.sleep(0.5)
@@ -438,9 +524,10 @@ def close_browser():
     if not running() and not nested():
         print("not open")
         return 0
-    kill_chrome()
-    time.sleep(0.5)
-    stop_nested()
+    with locked():
+        kill_chrome()
+        time.sleep(0.5)
+        stop_nested()
     print("closed")
     return 0
 
@@ -457,6 +544,9 @@ def status():
         print(f"browser:  up, {where}: {v.get('Browser', '')}" + (" (a chat is using it)" if chat_alive() else ""))
     else:
         print("browser:  not running (a run starts one, hidden, and closes it after)")
+    st = strays()
+    if st:
+        print(f"strays:   {len(st)} leftover nested server(s) (pid {', '.join(map(str, st))}); the next launch reaps them")
     print(f"configs:  {CONFIG_FILES[False]} / {CONFIG_FILES[True]} (rewritten before each run)")
     return 0 if srv and chrome() else 1
 

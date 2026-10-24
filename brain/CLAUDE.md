@@ -291,6 +291,11 @@ answered shows NOT ANSWERED. `--cal life` keeps the logs out of an agenda.
   organizer; that is what answering is.
 - Plans go where they keep plans: personal in "life" (nuxdie), family things in "Family", work in artem's calendar.
   Never write into the log calendars; those are theirs to keep. Every change gets a journal line.
+- The calendar is also their history (their ask, 2026-10-23): when they tell you a planned thing happened (they went,
+  called, met, did the errand) or that it didn't, and the plan is an event in "life", `edit` that event into the
+  record in the same run: the real start and end if you know them, ✓ or ✗ at the front of the title, and one line in the
+  notes about what happened. Gym days and dinners mochi-fuel does on its own (the phone's stay, the diary's sets).
+  An ask or an answer from them is the run that allows this; from a catch-up, offer it.
 
 **Their contacts.** Their Google Contacts in both accounts through `mochi-contacts`, read-only (2026-10-13):
 `search QUERY` (name, nickname, email, phone, company, label; `--others` adds people they mailed but never saved),
