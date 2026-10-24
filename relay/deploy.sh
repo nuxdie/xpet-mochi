@@ -15,6 +15,15 @@ if [ ! -f /etc/mochi-relay/tokens.json ]; then
     python3 -c 'import json,secrets;print(json.dumps({"desk":secrets.token_urlsafe(32),"phone":secrets.token_urlsafe(32)}))' > /etc/mochi-relay/tokens.json
     chgrp mochi-relay /etc/mochi-relay/tokens.json && chmod 640 /etc/mochi-relay/tokens.json
 fi
+# the brain nodes' heartbeat token (mochi-ha), added to an older tokens.json; it goes into ~/.config/mochi/ha.json
+python3 - <<'PY'
+import json, secrets
+p = "/etc/mochi-relay/tokens.json"
+t = json.load(open(p))
+if not t.get("ha"):
+    t["ha"] = secrets.token_urlsafe(32)
+    json.dump(t, open(p, "w"))
+PY
 ufw allow 443/tcp comment 'mochi relay' >/dev/null
 ufw allow 80/tcp comment 'letsencrypt http-01' >/dev/null
 if [ ! -d /etc/letsencrypt/live/"$HOST" ]; then

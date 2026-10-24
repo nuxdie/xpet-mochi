@@ -900,3 +900,92 @@ class Pages(unittest.TestCase):
             setattr(tg, name, getattr(mb.Telegram, name).__get__(tg))
         tg.show(self.dir / "r.md")
         self.assertEqual((sent, files), (["# R\n\nok"], []))
+
+
+class Handover(unittest.TestCase):
+    """What crosses from one node to the next (mochi-ha): tasks they gave, and what a follower heard."""
+
+    def relay(self):
+        r = type("R", (), {})()
+        r.state = {"events": []}
+        r.tasks, r.current = queue.Queue(), None
+        r.tg = type("T", (), {"sent": [], "send": lambda s, text, *a, **k: s.sent.append(text)})()
+        r.event = lambda text: r.state["events"].append(text)
+        for name in ("carry_out", "carry_in"):
+            setattr(r, name, getattr(mb.Relay, name).__get__(r))
+        return r
+
+    def test_asks_survive_a_restart_rounds_dont(self):
+        r = self.relay()
+        r.current = {"kind": "ask", "title": "book the dentist", "prompt": "p", "via": "telegram"}
+        r.tasks.put({"kind": "round", "title": "round", "prompt": "p"})
+        r.tasks.put({"kind": "approved", "title": "Yes: pay the bill", "prompt": "p"})
+        carried = json.loads(json.dumps(r.carry_out()))
+        self.assertEqual([t["title"] for t in carried], ["book the dentist", "Yes: pay the bill"])
+        r2 = self.relay()
+        r2.state["carry"] = carried
+        r2.carry_in()
+        self.assertEqual([r2.tasks.get_nowait()["title"] for _ in range(2)], ["book the dentist", "Yes: pay the bill"])
+        self.assertNotIn("carry", r2.state)
+
+    def test_interrupted_twice_is_dropped_and_said(self):
+        r = self.relay()
+        r.state["carry"] = [{"kind": "ask", "title": "crashy", "prompt": "p", "via": "telegram", "attempts": 2,
+                             "queued_at": time.time()},
+                            {"kind": "ask", "title": "old", "prompt": "p", "queued_at": time.time() - 7 * 3600}]
+        r.carry_in()
+        self.assertTrue(r.tasks.empty())
+        self.assertEqual(len(r.state["events"]), 2)
+        self.assertIn("crashy", r.tg.sent[0])
+
+    def test_follower_hands_what_it_heard_to_the_leader(self):
+        for f in mb.HANDOFF.glob("*.jsonl") if mb.HANDOFF.is_dir() else []:
+            f.unlink()
+        mb.handoff_write("desk", {"event": "ask", "text": "what's on tonight"})
+        mb.handoff_write("desk", {"event": "answer", "id": "a1", "answer": "Yes, do it"})
+        old = {"id": "desk-1.000-1", "t": time.time() - 2 * 86400, "m": {"event": "ask", "text": "stale"}}
+        with open(mb.HANDOFF / "desk.jsonl", "a") as f:
+            f.write(json.dumps(old) + "\n")
+        got = mb.handoff_read("sff", set())
+        self.assertEqual([m["event"] for _, m in got], ["ask", "answer"])
+        self.assertEqual(mb.handoff_read("desk", set()), [], "a node doesn't read its own file")
+        self.assertEqual(mb.handoff_read("sff", {i for i, _ in got}), [])
+        mb.handoff_write("desk", {"event": "round"})  # writing drops the stale line
+        self.assertNotIn("stale", (mb.HANDOFF / "desk.jsonl").read_text())
+
+    def test_follower_passes_on_and_answers_status_itself(self):
+        f = mb.Follower({"node": "desk"})
+        f.pet = Pig()
+        f.pet.say = lambda text, secs=6: f.pet.sent.append({"event": "say", "text": text})
+        sent = []
+        old_write, old_role = mb.handoff_write, mb.node_role
+        mb.handoff_write = lambda node, m: sent.append((node, m))
+        mb.node_role = lambda: {"leader": False, "node": "desk", "leader_node": "sff"}
+        try:
+            f.on_message({"event": "ask", "text": "hi"})
+            f.on_message({"event": "status"})
+            f.on_message({"src": "claude", "event": "PreToolUse"})
+        finally:
+            mb.handoff_write, mb.node_role = old_write, old_role
+        self.assertEqual(sent, [("desk", {"event": "ask", "text": "hi"})])
+        self.assertIn("sff", f.pet.sent[-1]["text"])
+
+
+class LogConflicts(unittest.TestCase):
+    def test_both_nodes_lines_in_time_order(self):
+        root = Path(tempfile.mkdtemp(prefix="mochi-merge-"))
+        (root / "actions.log").write_text("2026-10-25 00:20 a\n2026-10-25 00:22 desk: handing over\nloop error:\n  trace\n")
+        (root / "actions.sync-conflict-20261025-002228-XWEZ2ER.log").write_text(
+            "2026-10-25 00:20 a\n2026-10-25 00:21 sff: leading\n2026-10-25 00:23 sff: round\n")
+        (root / "comms.jsonl").write_text('{"t": 100, "kind": "ask"}\n')
+        (root / "comms.sync-conflict-20261025-002228-XWEZ2ER.jsonl").write_text('{"t": 50, "kind": "done"}\n')
+        (root / "memory").mkdir()
+        (root / "memory/life.sync-conflict-20261025-002228-XWEZ2ER.md").write_text("not a log")
+        mb.merge_log_conflicts(root)
+        self.assertEqual((root / "actions.log").read_text().splitlines(),
+                         ["2026-10-25 00:20 a", "2026-10-25 00:21 sff: leading", "2026-10-25 00:22 desk: handing over",
+                          "loop error:", "  trace", "2026-10-25 00:23 sff: round"])
+        self.assertEqual((root / "comms.jsonl").read_text().splitlines(),
+                         ['{"t": 50, "kind": "done"}', '{"t": 100, "kind": "ask"}'])
+        self.assertEqual(sorted(p.name for p in root.rglob("*sync-conflict*")),
+                         ["life.sync-conflict-20261025-002228-XWEZ2ER.md"], "markdown is Mochi's to merge")

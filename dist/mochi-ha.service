@@ -1,0 +1,14 @@
+[Unit]
+Description=mochi-ha: which of Mochi's machines leads (desk, then sff, then the cloud)
+After=network-online.target syncthing.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=%h/.local/bin/mochi-ha serve
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
