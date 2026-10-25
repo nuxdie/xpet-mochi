@@ -265,6 +265,42 @@ async def do_dialogs(c, query, limit):
     return 0
 
 
+async def do_counts(c, limit):
+    """For the relay's live feed when the Telegram archive can't be read (it lives on sff; on the cloud node it never
+    can): per dialog its newest message id, the unread count and whether that newest message is theirs. JSON. Reading
+    the dialog list marks nothing as read."""
+    await c.connect()
+    if not await c.is_user_authorized():
+        print(json.dumps({"ok": False, "error": "mochi-tg is not signed in (mochi-tg auth)"}))
+        return 1
+    out = {}
+    for d in await c.get_dialogs(limit=limit):
+        if d.entity is None or d.message is None:
+            continue
+        out[str(d.id)] = {"top": d.message.id, "unread": d.unread_count, "out": bool(d.message.out),
+                          "name": (d.name or name_of(d.entity))[:60], "kind": kind_of(d.entity),
+                          "archived": d.folder_id == 1}
+    print(json.dumps({"ok": True, "dialogs": out}, ensure_ascii=False))
+    return 0
+
+
+async def do_read(c, who, limit, chars):
+    """The newest messages of one dialog, oldest first, as the archive's `dialog` shows them. Marks nothing read."""
+    await c.connect()
+    if not await c.is_user_authorized():
+        raise SystemExit("not signed in: mochi-tg auth")
+    ent, name = await resolve(c, who)
+    msgs = await c.get_messages(ent, limit=min(limit, 100))
+    print(f"## Telegram, live (mochi-tg; times are local): {name}, the last {len(msgs)}, oldest first")
+    for m in reversed(msgs):
+        sender = "me" if m.out else name_of(m.sender) if m.sender else name
+        text = (m.message or "").replace("\n", " ")
+        if m.media and not text:
+            text = f"[{type(m.media).__name__.replace('MessageMedia', '').lower()}]"
+        print(f"- {m.date.astimezone():%a %d %b %H:%M} {sender[:20]}: {text[:chars]}")
+    return 0
+
+
 async def do_send(c, who, text, why, reply_to, dry_run, ask=ask_on_phone):
     await c.connect()
     if not await c.is_user_authorized():
@@ -365,6 +401,12 @@ def main():
     s.add_argument("--why", default="")
     s.add_argument("--reply-to", default="")
     s.add_argument("--dry-run", action="store_true")
+    ct = sub.add_parser("counts")
+    ct.add_argument("--limit", type=int, default=200)
+    rd = sub.add_parser("read")
+    rd.add_argument("who")
+    rd.add_argument("--limit", type=int, default=15)
+    rd.add_argument("--chars", type=int, default=400)
     lg = sub.add_parser("log")
     lg.add_argument("n", nargs="?", type=int, default=20)
     a = ap.parse_args()
@@ -382,6 +424,10 @@ def main():
             return c.loop.run_until_complete(do_status(c))
         if a.cmd == "dialogs":
             return c.loop.run_until_complete(do_dialogs(c, a.query, a.limit))
+        if a.cmd == "counts":
+            return c.loop.run_until_complete(do_counts(c, a.limit))
+        if a.cmd == "read":
+            return c.loop.run_until_complete(do_read(c, a.who, a.limit, a.chars))
         if a.cmd == "send":
             return c.loop.run_until_complete(do_send(c, a.who, a.text, a.why, a.reply_to, a.dry_run))
     finally:

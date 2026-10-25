@@ -1,0 +1,4 @@
+[Unit]
+Description=What runs only where Mochi leads (mochi-ha starts and stops this): the phone's mailbox, the timers
+# The units themselves are tied to it by drop-ins ha/deploy.sh writes (PartOf=, WantedBy=), so stopping this
+# target stops them all; none of them is enabled on its own.

@@ -163,7 +163,8 @@ READ_TOOLS = [
     "Bash(pdftotext:*)", "Bash(notmuch search:*)", "Bash(notmuch show:*)", "Bash(notmuch count:*)",
     "Bash(notmuch address:*)", "Bash(jq:*)", "Bash(column:*)", "Bash(nl:*)", "Bash(diff:*)", "Bash(sha256sum:*)",
     # Telegram as them (brain/mochi_tg.py): who they can write to, and what went out; sending is approved-only
-    "Bash(mochi-tg status)", "Bash(mochi-tg dialogs:*)", "Bash(mochi-tg log:*)",
+    "Bash(mochi-tg status)", "Bash(mochi-tg dialogs:*)", "Bash(mochi-tg log:*)", "Bash(mochi-tg read:*)",
+    "Bash(mochi-tg counts:*)",
     # their text messages through KDE Connect (brain/mochi_sms.py): reading never changes anything on the phone
     "Bash(mochi-sms status)", "Bash(mochi-sms threads:*)", "Bash(mochi-sms read:*)", "Bash(mochi-sms recent:*)",
     "Bash(mochi-sms unread)", "Bash(mochi-sms search:*)", "Bash(mochi-sms sync:*)", "Bash(mochi-sms contacts:*)",
@@ -528,6 +529,13 @@ WS = load_sibling("mochi_workshop", "mochi-workshop")  # Mochi's workshop: its w
 BROWSER = load_sibling("mochi_browser", "mochi-browser")  # Mochi's own Chrome, as an MCP server per run
 BOX = load_sibling("mochi_box", "mochi-box")  # Mochi's own computer; its Chrome is a second MCP server
 CLOCKS = load_sibling("mochi_clocks", "mochi-clocks")  # the pig on the kitchen and corridor clocks
+HA = load_sibling("mochi_ha", "mochi-ha")  # which of Mochi's machines is Mochi right now (desk, sff, the cloud)
+HANDOFF = WORK / "handoff"  # what a node that doesn't lead heard (the pig, the command line): one file per node
+HANDOFF_KEEP = 86400        # a line older than this is dropped, not acted on
+CARRY_KINDS = ("ask", "approved")  # tasks they gave: kept across a restart or a handover until they have run
+CARRY_MAX_AGE = 6 * 3600
+DEMOTE_AFTER = 90           # "not leader" this long without a handover or another leader: hand over anyway
+DRAIN_MAX = 25 * 60         # a run in progress when the leadership moves: waited for this long
 
 
 def now():
@@ -800,13 +808,15 @@ def browser_args(headed):
     `headed` only matters when there is no nested display to hide it on: a chat then gets a plain window."""
     if not BROWSER:
         return []
-    try:
-        BROWSER.ensure(headed=headed)
-        path = BROWSER.write_config(headed=headed)
-    except Exception as e:
-        log(f"browser: no config ({e})")
-        return []
-    paths = [str(path)] if path else []
+    paths = []
+    if own_chrome_here():
+        try:
+            BROWSER.ensure(headed=headed)
+            path = BROWSER.write_config(headed=headed)
+        except Exception as e:
+            log(f"browser: no config ({e})")
+            return []
+        paths = [str(path)] if path else []
     try:  # the box's Chrome (peppy's real screen and GPU), when the box is up: mcp__peppy__*
         box = BOX and BOX.write_mcp_config((BROWSER.mcp_config(headed) or {}).get("mcpServers", {}).get("chrome"))
         if box:
@@ -814,6 +824,22 @@ def browser_args(headed):
     except Exception as e:
         log(f"browser: no box config ({e})")
     return ["--mcp-config"] + paths if paths else []
+
+
+TG_LIVE = shutil.which("mochi-tg") or str(HOME / ".local/bin/mochi-tg")
+TG_LIVE_AFTER = 10 * 60  # the archive unreadable this long at home: read Telegram itself (mochi-tg) meanwhile
+
+
+def archive_here():
+    """The Telegram archive (on sff) is reachable from this node: at home. Not from the cloud."""
+    r = node_role()
+    return r is None or "tg-archive" in (r.get("caps") or [])
+
+
+def own_chrome_here():
+    """Mochi's Chrome (its profile, his logins in it) lives on the desk; on sff and the cloud only peppy's is near."""
+    r = node_role()
+    return r is None or "chrome" in (r.get("caps") or [])
 
 
 def notify(text):
@@ -1345,12 +1371,12 @@ class Feed:
 
     LABELS = {"telegram": "their Telegram archive", "mail": "their local mail index",
               "calls": "the recorded-calls folder on the NAS", "calendar": "their Google calendars (CalDAV)",
-              "phone": "their phone (mochi-phone)"}
+              "phone": "their phone (mochi-phone)", "tglive": "Telegram itself (mochi-tg, their account)"}
 
     def __init__(self, state, fire):
         self.state, self.fire = state, fire
         for k, v in {"counts": {}, "new": {}, "items": {}, "down": {}, "last_poll": 0, "last_catchup": 0,
-                     "mail_seen": None, "calls": None, "cal": None, "phone_seen": None}.items():
+                     "mail_seen": None, "calls": None, "cal": None, "phone_seen": None, "tglive": None}.items():
             state.setdefault(k, v)
         for k in ("down_since", "told_down"):  # from before the feed had more than Telegram
             state.pop(k, None)
@@ -1365,7 +1391,7 @@ class Feed:
             return set()
 
     COMMANDS = {"telegram": ["telegram", "counts"], "mail": ["mail", "feed"], "calls": ["calls", "feed"],
-                "calendar": ["calendar", "feed"], "phone": ["phone", "feed"]}
+                "calendar": ["calendar", "feed"], "phone": ["phone", "feed"], "tglive": ["counts"]}
 
     def poll_async(self, src):
         if src in self.polling:
@@ -1374,7 +1400,8 @@ class Feed:
 
         def go():
             try:
-                code, out, err = run([SENSE, *self.COMMANDS[src]], timeout=150)
+                exe = TG_LIVE if src == "tglive" else SENSE
+                code, out, err = run([exe, *self.COMMANDS[src]], timeout=150)
                 try:
                     data = json.loads(out)
                 except ValueError:
@@ -1436,6 +1463,25 @@ class Feed:
             e["last"] = t
         st["last_poll"] = t
 
+    def take_tglive(self, data, t):
+        """Telegram straight from their account (mochi-tg counts), for when the archive can't be read: on the cloud
+        node it never can (it lives on sff), and at home it may be down. A dialog whose newest message moved on and
+        isn't theirs is new, like a chat that grew in the archive; the catch-up reads it with `mochi-tg read`."""
+        st, mute = self.state, self.mute()
+        old, cur = st["tglive"], {}
+        for did, d in (data.get("dialogs") or {}).items():
+            cur[did] = int(d.get("top") or 0)
+            if old is None or did not in old or cur[did] <= old[did] or d.get("out"):
+                continue
+            if d.get("kind") not in FEED_KINDS or d.get("archived") or did in mute:
+                continue
+            e = st["new"].setdefault(did, {"name": d.get("name") or did, "kind": d.get("kind"), "n": 0, "first": t,
+                                           "since": (st.get("last_poll") or t) - 300})
+            e["live"] = True
+            e["n"] = max(e["n"] + 1, int(d.get("unread") or 0))
+            e["last"] = t
+        st["tglive"] = dict(old or {}, **cur)
+
     def take_mail(self, data, t):
         msgs = data.get("messages") or {}
         seen = self.state["mail_seen"]
@@ -1454,7 +1500,8 @@ class Feed:
         per sender per hour keeps a chatty evening to one item). Telegram messages arrive here too, as a backup: they
         count only while the archive is unreadable; otherwise the archive's own feed raises the chat."""
         items, seen = data.get("items") or {}, self.state["phone_seen"]
-        tg_down = bool(self.state["down"].get("telegram", {}).get("since"))
+        tg_down = bool(self.state["down"].get("telegram", {}).get("since")) or (
+            not archive_here() and bool(self.state["down"].get("tglive", {}).get("since")))
         if seen is not None:
             seen = set(seen)
             for key, it in items.items():
@@ -1772,6 +1819,8 @@ class Telegram:
         self.on = bool(self.bot and self.bot.enabled)
         self.inbox = queue.Queue()
         self.offset = int(relay.state.get("tg_offset") or 0)
+        self.handled = self.offset  # past the last update handled (what's saved: a handover re-polls the rest)
+        self.stopped = threading.Event()
         self.trouble = ""  # the last reason a send failed, logged once per reason
         self.ignored = set()
         self.vault = {}  # request id -> (message id, text, accounts) for the sign-in questions on the phone
@@ -1783,10 +1832,22 @@ class Telegram:
         else:
             log(f"telegram: off ({self.bot.why if self.bot else 'mochi-telegram not installed'})")
 
+    def stop(self):
+        """Another node is taking over: stop asking Telegram for updates (two pollers make Telegram refuse one)."""
+        self.stopped.set()
+
+    def start(self):
+        if self.on and self.stopped.is_set():
+            self.stopped.clear()
+            self.offset = self.handled
+            threading.Thread(target=self.poller, daemon=True).start()
+
     def poller(self):
-        while True:
+        while not self.stopped.is_set():
             try:
                 for u in self.bot.poll(self.offset, 50):
+                    if self.stopped.is_set():
+                        return  # not ours to handle any more; the next leader polls from the saved offset
                     self.offset = u["update_id"] + 1
                     self.inbox.put(u)
             except Exception as e:  # network blip, Telegram hiccup: wait and retry
@@ -1805,6 +1866,8 @@ class Telegram:
         if not urgent or not self.on:
             return False
         if self.quiet_now() and not critical:
+            return False
+        if self.relay.in_windows() and not critical:  # gaming at the PC: it arrives, silently
             return False
         if self.relay.count("tg_buzz") >= TG_AUDIBLE_PER_DAY:
             return False
@@ -2080,8 +2143,10 @@ class Telegram:
             self.send(TG_HELP)
         elif cmd == "/status":
             age = human_age(now() - r.state["last_round"]) if r.state["last_round"] else "never"
+            where = f", running on {r.role['node']}" if r.role else ""
             self.send(f"{len(r.state['asks'])} things waiting, {r.count('rounds')} rounds today, last one {age} ago, "
-                      f"{'busy: ' + r.busy if r.busy else 'idle'}, you've been {'away' if r.away() else 'at the computer'}")
+                      f"{'busy: ' + r.busy if r.busy else 'idle'}, you've been {'away' if r.away() else 'at the computer'}"
+                      + where)
         elif cmd == "/round":
             busy = r.busy == "round" or any(t["kind"] == "round" for t in list(r.tasks.queue))
             r.start_round("you asked for a round from your phone")
@@ -2152,6 +2217,11 @@ class Relay:
         self.capped = ""
         self.catchup_capped = ""
         self.mail_mtime = None
+        self.current = None  # the task the worker is running
+        self.draining = 0    # handing over to another node since then: finish the run, start nothing
+        self.not_leader_since = 0
+        self.role = node_role()
+        self.carry_in()
         threading.Thread(target=self.worker, daemon=True).start()
 
     def load(self):
@@ -2174,10 +2244,42 @@ class Relay:
         return s
 
     def save(self):
-        self.state["tg_offset"] = self.tg.offset
+        self.state["tg_offset"] = self.tg.handled
+        self.state["rev"] = int(self.state.get("rev") or 0) + 1
+        self.state["rev_node"] = (self.role or {}).get("node") or socket.gethostname()
+        self.state["carry"] = self.carry_out()
         tmp = STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.state, indent=1))
         tmp.replace(STATE_FILE)
+
+    def carry_out(self):
+        """What they asked for and hasn't run yet (queued, or running right now), so a crash, a restart or another
+        node taking over runs it after all. Mochi's own work isn't carried: the clock brings it back."""
+        out = []
+        for t in ([self.current] if self.current else []) + list(self.tasks.queue):
+            if t and t.get("kind") in CARRY_KINDS:
+                t.setdefault("queued_at", now())
+                try:
+                    json.dumps(t)
+                    out.append(t)
+                except (TypeError, ValueError):
+                    pass
+        return out
+
+    def carry_in(self):
+        for t in self.state.pop("carry", None) or []:
+            if not isinstance(t, dict) or t.get("kind") not in CARRY_KINDS:
+                continue
+            t["attempts"] = int(t.get("attempts") or 0) + 1
+            if now() - float(t.get("queued_at") or 0) > CARRY_MAX_AGE:
+                self.event(f"dropped a task from before a restart, too old by now: {t.get('title', '')[:80]}")
+            elif t["attempts"] > 2:  # it was running through two restarts already: maybe it is what kills them
+                self.event(f"dropped a task that was interrupted twice: {t.get('title', '')[:80]}")
+                if t.get("via") == "telegram":
+                    self.tg.send(f"I lost this one twice on the way, sorry; send it again? ({t.get('title', '')[:80]})")
+            else:
+                log(f"carried over from before: {t['kind']} '{t.get('title', '')[:50]}' (attempt {t['attempts']})")
+                self.tasks.put(t)
 
     def count(self, what):
         c = self.state["counts"]
@@ -2217,11 +2319,18 @@ class Relay:
                 return True
             return False
 
+        if self.role is not None:
+            self.promoted()
         while True:
             r, _, _ = select.select([srv], [], [], 5)
             if r:
                 try:
-                    self.on_message(json.loads(srv.recv(8192)))
+                    m = json.loads(srv.recv(8192))
+                    if self.draining and m.get("event") not in ("status", "hello", "vault_done", "tg_send_done") \
+                            and m.get("src") != "claude":
+                        handoff_write(self.role["node"], m)  # the next leader acts on it
+                    else:
+                        self.on_message(m)
                 except (ValueError, OSError):
                     pass
                 except Exception:
@@ -2229,11 +2338,19 @@ class Relay:
             try:
                 while not self.results.empty():
                     self.on_result(*self.results.get_nowait())
+                if due("role", 5) and self.role is not None:
+                    self.check_role()
+                if self.draining:
+                    continue
+                if due("handoff", 5) and self.role is not None:
+                    self.take_handoff()
                 while not self.tg.inbox.empty():
+                    u = self.tg.inbox.get_nowait()
                     try:
-                        self.tg.handle(self.tg.inbox.get_nowait())
+                        self.tg.handle(u)
                     except Exception:
                         log("telegram message error:\n" + traceback.format_exc())
+                    self.tg.handled = max(self.tg.handled, int(u.get("update_id") or 0) + 1)
                 if self.tg.albums:
                     self.tg.flush_albums()
                 if due("sample", SAMPLE_EVERY):
@@ -2244,7 +2361,11 @@ class Relay:
                     self.watchers.check()
                     self.watches.check()
                 if due("feed", FEED_EVERY):
-                    self.feed.poll_async("telegram")
+                    if archive_here():
+                        self.feed.poll_async("telegram")
+                    down = (self.feed.state["down"].get("telegram") or {}).get("since")
+                    if not archive_here() or (down and now() - down >= TG_LIVE_AFTER):
+                        self.feed.poll_async("tglive")  # Telegram itself, through their account
                 if due("feed-slow", SLOW_FEED_EVERY):
                     self.feed.poll_async("calls")
                     self.feed.poll_async("calendar")
@@ -2267,6 +2388,66 @@ class Relay:
                     self.save()
             except Exception:
                 log("loop error:\n" + traceback.format_exc())
+
+    # -- which machine is Mochi (mochi-ha)
+
+    def promoted(self):
+        """This node just became the leader (or the relay restarted on it)."""
+        r = self.role or {}
+        me, nodes = r.get("node") or "?", r.get("nodes") or {}
+        before = self.state.get("rev_node") or ""
+        HA.ack("leader", int(self.state.get("rev") or 0))
+        if before and before != me:
+            gone = ", ".join(f"{n} ({'sick: ' + str(v.get('why')) if not v.get('healthy') else 'up'})"
+                             for n, v in sorted(nodes.items())) or "no other machine answers"
+            self.event(f"you moved: you're running on {me} now (last time on {before}); the others: {gone}")
+            if "pig" not in (r.get("caps") or []) and not any(n for n, v in nodes.items() if v.get("healthy")):
+                self.tg.send("Home seems to be offline (no power or no internet there?). I'm running from "
+                             f"{me} for now: Telegram, mail and the calendar still work, the pig and the NAS don't.")
+        log(f"leading on {me} (state revision {self.state.get('rev', 0)} from {before or '?'})")
+
+    def check_role(self):
+        r = node_role()
+        if r is None:
+            return
+        self.role = r
+        if r.get("leader") and not self.draining:
+            self.not_leader_since = 0
+            return
+        if not self.draining:
+            other = r.get("leader_node") and r["leader_node"] != r.get("node")
+            if not (r.get("draining") or other):
+                # mochi-ha restarting, or no one leads: give it DEMOTE_AFTER before stopping everything
+                self.not_leader_since = self.not_leader_since or now()
+                if now() - self.not_leader_since < DEMOTE_AFTER:
+                    return
+            self.draining = now()
+            self.tg.stop()
+            to = r.get("leader_node") if r.get("leader_node") not in ("", r.get("node")) else ""
+            log(f"handing over ({'to ' + to if to else r.get('why') or 'mochi-ha'})"
+                + (f"; finishing the {self.busy} first" if self.busy else ""))
+        if r.get("leader") and not r.get("draining"):  # the handover was called off
+            log("handover called off: leading on")
+            self.draining = 0
+            self.tg.start()
+            return
+        if (self.busy or self.side) and now() - self.draining < DRAIN_MAX:
+            return
+        self.save()
+        HA.ack("follower", int(self.state.get("rev") or 0))
+        log(f"handed over at state revision {self.state['rev']}; following now")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    def take_handoff(self):
+        seen = self.state.setdefault("handoff_seen", [])
+        for hid, m in handoff_read(self.role.get("node") or "", set(seen)):
+            seen.append(hid)
+            del seen[:-300]
+            log(f"from another node: {m.get('event')}")
+            try:
+                self.on_message(m)
+            except Exception:
+                log("handoff message error:\n" + traceback.format_exc())
 
     # -- messages from the pig and the command line
 
@@ -2459,7 +2640,15 @@ class Relay:
 
     # -- when to run a round (the only decision made here)
 
+    def in_windows(self):
+        """He's at the desk PC, booted into Windows (the seat agent, ha/windows/), and has touched it lately: there's
+        no pig there, so to the relay that is still "away" (asks go to the phone), but nothing buzzes."""
+        w = (getattr(self, "role", None) or {}).get("windows")
+        return w if w and w.get("idle", 1e9) < AWAY_AFTER else None
+
     def away(self):
+        if not self.activity.idle.ok or (self.role is not None and not self.role.get("seat")):
+            return True  # not the machine he sits at (sff, the cloud): nobody is here, whatever its screen says
         return self.activity.idle.seconds() > AWAY_AFTER
 
     def maybe_round(self):
@@ -2632,7 +2821,9 @@ class Relay:
         self.feed.state["last_catchup"] = now()
         hours = round(min(6.0, max(0.25, (now() - last_look) / 3600)), 2)
         lines = [f"- Telegram, {e['name']} ({e['kind']}, id {did}): {e['n']} new message(s); read them with "
-                 f"`mochi-sense telegram dialog {did} --since {dt.datetime.fromtimestamp(e['since']):%Y-%m-%dT%H:%M} --chars 400`"
+                 + (f"`mochi-tg read {did} --limit {min(50, max(15, e['n'] + 5))}` (live from Telegram: the archive "
+                    f"isn't reachable from here)" if e.get("live") else
+                    f"`mochi-sense telegram dialog {did} --since {dt.datetime.fromtimestamp(e['since']):%Y-%m-%dT%H:%M} --chars 400`")
                  for did, e in chats]
         lines += [f"- {it['line']}" for _, it in items[:40]]
         if len(items) > 40:
@@ -2654,14 +2845,20 @@ class Relay:
         digest = SENSES / "digest.md"
         return {
             "hostname": socket.gethostname(),
-            "you": dict(self.activity.summary(60), away=self.away(),
+            "where_you_run": self.where(),
+            "you": dict(self.activity.summary(60), away=self.away(), in_windows=(
+                        f"at the PC in Windows right now ({self.in_windows()['app'] or 'an app'} in front, "
+                        f"idle {self.in_windows()['idle']}s): no pig, so asks go to the phone, silently; most likely "
+                        f"playing (see CLAUDE.md 'Where you run')") if self.in_windows() else False,
                         away_for=human_age(now() - self.state["away_since"]) if self.away() and self.state["away_since"] else ""),
             "browser": (("your own Chrome is available as the mcp__chrome__* tools" +
                          (" and is on their screen right now (they see what you do; `mochi-browser hide` takes it off)"
                           if BROWSER.shown() else
                           " (hidden, yours alone, logins persist in your profile; `mochi-browser show` puts it on "
-                          "their screen when a page needs them)")) if BROWSER and BROWSER.server()
-                        else "not available (mochi-browser needs chrome-devtools-mcp)"),
+                          "their screen when a page needs them)")) if BROWSER and BROWSER.server() and own_chrome_here()
+                        else "your own Chrome is on the desk, not here: peppy's (mcp__peppy__*) is the browser now, "
+                             "when the box is up; no vault fills, no Google Messages, no logins of his"
+                        if BROWSER and BROWSER.server() else "not available (mochi-browser needs chrome-devtools-mcp)"),
             "telegram": ("connected: while they're away your asks and reports go to their phone as messages with buttons, "
                          "and they can message you back; keep what crosses the wire short and vague (it passes through "
                          "Telegram's servers). Files: what they send you lands in inbox/; `files` in your block, or a "
@@ -2691,6 +2888,19 @@ class Relay:
             "senses": f"{digest.relative_to(WORK)} is refreshed by the relay right before this run "
                       f"(`mochi-sense all`); for more, run `mochi-sense <sense> ...` (see `mochi-sense --help`)",
         }
+
+    def where(self):
+        r = self.role
+        if r is None:
+            return "this machine is all of you (no standby set up)"
+        caps = r.get("caps") or []
+        nodes = r.get("nodes") or {}
+        others = "; ".join(f"{n}: {'up' if v.get('healthy') else 'down or sick (' + str(v.get('why')) + ')'}"
+                           for n, v in sorted(nodes.items())) or "no other node answers"
+        missing = [c for c in ("pig", "screen", "webcam", "chrome", "vault", "nas", "tg-archive", "box", "clocks")
+                   if c not in caps]
+        return (f"{r.get('node')} (see CLAUDE.md 'Where you run'). Reachable from here: {', '.join(caps) or 'nothing local'}; "
+                f"not from here: {', '.join(missing) or 'nothing missing'}. The others: {others}")
 
     def start_round(self, reason, force=False):
         if self.busy == "round" or any(t["kind"] == "round" for t in list(self.tasks.queue)):
@@ -2911,6 +3121,11 @@ class Relay:
     def worker(self):
         while True:
             task = self.tasks.get()
+            if self.draining:  # handing over: it waits in the queue, which save() carries to the next node
+                self.tasks.put(task)
+                time.sleep(5)
+                continue
+            self.current = task
             self.busy = task["kind"]
             try:
                 if task.get("senses"):
@@ -2927,6 +3142,7 @@ class Relay:
             except Exception as e:  # never let the worker die
                 res = {"ok": False, "text": "", "error": repr(e), "secs": 0, "cost": 0}
             self.results.put((task, res))
+            self.current = None
             self.busy = None
 
     def on_result(self, task, res):
@@ -3131,6 +3347,19 @@ class Relay:
 
     def housekeeping(self):
         t = now()
+        merge_log_conflicts()
+        for f in [p for d in (WORK, MEMORY, JOURNAL) for p in d.glob("*.sync-conflict-*")]:
+            try:  # Syncthing's second copy of a file two nodes wrote at once; Mochi merged it by now (CLAUDE.md)
+                if t - f.stat().st_mtime > 3 * 86400:
+                    f.unlink()
+                    log(f"cleared the sync conflict copy {f.name}")
+                elif not self.state.setdefault("conflicts_told", {}).get(f.name):
+                    self.state["conflicts_told"][f.name] = t
+                    self.event(f"sync conflict: {f.relative_to(WORK)} (two machines wrote at once; merge it)")
+            except OSError:
+                pass
+        self.state["conflicts_told"] = {k: v for k, v in (self.state.get("conflicts_told") or {}).items()
+                                        if t - v < 4 * 86400}
         self.state["threads"] = {k: v for k, v in self.state["threads"].items() if t - v["at"] < THREAD_KEEP}
         for aid, a in list(self.state["asks"].items()):
             if t - a["at"] > (2 * 3600 if a.get("urgent") else 3 * 86400):
@@ -3170,6 +3399,7 @@ def claude_run(prompt, level, model=None, timeout=900, resume=None):
         cmd += ["--resume", resume]
     env = dict(os.environ, MOCHI_BRAIN="1")  # the pig's hook relay marks these as Mochi's own runs
     env.pop("CLAUDECODE", None)
+    env.update(claude_auth_env())
     t0 = now()
     try:
         p = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=str(WORK), env=env)
@@ -3187,10 +3417,176 @@ def claude_run(prompt, level, model=None, timeout=900, resume=None):
     text = (j.get("result") if isinstance(j, dict) else None) or p.stdout.strip()
     ok = p.returncode == 0 and not (isinstance(j, dict) and j.get("is_error"))
     err = "" if ok else (p.stderr.strip()[-600:] or text[-600:] or f"exit {p.returncode}")
+    if not ok and HA and HA.is_auth_error(err):  # this node's Claude login is the trouble: mochi-ha hears it
+        HA.auth_failed(err)
     return {"ok": ok, "text": text, "error": err, "secs": now() - t0,
             "cost": float(j.get("total_cost_usd") or 0) if isinstance(j, dict) else 0,
             "session": str(j.get("session_id") or "") if isinstance(j, dict) else "",
             "denials": denials_of(j)}
+
+
+def claude_auth_env():
+    """A standby node has no Claude Code login of its own (copying the desk's would break it: the refresh token
+    rotates); it runs on the long-lived token `claude setup-token` made, in the synced config."""
+    if (HOME / ".claude/.credentials.json").exists():
+        return {}
+    try:
+        tok = (CONFIG.parent / "claude-oauth.token").read_text().strip()
+    except OSError:
+        return {}
+    return {"CLAUDE_CODE_OAUTH_TOKEN": tok} if tok else {}
+
+
+APPEND_ONLY = (".log", ".jsonl")  # files that only ever grow: two nodes' versions merge line by line
+
+
+def merge_log_conflicts(root=None):
+    """Syncthing's conflict copies of the append-only logs (actions.log, comms.jsonl, ...: written by two nodes in the
+    seconds of a handover): every line of both, in time order, back into the real file; the copy is removed. Lines
+    start with a timestamp (actions.log) or carry "t" (the jsonl files); a line without one keeps its place."""
+    root = root or WORK
+    for c in sorted(p for d in (root, root / "memory", root / "journal", root / "handoff") if d.is_dir()
+                    for p in d.glob("*.sync-conflict-*")):
+        if c.suffix not in APPEND_ONLY:
+            continue
+        real = c.with_name(re.sub(r"\.sync-conflict-[0-9]{8}-[0-9]{6}-[A-Z0-9]{7}", "", c.name))
+        try:
+            mine = real.read_text().splitlines() if real.exists() else []
+            theirs = c.read_text().splitlines()
+        except OSError:
+            continue
+        have = set(mine)
+        lines = mine + [x for x in theirs if x not in have]
+
+        keyed, last = [], ""
+        for i, line in enumerate(lines):  # a line without a time (a traceback) stays with the line before it
+            m = re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d)", line)
+            n = re.search(r'"t": ?([0-9.]+)', line) if not m else None
+            if m:
+                last = m.group(1)
+            elif n:
+                last = dt.datetime.fromtimestamp(float(n.group(1))).strftime("%Y-%m-%d %H:%M")
+            keyed.append(((last, i), line))
+        tmp = real.with_name(real.name + ".merge.tmp")
+        tmp.write_text("\n".join(x for _, x in sorted(keyed)) + "\n")
+        tmp.replace(real)
+        c.unlink()
+        log(f"merged the sync conflict copy {c.name} into {real.name} ({len(lines) - len(mine)} lines from it)")
+
+
+def node_role():
+    """mochi-ha's view ({"leader", "node", "leader_node", "caps", "nodes", ...}), or None: HA isn't set up here and
+    this machine is all of Mochi, as before."""
+    try:
+        return HA.role() if HA else None
+    except Exception:
+        return None
+
+
+def node_rev():
+    try:
+        return int(json.loads(STATE_FILE.read_text()).get("rev") or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def handoff_write(node, m):
+    """Append what this node heard to its own handoff file (only this node writes it, so Syncthing never sees two
+    writers); lines older than HANDOFF_KEEP are dropped on the way."""
+    HANDOFF.mkdir(parents=True, exist_ok=True)
+    f = HANDOFF / f"{node}.jsonl"
+    keep = []
+    try:
+        for line in f.read_text().splitlines():
+            try:
+                if now() - float(json.loads(line).get("t") or 0) < HANDOFF_KEEP:
+                    keep.append(line)
+            except ValueError:
+                pass
+    except OSError:
+        pass
+    keep.append(json.dumps({"id": f"{node}-{now():.3f}-{os.getpid()}", "t": now(), "m": m}, ensure_ascii=False))
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text("\n".join(keep) + "\n")
+    tmp.replace(f)
+
+
+def handoff_read(me, seen):
+    """What the other nodes heard and the leader hasn't acted on yet: [(id, message)], oldest first."""
+    out = []
+    for f in sorted(HANDOFF.glob("*.jsonl")) if HANDOFF.is_dir() else []:
+        if f.stem == me:
+            continue
+        try:
+            lines = f.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("id") not in seen and now() - float(e.get("t") or 0) < HANDOFF_KEEP and isinstance(e.get("m"), dict):
+                out.append((e["id"], e["m"]))
+    return sorted(out, key=lambda x: x[0].split("-", 1)[-1])
+
+
+class Follower:
+    """This node isn't Mochi right now: another one leads (mochi-ha), or none does yet. Nothing starts here and
+    nothing in the workspace is written but this node's own handoff file: what the pig or the command line says is
+    passed to the leader through it (Syncthing carries it). When mochi-ha makes this node the leader, the process
+    becomes the relay (exec), with the state Syncthing brought."""
+
+    def __init__(self, r):
+        self.pet = Pet()
+        self.node = r.get("node") or socket.gethostname()
+
+    def say(self, text):
+        print(f"{dt.datetime.now():%Y-%m-%d %H:%M} {text}", flush=True)
+
+    def loop(self):
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            BRAIN_SOCK.unlink()
+        except FileNotFoundError:
+            pass
+        old = os.umask(0o077)
+        srv.bind(str(BRAIN_SOCK))
+        os.umask(old)
+        HA.ack("follower", node_rev())
+        self.say(f"follower on {self.node}: another node leads, or none yet (mochi-ha status)")
+        last = 0
+        while True:
+            r, _, _ = select.select([srv], [], [], 5)
+            if r:
+                try:
+                    self.on_message(json.loads(srv.recv(8192)))
+                except (ValueError, OSError):
+                    pass
+            if now() - last >= 5:
+                last = now()
+                role = node_role()
+                if role is None or role.get("leader"):
+                    self.say("this node leads now: becoming the relay")
+                    srv.close()
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    def on_message(self, m):
+        ev = m.get("event", "")
+        role = node_role() or {}
+        where = role.get("leader_node") or ""
+        if m.get("src") == "claude" or ev in ("hello", "history", "report", "vault_done", "tg_send_done"):
+            if ev == "hello":
+                self.pet.say(f"I'm thinking on {where} right now; what you tell me here gets there" if where else
+                             "I can't reach my other machines right now; tell me anyway, it waits", 6)
+            return
+        if ev == "status":
+            self.pet.say(f"running on {where or 'no machine I can see'} right now (mochi-ha status)", 8)
+            return
+        handoff_write(self.node, m)
+        if ev in ("ask", "answer", "chat"):
+            self.pet.say("passed on" + (f" to me on {where}" if where else "; it waits for whoever wakes first"), 3)
+        self.say(f"passed on: {ev}")
 
 
 def denials_of(j):
@@ -3369,7 +3765,11 @@ def main(argv):
               f"      Mochi's workspace: {WORK}  (CLAUDE.md = its brief, memory/ = what it knows)")
         return 0 if a in ("-h", "--help") else 1
     try:
-        Relay().loop()
+        r = node_role()
+        if r is not None and not r.get("leader"):
+            Follower(r).loop()
+        else:
+            Relay().loop()
     except KeyboardInterrupt:
         pass
     return 0

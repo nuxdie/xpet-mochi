@@ -9,6 +9,11 @@ than KEEP_DAYS. Stdlib only, one process, ~20 MB, meant to sit next to a Minecra
   POST /v1/push/{box}                 body = blob (<= MAX_BLOB bytes)        -> {"id": "..."}
   GET  /v1/pull/{box}?wait=25&ack=a,b  long-polls up to `wait` s for items    -> {"items": [{"id", "t", "b64"}]}
   GET  /v1/health                                                            -> "ok"
+  PUT  /v1/beacon/{node}              body = JSON (<= 4 KB), the node's heartbeat -> {"ok": true}
+  GET  /v1/beacons                    every node's last heartbeat              -> {"node": {"at", "beacon"}}
+
+Beacons are the brain nodes' heartbeats for choosing which one leads (see ha/mochi_ha.py); they take the "ha"
+token (the Windows seat agent's own "seat" token: its one beacon only), are held in memory only, and are the one thing here that isn't opaque (no secrets in them, by design).
 
 Auth: `Authorization: Bearer TOKEN`, tokens in /etc/mochi-relay/tokens.json ({"desk": "...", "phone": "..."}).
 TLS: /etc/mochi-relay/tls/fullchain.pem + privkey.pem (copied there by certbot's deploy hook); without them it
@@ -36,6 +41,9 @@ MAX_WAIT = 50
 BATCH = 50
 KEEP_DAYS = 7
 
+MAX_BEACON = 4096
+BEACONS = {}  # node -> {"at": epoch, "beacon": {...}}; in memory: a restart forgets them within one heartbeat
+
 TOKENS = {}
 COND = {b: threading.Condition() for b in BOXES}
 
@@ -45,6 +53,7 @@ def load_tokens():
     for b in BOXES:
         if not TOKENS.get(b):
             sys.exit(f"tokens.json needs a token for {b}")
+    # "ha" (the brain nodes' heartbeats) is optional: without it the beacon routes answer 401
 
 
 def box_dir(box):
@@ -107,10 +116,12 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         if parts == ["v1", "health"]:
             return self.send(200, "ok", "text/plain")
+        if parts[:2] in (["v1", "beacon"], ["v1", "beacons"]):
+            return self.beacon(parts)
         if len(parts) != 3 or parts[0] != "v1" or parts[1] not in ("push", "pull") or parts[2] not in BOXES:
             return self.send(404, {"error": "no such route"})
         side = self.who()
-        if side is None:
+        if side not in BOXES:  # no token, or the heartbeat token: the mailboxes are only the desk's and the phone's
             return self.send(401, {"error": "bad token"})
         op, box = parts[1], parts[2]
         # the phone pushes into the desk's box and pulls its own; the desk the other way round
@@ -124,10 +135,35 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(405, {"error": "push is POST"})
         self.route()
 
+    def do_PUT(self):
+        self.route()
+
     def do_POST(self):
         if self.path.startswith("/v1/pull/"):
             return self.send(405, {"error": "pull is GET"})
         self.route()
+
+    def beacon(self, parts):
+        who = self.who()
+        # "seat": the little agent on his Windows install may only say he's at the PC (PUT /v1/beacon/windows)
+        seat_ok = who == "seat" and self.command == "PUT" and parts == ["v1", "beacon", "windows"]
+        if who != "ha" and not seat_ok:
+            return self.send(401, {"error": "bad token"})
+        if parts == ["v1", "beacons"] and self.command == "GET":
+            return self.send(200, BEACONS)
+        if len(parts) != 3 or self.command != "PUT" or not parts[2].isidentifier() or len(parts[2]) > 32:
+            return self.send(404, {"error": "no such route"})
+        n = int(self.headers.get("Content-Length") or 0)
+        if n <= 0 or n > MAX_BEACON:
+            return self.send(413, {"error": f"beacon must be 1..{MAX_BEACON} bytes"})
+        try:
+            b = json.loads(self.rfile.read(n))
+        except ValueError:
+            return self.send(400, {"error": "not json"})
+        if len(BEACONS) >= 16 and parts[2] not in BEACONS:
+            return self.send(429, {"error": "too many nodes"})
+        BEACONS[parts[2]] = {"at": time.time(), "beacon": b}
+        self.send(200, {"ok": True, "now": time.time()})
 
     def push(self, box):
         n = int(self.headers.get("Content-Length") or 0)
