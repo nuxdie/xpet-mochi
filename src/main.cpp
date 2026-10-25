@@ -1019,8 +1019,14 @@ public:
         if (idle && (idleActionIn -= dt) <= 0) {
             idleActionIn = frand(3, 9);
             double r = frand();
+            // Late at night it gets sleepy too: now and then a big yawn, and it nods off for a moment. Not more than one
+            // in YAWN_GAP, so it stays a small thing at 1 a.m. and never a hint.
+            if (lateNight() && now() - yawnedAt > YAWN_GAP && r < 0.2 && grounded()) {
+                yawnedAt = now();
+                anim.start(art3d::Action::Yawn, art3d::YAWN_SECS);
+            }
             // Once in a long while, standing or sitting about, a sneeze: about one idle trick in seventy.
-            if (r > 0.986 && grounded()) anim.start(art3d::Action::Sneeze, art3d::SNEEZE_SECS);
+            else if (r > 0.986 && grounded()) anim.start(art3d::Action::Sneeze, art3d::SNEEZE_SECS);
             else if (st == St::Sit) {
                 if (r < 0.3) anim.start(art3d::Action::LookAround, 2.4);
                 else if (r < 0.5) anim.start(art3d::Action::Scratch, 1.7);
@@ -1175,6 +1181,7 @@ public:
         if (anim.action == art3d::Action::Sneeze && anim.actionT > anim.actionLen * art3d::SNEEZE_SHUT &&
             anim.actionT < anim.actionLen * art3d::SNEEZE_OPEN)
             eyes = art::Eyes::Closed;  // nobody sneezes with their eyes open
+        if (anim.action == art3d::Action::Yawn && art3d::yawnEyesShut(anim.actionT / anim.actionLen)) eyes = art::Eyes::Closed;
         if (anim.action == art3d::Action::Rub) {  // a good scratch: content, and eyes shut in the best of it
             double q = anim.actionT / anim.actionLen;
             if (q > art3d::RUB_FROM && q < art3d::RUB_TO) eyes = q > art3d::RUB_BLISS && q < art3d::RUB_BLISS_END ? art::Eyes::Closed : art::Eyes::Happy;
@@ -1316,6 +1323,8 @@ private:
     double whoopsAt = -1e9;
     static constexpr double RUB_GAP = 240;  // a scratch on the screen's edge: at most one in four minutes (rubOnEdge)
     double rubbedAt = -1e9;
+    static constexpr double YAWN_GAP = 600;  // late-night yawns: at most one in ten minutes (animate)
+    double yawnedAt = -1e9;
     // the belly rub: this many pets within ten seconds roll it over, not twice within ROLL_GAP; rubs extend the lie-down
     static constexpr size_t ROLL_PETS = 4;
     static constexpr double ROLL_GAP = 120;
@@ -1545,6 +1554,14 @@ private:
         if (h < 20) return mix(day, dusk, (h - 18) / 2);
         if (h < 23) return mix(dusk, night, (h - 20) / 3);
         return night;
+    }
+
+    // Past eleven and before five: the hours the light is at its night blue (dayTint), when the pig gets yawny.
+    bool lateNight() const {
+        time_t tt = time(nullptr);
+        tm lt{};
+        localtime_r(&tt, &lt);
+        return lt.tm_hour >= 23 || lt.tm_hour < 5;
     }
 
     // One line about what it's up to (middle click).
@@ -2268,6 +2285,7 @@ int writeStrip(const std::string& name, const char* path) {
                 if (p > art3d::RUB_FROM && p < art3d::RUB_TO) f.eyes = p > art3d::RUB_BLISS && p < art3d::RUB_BLISS_END ? art::Eyes::Closed : art::Eyes::Happy;
             }
             if (a->action == art3d::Action::Sneeze && p > art3d::SNEEZE_SHUT && p < art3d::SNEEZE_OPEN) f.eyes = art::Eyes::Closed;
+            if (a->action == art3d::Action::Yawn && art3d::yawnEyesShut(p)) f.eyes = art::Eyes::Closed;
             f.t = 1.0 + p * a->secs;
             f.costume = wardrobe::today();
             art3d::renderStill(cr, f, i * cellW + cellW / 2.0, row * cellH + cellH - 14 * zoom, zoom, a->action, p);

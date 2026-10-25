@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops, Roll, Rub };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops, Roll, Rub, Yawn };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -167,8 +167,12 @@ inline const ActionInfo ACTIONS[] = {
     {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},         {"stir", Action::Stir, 2.8},
     {"chase", Action::Chase, 3.0},     {"sneeze", Action::Sneeze, 2.0},       {"ride", Action::Ride, 2.0},
     {"leap", Action::Leap, 1.3},       {"whoops", Action::Whoops, 1.2},     {"roll", Action::Roll, 4.2},
-    {"rub", Action::Rub, 3.6},
+    {"rub", Action::Rub, 3.6},         {"yawn", Action::Yawn, 3.0},
 };
+// Yawn: late at night it gets sleepy too. A big yawn (eyes shut from YAWN_SHUT to YAWN_OPEN), a smack of the lips, then
+// its head drifts down as it nods off (eyes shut again from YAWN_NOD) and it catches itself with a jerk at YAWN_JERK.
+constexpr double YAWN_SHUT = 0.12, YAWN_OPEN = 0.48, YAWN_NOD = 0.6, YAWN_JERK = 0.8, YAWN_SECS = 3.0;
+inline bool yawnEyesShut(double p) { return (p > YAWN_SHUT && p < YAWN_OPEN) || (p > YAWN_NOD && p < YAWN_JERK); }
 // Rub: walking into the edge of the screen it sometimes turns round, backs up to it and scratches its rump on it, the
 // way pigs use a post. The pet turns it (its back to the edge) over the first moments; it rubs from RUB_FROM to RUB_TO,
 // eyes happy, shut in the best of it (RUB_BLISS to RUB_BLISS_END), then a shake and it's done.
@@ -923,6 +927,30 @@ inline Rig actionRig(Action a, double p, double t, int flank = 1) {
             r.ear = 18 * in + 40 * choo + 20 * std::fabs(std::sin(t * 19 + 0.8)) * shakeoff;
             r.earSwing = -12 * in + 35 * choo;
             r.tail = 45 * choo;
+            break;
+        }
+        case Action::Yawn: {  // past bedtime: a huge yawn, a smack of the lips, it nods off and catches itself
+            // The yawn rises slowly, holds wide open with a shiver at the top (head back, chest up, ears laid back) and
+            // closes; then the head drifts down, slower at first, the way a head goes when you nod off on the sofa, and
+            // snaps back up just past level at YAWN_JERK, ears up, with a startled flick of the tail. The pet closes the
+            // eyes (yawnEyesShut).
+            double dip = env(p / 0.1);
+            double yawn = smoothstep((p - 0.06) / 0.14) * (1 - smoothstep((p - 0.4) / 0.1));
+            double top = smoothstep((p - 0.18) / 0.06) * (1 - smoothstep((p - 0.38) / 0.06));
+            double smack = env((p - 0.46) / 0.12);
+            double nod = smoothstep((p - 0.56) / (YAWN_JERK - 0.56)) * (1 - smoothstep((p - YAWN_JERK) / 0.03));
+            double jerk = env((p - YAWN_JERK + 0.01) / 0.12);
+            r.headPitch = 6 * dip - 34 * yawn + 22 * nod - 8 * jerk;
+            r.headRoll = 8 * yawn + 2.5 * std::sin(t * 21) * top + 5 * nod;
+            r.snout = 1 + 0.4 * yawn + 0.12 * std::fabs(std::sin(t * 26)) * smack;  // mouth wide, then chewing on nothing
+            r.scaleY = 1 + 0.08 * yawn - 0.04 * nod + 0.04 * jerk;  // the long breath in; slumping; sitting up sharp
+            r.scaleXZ = 1 - 0.02 * yawn + 0.02 * nod;
+            r.bodyPitch = 5 * yawn - 3 * nod;
+            r.bodyY = -0.3 * dip - 0.5 * nod;
+            r.leg[0] = r.leg[1] = -5 * yawn;  // front hooves braced
+            r.ear = -14 * yawn - 18 * nod + 24 * jerk;
+            r.earSwing = -18 * yawn + 8 * nod;
+            r.tail = 20 * yawn + 30 * std::sin(t * 20) * jerk;
             break;
         }
         case Action::Whoops: {  // the floor's gone: it looks down, looks at you, then its legs run on the air
