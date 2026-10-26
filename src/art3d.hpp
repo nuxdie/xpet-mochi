@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops, Roll, Rub, Yawn };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops, Roll, Rub, Yawn, Lean };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -167,8 +167,13 @@ inline const ActionInfo ACTIONS[] = {
     {"paw", Action::Paw, 2.0},         {"dream", Action::Dream, 3.4},         {"stir", Action::Stir, 2.8},
     {"chase", Action::Chase, 3.0},     {"sneeze", Action::Sneeze, 2.0},       {"ride", Action::Ride, 2.0},
     {"leap", Action::Leap, 1.3},       {"whoops", Action::Whoops, 1.2},     {"roll", Action::Roll, 4.2},
-    {"rub", Action::Rub, 3.6},         {"yawn", Action::Yawn, 3.0},
+    {"rub", Action::Rub, 3.6},         {"yawn", Action::Yawn, 3.0},           {"lean", Action::Lean, 3.4},
 };
+// Lean: your pointer comes to rest on its back or head, like a hand, and it pushes up into it, eyes shut (LEAN_SHUT to
+// LEAN_OPEN), rubbing against it. While the hand stays the pet holds it at LEAN_HOLD (main.cpp), so it leans as long as
+// you leave it there, up to a point; the hand gone, it lets go with a contented sigh.
+constexpr double LEAN_SHUT = 0.24, LEAN_HOLD = 0.5, LEAN_OPEN = 0.78, LEAN_SECS = 3.4;
+inline bool leanEyesShut(double p) { return p > LEAN_SHUT && p < LEAN_OPEN; }
 // Yawn: late at night it gets sleepy too. A big yawn (eyes shut from YAWN_SHUT to YAWN_OPEN), a smack of the lips, then
 // its head drifts down as it nods off (eyes shut again from YAWN_NOD) and it catches itself with a jerk at YAWN_JERK.
 constexpr double YAWN_SHUT = 0.12, YAWN_OPEN = 0.48, YAWN_NOD = 0.6, YAWN_JERK = 0.8, YAWN_SECS = 3.0;
@@ -951,6 +956,33 @@ inline Rig actionRig(Action a, double p, double t, int flank = 1) {
             r.ear = -14 * yawn - 18 * nod + 24 * jerk;
             r.earSwing = -18 * yawn + 8 * nod;
             r.tail = 20 * yawn + 30 * std::sin(t * 20) * jerk;
+            break;
+        }
+        case Action::Lean: {  // a hand resting on it: it pushes up into the palm, eyes shut, rubbing, then a sigh
+            // An ear flicks (something on its back), a little dip, and it rises into the hand: up on its toes, nose up,
+            // ears laid back flat. Then it rubs against it, the head rolling slowly side to side with the back following
+            // a beat behind, contented grunts in the snout, the tail swinging lazily. The pet holds it here while the
+            // hand stays (LEAN_HOLD), and the sin()s run on t, so the rub goes on. Let go, it breathes in, sighs out
+            // a touch lower than it stood, and settles. Ends at zero. Works standing or sitting.
+            double notice = env(p / 0.16), dip = env((p - 0.04) / 0.1);
+            double push = smoothstep((p - 0.1) / 0.14) * (1 - smoothstep((p - 0.7) / 0.14));
+            double rub = smoothstep((p - 0.18) / 0.1) * (1 - smoothstep((p - 0.7) / 0.1));
+            double in = env((p - 0.66) / 0.14), out = env((p - 0.78) / 0.2);
+            double s = std::sin(t * 3.2);
+            r.earFlick = 34 * notice;
+            r.headPitch = 6 * dip - 22 * push + 6 * out;
+            r.headRoll = 15 * s * rub;
+            r.headYaw = 10 * std::sin(t * 1.6) * rub;
+            r.bodyRoll = 4 * std::sin(t * 3.2 - 0.7) * rub;  // the back presses in after the head
+            r.bodyPitch = -3 * push;
+            r.scaleY = 1 + 0.09 * push + 0.05 * in - 0.06 * out;  // up into the hand; the breath in, the sigh
+            r.scaleXZ = 1 - 0.02 * push + 0.02 * out;
+            r.bodyY = -0.3 * dip - 0.3 * out;
+            r.leg[0] = r.leg[1] = -4 * push;  // braced, pushing up
+            r.snout = 1 + 0.1 * std::fabs(std::sin(t * 5)) * rub;
+            r.tail = 30 * std::sin(t * 6) * rub + 15 * out;
+            r.ear = -14 * push + 10 * out;
+            r.earSwing = -16 * push;
             break;
         }
         case Action::Whoops: {  // the floor's gone: it looks down, looks at you, then its legs run on the air
