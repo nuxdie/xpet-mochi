@@ -422,7 +422,14 @@ FILL_JS = r"""(function (a) {
     (last.form ? [...last.form.querySelectorAll("button,input[type=submit],[role=button]")] :
                  deep(document, "button,input[type=submit],[role=button]")).filter(shown).find(b => go.test(text(b)));
   if (btn) { btn.click(); return {ok: true, filled, how: "button"}; }
-  if (last.form && last.form.requestSubmit) { last.form.requestSubmit(); return {ok: true, filled, how: "form"}; }
+  // a script-driven form (Home Assistant's, its button a custom element) has no real action: submitting it natively
+  // is a GET that puts the login in the address bar and history, so a form carrying a password gets Enter instead
+  const leaks = f => (f.getAttribute("method") || "get").toLowerCase() === "get" &&
+    [...f.elements].some(e => e.type === "password" && e.value);
+  if (last.form && last.form.requestSubmit && !leaks(last.form)) {
+    last.form.requestSubmit(); return {ok: true, filled, how: "form"};
+  }
+  last.focus();
   return {ok: true, filled, how: "enter"};
 })"""
 
