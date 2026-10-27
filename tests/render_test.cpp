@@ -134,6 +134,19 @@ int main() {
             if (!wardrobe::named(s.costume)) { fprintf(stderr, "  no costume '%s'\n", s.costume); return false; }
         return true;
     }());
+    check("holidays are worn outright, the rest of the wardrobe in turn", [] {
+        auto is = [](const art3d::Costume* c, const char* n) { return c && c->name == n; };
+        for (long d = 0; d < 7; ++d)
+            if (!is(wardrobe::forDate(10, 31, d), "witch-hat") || !is(wardrobe::forDate(10, 1, d), "autumn-scarf")) return false;
+        for (const art3d::Costume& c : wardrobe::all()) {  // everything in the closet comes out on some day of the year
+            bool worn = false;
+            for (int m = 1; m <= 12 && !worn; ++m)
+                for (int d = 1; d <= 31 && !worn; ++d)
+                    for (long n = 0; n < 8 && !worn; ++n) worn = wardrobe::forDate(m, d, n) == &c;
+            if (!worn) { fprintf(stderr, "  '%s' is never worn\n", c.name.c_str()); return false; }
+        }
+        return true;
+    }());
     for (double a : {0.5, 1.0}) {  // the close-up, at its biggest
         Frame f; f.yaw = 90; f.approach = a; f.lookKind = 2; f.lookW = 1; f.t = 1;
         char name[64]; snprintf(name, sizeof name, "closeup@%.1f", a);

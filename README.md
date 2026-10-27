@@ -97,9 +97,10 @@ it walks over to sit on the window you've settled into.
 
 **It dresses for the season,** and makes its own clothes. On *workshop nights* the brain gets an hour in its own git
 worktree of this repo to make one thing about the pig better: a costume for a date coming up, a new trick, a better
-reaction to your desktop. It renders what it made, looks at the picture, iterates, and must pass the render test. In
-the morning you get one quiet line in the menu: **Keep it** or **Undo**. An undo is the most useful thing you can tell
-it, and it writes down why.
+reaction to your desktop. One night in three is for clothes: a holiday's costume is worn on its days, and the rest of
+its wardrobe takes turns, a different piece each day. It renders what it made, looks at the picture, iterates, and must pass the render test. In
+the morning it's simply there: what ships is kept and merged into `main`, with a "new tonight" note under Recent... If
+you don't like something, tell Mochi in a chat; it undoes it and writes down why.
 
 <p align="center">
   <img src="docs/daylight.png" alt="The same pig in morning, day, evening and night light" width="880">

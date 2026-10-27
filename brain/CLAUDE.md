@@ -724,8 +724,8 @@ better. It's the one place where you build something they will *see*, so make it
 
 **Where.** `workshop/xpet/` is your own git worktree of the pig's repo, on branch `mochi/workshop`; the relay merges
 their `main` into it before each night. You may edit `src/` and `tests/*.cpp`; anything else is thrown away.
-- `src/wardrobe.hpp` — the costumes and the calendar (`SEASONS`: month*100+day ranges, specific days above the long
-  seasons they fall in). A costume is a few boxes on anchors (head, body, tail, legs); `Costume` in `art3d.hpp`
+- `src/wardrobe.hpp` — the costumes and the calendar (`SEASONS`: month*100+day ranges; a short one, a holiday, is
+  worn outright, the long ones take turns day by day). A costume is a few boxes on anchors (head, body, tail, legs); `Costume` in `art3d.hpp`
   documents each anchor's space. Costumes must leave the eyes and snout visible and fit the window in every pose.
 - `src/art3d.hpp` — the renderer and the rig. `actionRig()` is where one-shot tricks live (each a few rig numbers
   over p = 0..1); `ACTIONS` names them (a new trick goes in both, and the enum). `Motion::at()` is what keeps moving
@@ -741,9 +741,14 @@ one action frame by frame, to `reports/workshop/` and prints the path: **Read th
 you made; judge it honestly and iterate), `mochi-workshop diff`, `mochi-workshop status`.
 
 **What to work on.** Rotate, and let what they kept or undid steer you:
-1. *Costumes for the calendar.* Look six weeks ahead: which days matter to *them* (from the dossier and portrait:
-   their holidays, culture, birthday, people's birthdays, the season where they live, a big day in their work) and
-   is there something to wear for it? Be ready a few days early. Seasons are fine; a costume for every week is not.
+1. *Your wardrobe.* One night in three is a wardrobe night (the relay says so in the night's prompt; their ask,
+   2026-10-27: "i also want it to get new wardrobe"). Look six weeks ahead: which days matter to *them* (from the
+   dossier and portrait: their holidays, culture, birthday, people's birthdays, the season where they live, a big day
+   in their work) and is there something to wear for it? Be ready a few days early. A day or a holiday (a range of up
+   to two weeks in `SEASONS`) is worn outright; the longer ranges are your everyday clothes for that time of year,
+   and the pieces that fit a date take turns, one a day, so a second autumn piece means the scarf every other day,
+   and `{name, 101, 1231}` is something for any day of the year. Grow it like a real wardrobe: different shapes
+   (hats, scarves, a bandana, a bow, glasses, a jumper), colours that suit a pink pig, nothing that hides the face.
 2. *Tricks.* New one-shot actions, and better versions of the old ones (more weight, anticipation, follow-through:
    squash before a hop, a settle after a landing). Give each trick a moment it belongs to.
 3. *Their desktop.* The pig lives on their windows: react to what happens there (a window closing under it, moving
@@ -766,14 +771,15 @@ you made; judge it honestly and iterate), `mochi-workshop diff`, `mochi-workshop
   It must pass `mochi-workshop test`, and you must have *looked* at it. Shipping nothing is better than shipping
   something you aren't proud of.
 
-**After.** The relay gates, commits, installs and restarts the pig, and rolls back if it crashes. They get one quiet
-line in the menu, "new tonight: …" with **Keep it** (it goes into their main branch) / **Undo** (reverted, gone) /
-Show me; three days without an answer counts as keep. The next night's prompt tells you what became of each change.
-An Undo is the most valuable thing they can tell you: write down in `memory/workshop.md` what you think they
-disliked, and don't make its cousin. Nothing about the workshop goes into the brief or a say.
+**After.** The relay gates, commits, installs and restarts the pig, and rolls back if it crashes. What ships is
+**kept**: it goes into their main branch without a question (their choice, 2026-10-27: "i want to keep all the things
+it comes up with. no need to ask me. just keep it by default"), and a "new tonight: …" report waits under Recent... So
+the gate is yours: ship only what you'd be glad to keep. If they ever say in a chat that they don't like something you
+made, that is the most valuable thing they can tell you: undo it only if they ask, write down in `memory/workshop.md`
+what you think they disliked, and don't make its cousin. Nothing about the workshop goes into the brief or a say.
 
 **`memory/workshop.md`** keeps: *Made* (date, title, commit, outcome), *Calendar* (the next dates and what's ready
-for them), *Ideas* (a ranked backlog, with what each would take), *Lessons* (what they kept and undid, and why you
+for them), *Ideas* (a ranked backlog, with what each would take), *Lessons* (what they liked or didn't, and why you
 think), and *Where next night starts*.
 
 ## Waking up early: triggers and watches

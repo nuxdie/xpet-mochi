@@ -475,6 +475,17 @@ class Workshop(unittest.TestCase):
         import datetime as dt
         return dt.datetime(2026, 10, 7, hour, 30)
 
+    def test_every_third_night_is_for_clothes(self):
+        self.assertIs(mb.workshop_focus([]), mb.WARDROBE_FOCUS)
+        old = [{"title": "rouse"}, {"title": "bedtime"}]  # nights from before kinds were kept
+        self.assertIs(mb.workshop_focus(old), mb.WARDROBE_FOCUS)
+        self.assertIs(mb.workshop_focus(old + [{"kind": "wardrobe"}]), mb.OTHER_FOCUS)
+        self.assertIs(mb.workshop_focus(old + [{"kind": "wardrobe"}, {"kind": "trick"}]), mb.OTHER_FOCUS)
+        self.assertIs(mb.workshop_focus(old + [{"kind": "wardrobe"}, {"kind": "trick"}, {"kind": "them"}]), mb.WARDROBE_FOCUS)
+        prompt = mb.WORKSHOP_PROMPT.format(now="now", prep="ok", history="-", focus=mb.WARDROBE_FOCUS)
+        self.assertIn("{name, 101, 1231}", prompt)
+        self.assertIn('"kind"', prompt)
+
     def test_once_a_night_after_a_breather(self):
         t = self.at(3)
         long_ago = t.timestamp() - mb.STUDY_GAP - 60
@@ -577,6 +588,29 @@ class History(unittest.TestCase):
         for name in ("add_ask", "remember_closed", "reopen", "on_answer", "on_message"):
             setattr(r, name, getattr(mb.Relay, name).__get__(r))
         return r
+
+    def test_workshop_change_is_kept_without_asking(self):
+        r = self.relay()
+        r.state["workshop"] = {"history": []}
+        kept = []
+        fake = type("WS", (), {"keep": staticmethod(lambda: kept.append(1) or {"ok": len(kept) > 1, "msg": "x"})})
+        r.write_report = lambda title, body: "/r.md"
+        for name in ("workshop_done", "workshop_note", "workshop_guard", "workshop_answer"):
+            setattr(r, name, getattr(mb.Relay, name).__get__(r))
+        old, mb.WS = mb.WS, fake
+        try:
+            r.add_ask("new tonight: a hat", ["Keep it", "Undo"], aid="workshop-0ld", do="workshop commit 0ld")
+            fake.guard = staticmethod(lambda: {"ok": True})
+            r.workshop_done({}, {"workshop": {"made": True, "ok": True, "title": "a scarf", "sha": "abc123",
+                                              "summary": "s", "deploy": {"ok": True, "msg": "up"}, "kind": "wardrobe"}})
+            self.assertEqual(list(r.state["asks"]), ["workshop-0ld"])  # nothing new asked
+            self.assertTrue(r.state["workshop"]["unmerged"])  # main was busy
+            r.workshop_guard()
+            self.assertEqual(r.state["asks"], {})  # the old ask is kept and gone
+            self.assertFalse(r.state["workshop"]["unmerged"])
+            self.assertEqual(r.state["workshop"]["history"][0]["kind"], "wardrobe")
+        finally:
+            mb.WS = old
 
     def test_dismissed_comes_back_with_its_chat(self):
         r = self.relay()

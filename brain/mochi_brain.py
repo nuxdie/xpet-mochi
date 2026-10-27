@@ -119,6 +119,7 @@ WORKSHOP_MODEL = None        # writing C++ for its own body: the default model
 WORKSHOP_HOURS = (1, 7)      # the same night; after the dream, before the study sessions
 WORKSHOP_AWAY = DREAM_AWAY
 WORKSHOP_TIMEOUT = 60 * 60   # the run itself; the relay's build, test and deploy come after
+WARDROBE_EVERY = 3           # one night in this many is for clothes (their ask, 2026-10-27: "new wardrobe")
 
 # ---- waking up early -----------------------------------------------------------------------------
 # Besides the clock, a round can start because something happened: `mochi-brain --trigger TEXT` (you, a script, a
@@ -442,19 +443,23 @@ delight them and what holidays and dates matter to them. Pick ONE thing for toni
 `mochi-workshop test` and look at it with `mochi-workshop preview` (Read the picture it prints). Then update
 memory/workshop.md and a line in today's journal.
 
+{focus}
+
 What became of your earlier nights (newest last):
 {history}
 
 The relay takes over when you finish: anything outside src/ and tests/*.cpp is thrown away, the rest must build and
 pass the render test, then it is committed, installed and the pig restarted; if it doesn't stay up, the previous pig
-comes back and your commit is reverted. They find one quiet line in the menu: "new tonight: <your title>", with Keep
-it / Undo / Show me. So put what you made in the block below; leave "workshop" null if you made nothing worth
+comes back and your commit is reverted. What ships is kept: it goes into their main branch with no question asked
+(their choice, 2026-10-27), and they find it under Recent... as "new tonight: <your title>". So ship only what you'd
+be glad to keep, and put what you made in the block below; leave "workshop" null if you made nothing worth
 shipping (that's fine: a night of notes and a better plan beats a rushed change).
 
 End your answer with the mochi block, in exactly this shape (fill in "workshop"; leave the rest as it is):
 ```json
-{{"workshop": {{"title": "under 50 chars, what they'll see, in your voice", "summary": "what changed and why, for the
-commit and for them, a few lines", "preview": "reports/workshop/....png (the picture that shows it best) or null"}},
+{{"workshop": {{"title": "under 50 chars, what they'll see, in your voice", "kind": "wardrobe|trick|desktop|them",
+"summary": "what changed and why, for the commit and for them, a few lines", "preview": "reports/workshop/....png (the
+picture that shows it best) or null"}},
  "say": null, "urgent": false, "asks": [], "withdraw": [], "report": null, "files": []}}
 ```"""
 
@@ -674,6 +679,22 @@ def day_study_due(at, study, away_for):
     return done < STUDY_PER_DAY
 
 
+WARDROBE_FOCUS = """Tonight is a wardrobe night: they asked for Mochi to get new clothes, not only new tricks
+(2026-10-27). Make one new piece to wear, in src/wardrobe.hpp, and put it in SEASONS: a costume for a day that
+matters to them in the next six weeks if there is one you haven't made, otherwise something for the pig's everyday
+wardrobe for this time of year (a long range: the pieces that fit a date take turns, one a day) or for all year
+({name, 101, 1231}). Something that suits the pig and them; look at what it already has and make it different.
+Preview it with --costume NAME and look at it from every side. Better clothes beat a fix to an old piece; a night
+of notes is still fine if nothing good comes of it."""
+OTHER_FOCUS = "Tonight is for the pig itself (a trick, the desktop, them); clothes get their own nights."
+
+
+def workshop_focus(history):
+    """Every WARDROBE_EVERY-th night is for clothes: when none of the last few things it made was something to wear."""
+    recent = [r.get("kind") for r in history[-(WARDROBE_EVERY - 1):]] if WARDROBE_EVERY > 1 else []
+    return OTHER_FOCUS if "wardrobe" in recent else WARDROBE_FOCUS
+
+
 def workshop_due(at, ws, away_for, last_run_end):
     """One workshop a night, in WORKSHOP_HOURS, once they've been away a while and the last night run has had a
     breather."""
@@ -762,6 +783,10 @@ def open_chat(session, prompt):
         full = [term, "--title=Mochi"] + (["--"] if term == "gnome-terminal" else ["-e"]) + cmd
     else:
         full = [term, "-T", "Mochi", "-e", shlex.join(cmd)]
+    # In a scope of its own, not in mochi-brain.service: xfce4-terminal and gnome-terminal keep every window in one
+    # process, and one first started from here would be killed with the service, with all of their windows in it.
+    if shutil.which("systemd-run"):
+        full = ["systemd-run", "--user", "--scope", "--quiet", "--collect"] + full
     env = dict(os.environ, MOCHI_BRAIN="1")
     env.pop("CLAUDECODE", None)
     subprocess.Popen(full, cwd=str(WORK), env=env, start_new_session=True,
@@ -3065,16 +3090,17 @@ class Relay:
 
     def workshop_history(self):
         rows = self.state["workshop"].get("history", [])[-12:]
-        return "\n".join(f"- {dt.datetime.fromtimestamp(r['at']):%Y-%m-%d}: {r['title']} ({r.get('sha', '')[:8] or '-'}): "
+        return "\n".join(f"- {dt.datetime.fromtimestamp(r['at']):%Y-%m-%d}: {r['title']}"
+                         f"{' [' + r['kind'] + ']' if r.get('kind') else ''} ({r.get('sha', '')[:8] or '-'}): "
                          f"{r['outcome']}" for r in rows) or "- none yet: this is your first night in the workshop"
 
-    def workshop_note(self, sha, outcome, title=None):
+    def workshop_note(self, sha, outcome, title=None, kind=None):
         hist = self.state["workshop"].setdefault("history", [])
         for r in hist:
             if sha and r.get("sha") == sha:
                 r["outcome"] = outcome
                 return
-        hist.append({"at": now(), "sha": sha, "title": (title or "?")[:80], "outcome": outcome})
+        hist.append({"at": now(), "sha": sha, "title": (title or "?")[:80], "outcome": outcome, "kind": kind})
         self.state["workshop"]["history"] = hist[-40:]
 
     def run_workshop(self, task):
@@ -3082,8 +3108,9 @@ class Relay:
         prep = WS.prepare()
         if not prep["ok"]:
             return {"ok": False, "text": "", "error": f"workshop not ready: {prep['msg']}", "secs": 0, "cost": 0}
+        focus = workshop_focus(self.state["workshop"].get("history", []))
         prompt = WORKSHOP_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"), prep=prep["msg"],
-                                        history=self.workshop_history())
+                                        history=self.workshop_history(), focus=focus)
         res = claude_run(prompt, "workshop", task.get("model"), task.get("timeout", WORKSHOP_TIMEOUT))
         w = (extract_json(res["text"]) or {}).get("workshop") if res["ok"] else None
         if not isinstance(w, dict) or not str(w.get("title") or "").strip():
@@ -3091,8 +3118,10 @@ class Relay:
             res["workshop"] = {"made": False}
             return res
         title, summary = str(w["title"]).strip()[:60], str(w.get("summary") or "").strip()[:2000]
+        kind = str(w.get("kind") or "").strip().lower() or None
         fin = WS.finish(title, summary)
-        res["workshop"] = {"made": True, "title": title, "summary": summary, "preview": w.get("preview"), **fin}
+        res["workshop"] = {"made": True, "title": title, "summary": summary, "preview": w.get("preview"), "kind": kind,
+                           **fin}
         if fin["ok"]:
             res["workshop"]["deploy"] = WS.deploy(fin["sha"])
         return res
@@ -3105,31 +3134,32 @@ class Relay:
             return
         title, sha = w["title"], w.get("sha", "")
         if not w["ok"]:
-            self.workshop_note("", f"not shipped: {w['msg'][:300]}", title)
+            self.workshop_note("", f"not shipped: {w['msg'][:300]}", title, w.get("kind"))
             self.event(f"your workshop change '{title}' wasn't shipped: {w['msg'][:300]}")
             return
         dep = w.get("deploy") or {}
         if not dep.get("ok"):
-            self.workshop_note(sha, f"rolled back at deploy: {dep.get('msg', '?')}", title)
+            self.workshop_note(sha, f"rolled back at deploy: {dep.get('msg', '?')}", title, w.get("kind"))
             self.event(f"your workshop change '{title}' was rolled back: {dep.get('msg', '?')}")
             return
-        self.workshop_note(sha, "deployed, waiting for their answer", title)
-        self.event(f"workshop: '{title}' is live ({sha[:8]}; {dep['msg']})")
+        # Kept by default (their ask, 2026-10-27: "i want to keep all the things it comes up with. no need to ask me"):
+        # no ask, straight into main; an undo is theirs to ask for in a chat.
+        r = WS.keep()
+        self.workshop_note(sha, "KEPT (by default)" + ("" if r["ok"] else f"; not in main yet: {r['msg'][:200]}"), title,
+                           w.get("kind"))
+        self.state["workshop"]["unmerged"] = not r["ok"]
+        self.event(f"workshop: '{title}' is live and kept ({sha[:8]}; {dep['msg']}; {r['msg']})")
         stat = w.get("stat", "")
-        body = (f"{w['summary']}\n\n**Commit** `{sha[:8]}` on mochi/workshop\n\n```\n{stat}\n```\n\n"
-                f"Keep it: it goes into main. Undo: it's reverted and the pig restarted without it.")
+        body = (f"{w['summary']}\n\n**Commit** `{sha[:8]}` on mochi/workshop ({r['msg']})\n\n```\n{stat}\n```")
         preview = resolve_file(w.get("preview"))
         if preview:
             body += f"\n\nPreview: {preview}"
-        path = preview or self.write_report(f"new tonight: {title}", body)
-        if preview:
-            self.write_report(f"new tonight: {title}", body)
-        self.add_ask(f"new tonight: {title}", ["Keep it", "Undo", "Show me"], path=path, aid=f"workshop-{sha[:8]}",
-                     do=f"workshop commit {sha}", mirror=False, src="workshop")
+        self.write_report(f"new tonight: {title}", body)
+        self.save()
 
     def workshop_answer(self, a, low):
         sha = (a.get("do") or "").rsplit(" ", 1)[-1]
-        if low == "undo":
+        if low == "undo":  # only from an ask raised before keeping became the default
             r = WS.undo(sha)
             self.workshop_note(sha, "UNDONE by them" + ("" if r["ok"] else f" (undo failed: {r['msg'][:200]})"))
             self.event(f"they undid your workshop change: {a['text']}" + ("" if r["ok"] else f"; undo failed: {r['msg']}"))
@@ -3137,7 +3167,8 @@ class Relay:
                 self.pet.say("couldn't undo that one, see the log", 4)
         else:
             r = WS.keep()
-            self.workshop_note(sha, "KEPT by them" + ("" if r["ok"] else f" ({r['msg'][:200]})"))
+            self.state["workshop"]["unmerged"] = not r["ok"]
+            self.workshop_note(sha, "KEPT" + ("" if r["ok"] else f" ({r['msg'][:200]})"))
             self.event(f"they kept your workshop change: {a['text']} ({r['msg']})")
             self.pet.send(event="emote", emote="happy")
         log(f"workshop {low}: {sha[:8]}: {r['msg']}")
@@ -3146,6 +3177,18 @@ class Relay:
     def workshop_guard(self):
         if not WS:
             return
+        for aid, a in list(self.state["asks"].items()):  # asks from before keeping became the default: kept now
+            if aid.startswith("workshop-"):
+                self.state["asks"].pop(aid)
+                self.pet.withdraw(aid)
+                self.tg.close(a, "kept")
+                self.workshop_answer(a, "keep it")
+        if self.state["workshop"].get("unmerged"):  # main was busy when it shipped: bring it in once main is clean
+            r = WS.keep()
+            if r["ok"]:
+                self.state["workshop"]["unmerged"] = False
+                log(f"workshop: {r['msg']}")
+                self.save()
         r = WS.guard()
         if not r["ok"] and r.get("rolled_back"):
             sha = r["rolled_back"]

@@ -1,5 +1,5 @@
 // What Mochi wears, and when. Each costume is a few boxes on the pig's parts (see Costume in art3d.hpp for the
-// anchors and their spaces); SEASONS says which one is worn on which days. Mochi adds to this file in its night
+// anchors and their spaces); SEASONS says which one is worn on which days (a holiday's outright, the rest in turn). Mochi adds to this file in its night
 // workshop (brain/CLAUDE.md, "Your workshop"); the render test dresses the pig in every costume here.
 //
 // XPET_COSTUME=name (or "none") forces a costume; XPET_DATE=YYYY-MM-DD pretends it's another day. Both are for
@@ -97,7 +97,9 @@ inline const Costume* named(const std::string& name) {
 }
 
 // When each costume is worn: month*100 + day, inclusive, and a range may wrap the new year (1220 to 110).
-// The first match wins, so put the short special days above the long seasons they fall in.
+// A short range (a day, a holiday: up to DAY_SPAN days) is worn outright on its days; the first one that matches
+// wins, so put the more special of two overlapping days first. Everything else that fits the date is the pig's
+// wardrobe for that time of year, and it wears one piece a day, taking turns ({name, 101, 1231} fits every day).
 struct Season {
     const char* costume;
     int from, to;
@@ -107,25 +109,42 @@ inline const Season SEASONS[] = {
     {"autumn-scarf", 922, 1120},
     {"bobble-hat", 1121, 228},  // all winter, through the new year
 };
+inline constexpr int DAY_SPAN = 14;
 
-inline const Costume* forDate(int month, int day) {
+inline int dayOfYear(int month, int day) {  // in a leap year, so 02-29 has a place
+    static const int start[] = {0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335};
+    return start[(month + 11) % 12] + day;
+}
+
+inline const Costume* forDate(int month, int day, long dayNumber = 0) {
     int md = month * 100 + day;
+    std::vector<const Season*> fits;
     for (const Season& s : SEASONS) {
         bool in = s.from <= s.to ? md >= s.from && md <= s.to : md >= s.from || md <= s.to;
-        if (in) return named(s.costume);
+        if (!in) continue;
+        int span = (dayOfYear(s.to / 100, s.to % 100) - dayOfYear(s.from / 100, s.from % 100) + 366) % 366 + 1;
+        if (span <= DAY_SPAN) return named(s.costume);
+        fits.push_back(&s);
     }
-    return nullptr;
+    if (fits.empty()) return nullptr;
+    return named(fits[((dayNumber % (long)fits.size()) + fits.size()) % fits.size()]->costume);
 }
 
 // Today's costume, honouring XPET_COSTUME and XPET_DATE.
 inline const Costume* today() {
     if (const char* c = getenv("XPET_COSTUME"); c && *c) return named(c);  // "none" (or any unknown name): nothing
-    int y = 0, m = 0, d = 0;
-    if (const char* fake = getenv("XPET_DATE"); fake && sscanf(fake, "%d-%d-%d", &y, &m, &d) == 3) return forDate(m, d);
-    time_t t = time(nullptr);
     tm lt{};
-    localtime_r(&t, &lt);
-    return forDate(lt.tm_mon + 1, lt.tm_mday);
+    int y = 0, m = 0, d = 0;
+    if (const char* fake = getenv("XPET_DATE"); fake && sscanf(fake, "%d-%d-%d", &y, &m, &d) == 3) {
+        lt.tm_year = y - 1900, lt.tm_mon = m - 1, lt.tm_mday = d, lt.tm_hour = 12;
+    } else {
+        time_t t = time(nullptr);
+        localtime_r(&t, &lt);
+        lt.tm_hour = 12, lt.tm_min = lt.tm_sec = 0;
+    }
+    lt.tm_isdst = -1;
+    long dayNumber = (long)(mktime(&lt) / 86400);  // the turn of the wardrobe: a new piece each day
+    return forDate(lt.tm_mon + 1, lt.tm_mday, dayNumber);
 }
 
 }  // namespace wardrobe
