@@ -150,6 +150,12 @@ static Eyes eyesFor(const Animator& a, Eyes e) {
     if (a.action == Action::Rouse && a.actionT < a.actionLen * ROUSE_YAWN) return Eyes::Closed;
     if (a.action == Action::Perk && a.actionT > a.actionLen * PERK_GLAD) return Eyes::Happy;
     if (a.action == Action::Cheer && a.actionT > a.actionLen * CHEER_TURN) return Eyes::Happy;
+    double q = a.actionT / a.actionLen;  // the rest as main.cpp has them
+    if (a.action == Action::Chase && q > CHASE_SPIN) return Eyes::Happy;
+    if (a.action == Action::Roll && q > 0.3 && q < 0.9) return Eyes::Happy;
+    if (a.action == Action::Sneeze && q > SNEEZE_SHUT && q < SNEEZE_OPEN) return Eyes::Closed;
+    if (a.action == Action::Yawn && yawnEyesShut(q)) return Eyes::Closed;
+    if (a.action == Action::Rub && q > RUB_FROM && q < RUB_TO) return q > RUB_BLISS && q < RUB_BLISS_END ? Eyes::Closed : Eyes::Happy;
     return e;
 }
 
@@ -252,10 +258,12 @@ static void tricks() {
         trick("sniff", Action::Sniff, 1.7), trick("stretch", Action::Stretch, 2.2), trick("shake", Action::Shake, 0.9, 0.8),
         trick("hop", Action::Hop, 0.55, 0.9), trick("scratch", Action::Scratch, 1.7), trick("wiggle", Action::Wiggle, 0.9, 0.8),
         trick("look around", Action::LookAround, 2.4), trick("paw", Action::Paw, 2.0), trick("land", Action::Land, 0.7, 0.9),
-        trick("cheer", Action::Cheer, CHEER_SECS),
+        trick("cheer", Action::Cheer, CHEER_SECS), trick("chases its tail", Action::Chase, CHASE_SECS),
+        trick("sneeze", Action::Sneeze, SNEEZE_SECS), trick("yawn", Action::Yawn, YAWN_SECS),
+        trick("scratches its rump", Action::Rub, RUB_SECS, 0.2), trick("whoops", Action::Whoops, WHOOPS_SECS, 0.9),
     };
     cells[9].yaw = 90;
-    grid("tricks", cells, 5, 3.0);
+    grid("tricks", cells, 5, 4.0);
 }
 
 static void life() {
@@ -267,16 +275,24 @@ static void life() {
             if ((i / 8) % 2) a.f.eyes = Eyes::Closed;
         }},
         {"naps", [](Actor& a, double, int) { a.f.pose = Pose::Sleep; }},
+        {"dreams", [](Actor& a, double t, int) {
+            a.f.pose = Pose::Sleep;
+            if (std::fabs(t - 0.2) < 0.5 / FPS) a.anim.start(Action::Dream, DREAM_SECS);
+        }},
         {"works", [](Actor& a, double, int) { a.f.pose = Pose::Sit; a.f.prop = Prop::Laptop; }, 315},
         {"reads", [](Actor& a, double, int) { a.f.pose = Pose::Sit; a.f.prop = Prop::Book; }, 315},
         {"runs things", [](Actor& a, double, int) { a.f.pose = Pose::Sit; a.f.prop = Prop::Terminal; }, 315},
         {"browses", [](Actor& a, double, int) { a.f.pose = Pose::Sit; a.f.prop = Prop::Globe; }, 315},
+        {"half-hears you", [](Actor& a, double t, int) {
+            a.f.pose = Pose::Sleep;
+            if (std::fabs(t - 0.4) < 0.5 / FPS) a.anim.start(Action::Stir, STIR_SECS);
+        }},
     };
     for (Cell& c : cells) {  // props stand where the pig faces
         auto inner = c.step;
         c.step = [inner](Actor& a, double t, int i) { inner(a, t, i); propPlacement(a.f.prop, a.f.yaw, a.f.propX, a.f.propZ, a.f.propYaw); };
     }
-    grid("life", cells, 4, 3.0);
+    grid("life", cells, 5, 4.0);
 }
 
 // Picked up, kicking, let go: dangles, falls, lands with a squash.
@@ -292,6 +308,10 @@ static void handled() {
             if (t > 0.2 && t < 1.6) a.f.eyes = Eyes::Happy;
             if (std::fabs(t - 1.8) < 0.5 / FPS) a.anim.start(Action::HeadShake, 0.9);
         }},
+        {"belly rub", [](Actor& a, double t, int) {
+            a.f.yaw = 30; a.f.flank = 1;
+            if (std::fabs(t - 0.1) < 0.5 / FPS) a.anim.start(Action::Roll, ROLL_SECS);
+        }},
         {"you're back!", [](Actor& a, double t, int) {
             a.f.lookKind = 2; a.f.lookW = t > 0.3 ? 1 : 0;
             if (std::fabs(t - 0.2) < 0.5 / FPS) a.anim.start(Action::Perk, 2.2);
@@ -300,7 +320,7 @@ static void handled() {
             if (std::fabs(t - 0.1) < 0.5 / FPS) a.anim.start(Action::Sulk, 2.8);
         }},
     };
-    grid("handled", cells, 4, 3.0);
+    grid("handled", cells, 5, 4.4);
 }
 
 // An arrow pointer, tip at (x, y).
