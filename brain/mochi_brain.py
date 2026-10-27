@@ -237,7 +237,8 @@ BROWSE_TOOLS += [t.replace("mcp__chrome__", "mcp__peppy__") for t in BROWSE_TOOL
 BROWSE_ACT_TOOLS += [t.replace("mcp__chrome__", "mcp__peppy__") for t in BROWSE_ACT_TOOLS]
 # Their Bitwarden logins, through mochi-vault (brain/mochi_vault.py): Mochi names a tab, the vault asks them on the
 # phone, fills and submits; the password never passes through the run. Only runs they asked for or approved.
-VAULT_TOOLS = ["Bash(mochi-vault fill:*)", "Bash(mochi-vault status)", "Bash(mochi-vault has:*)"]
+VAULT_TOOLS = ["Bash(mochi-vault fill:*)", "Bash(mochi-vault signup:*)", "Bash(mochi-vault status)",
+               "Bash(mochi-vault has:*)"]  # signup: a new account, its password made and saved by the vault
 # A Telegram message in their name, from their own account, through mochi-tg (brain/mochi_tg.py): every send is a
 # question on their phone first (Send / Deny), like a vault fill, and is logged. Only runs they asked for or approved.
 TG_SEND_TOOLS = ["Bash(mochi-tg send:*)"]
@@ -281,6 +282,7 @@ BOX_TOOLS = ["Bash(mochi-box:*)"]
 LEVELS = {
     "round": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + BROWSE_TOOLS + BOX_TOOLS,
     "dream": READ_TOOLS + OWN_FILES,  # reads and rewrites its own notes; no mail, no browser
+    "coach": READ_TOOLS + OWN_FILES,  # a question from the call coach: every sense and the web, nothing that acts
     "workshop": READ_TOOLS + OWN_FILES + WORKSHOP_TOOLS,  # its notes and its own body; nothing else
     "approved": READ_TOOLS + OWN_FILES + DRAFT_TOOLS + SEND_TOOLS + TASK_TOOLS + SMS_SEND_TOOLS + CHANGE_TOOLS + BROWSE_TOOLS + BROWSE_ACT_TOOLS
                 + PHONE_CAPTURE_TOOLS
@@ -495,6 +497,20 @@ Carry on from where you left off, as in a chat: you have everything above, don't
 before: be brief, say exactly what you changed, end with the mochi block. Your "say" is the first line of what goes
 back to their phone (the rest of your reply follows it whole):
 {block}"""
+
+COACH_ASK_PROMPT = """It's {now}. They are on a call right now, and the call coach (mochi-coach: a live Gemini session that
+hears the call and draws notes on their screen) handed you this question because it needs your notes, your senses or
+the web:
+
+{text}
+
+Answer it, and only it, as fast as you can: read what you must (your memory, a chat, a thread, a document, a page),
+then reply in at most three short lines, under 350 characters in all, the facts first, the source in brackets
+("agreed sat 19:00 (tg nastya 10-07)"). Your reply goes straight onto their screen as a note and to the coach model;
+no greeting, no mochi block, no asks, and nothing that acts in the world. If you can't find it, say so in one line.
+What the relay knows right now, as JSON:
+{ctx}
+"""
 
 ASK_PROMPT = """The user asked you, through the pig, to do this:
 
@@ -1580,6 +1596,7 @@ ERRAND_SHIFT = 60 * 60       # an Uber Driver notification this recent: they're 
 ERRAND_OPTIONS = ["Done", "Not now", "Drop it"]
 ERRAND_APP_FRESH = 20 * 60   # the phone app heard from this recently: pokes go through it (sealed), else Telegram
 PHONE = shutil.which("mochi-phone") or str(HOME / ".local/bin/mochi-phone")
+COACH = shutil.which("mochi-coach") or str(HOME / ".local/bin/mochi-coach")  # the call coach (the pig's menu starts it)
 
 
 def phone_send(*args):
@@ -1969,6 +1986,12 @@ class Telegram:
         host, why = str(m.get("host"))[:80], str(m.get("why") or "")[:300]
         if m.get("kind") == "copy":  # `mochi-vault export`: your own setup step, a login copied into Mochi's config
             text = f"🔑 Copy your login for {host} into Mochi's config file?\n{why}".rstrip()
+        elif m.get("kind") == "elsewhere":  # `mochi-vault fill --from`: a login used on a site it isn't saved for
+            src = str(m.get("source") or "")[:80]
+            text = (f"🔑 Mochi wants to sign in to {host} with your login for {src}, and add {host} to that login in "
+                    f"your Bitwarden. Only if {host} really is their sign-in page.\n{why}").rstrip()
+        elif m.get("kind") == "create":  # `mochi-vault signup`: a new account, its password saved in their Bitwarden
+            text = f"🔑 Mochi wants to make a new account on {host} and save its password in your Bitwarden\n{why}".rstrip()
         else:
             text = f"🔑 Mochi wants to sign in to {host}\n{why}".rstrip()
         rows = [[(a, f"v:{rid}:{i}")] for i, a in enumerate(accounts)] + [[("Deny", f"v:{rid}:x")]]
@@ -2460,6 +2483,16 @@ class Relay:
         elif ev == "chat":
             self.event("user opened a chat with you from the menu")
             open_chat(None, CHAT_PROMPT)
+        elif ev == "coach_ask":  # the coach handed you a question mid-call: a quick read-only run, answered on its socket
+            threading.Thread(target=self.coach_answer, args=(m,), daemon=True).start()
+        elif ev == "coach":  # menu -> Coach this call / Stop coaching: mochi-coach is its own process, not a run
+            if m.get("action") == "stop":
+                subprocess.run([COACH, "stop"], capture_output=True, timeout=10)
+                self.event("they stopped the call coach from the menu")
+            else:
+                subprocess.Popen([COACH, "start"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                self.event("they started the call coach from the menu (mochi-coach; its notes land in desk/coach/)")
         elif ev == "ask":
             text = (m.get("text") or "").strip()
             if text:
@@ -2505,6 +2538,23 @@ class Relay:
             reports = sorted((a for a in self.state["asks"].values() if a.get("path")), key=lambda a: a["at"])
             if reports and Path(reports[-1]["path"]).exists():
                 open_text(reports[-1]["path"], reports[-1]["text"])
+
+    def coach_answer(self, m):
+        qid, text, reply_to = str(m.get("id") or ""), (m.get("text") or "").strip()[:1500], str(m.get("reply_to") or "")
+        if not qid or not text or not reply_to:
+            return
+        self.event(f"the call coach asked you: {text[:150]}")
+        prompt = COACH_ASK_PROMPT.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"), text=text,
+                                         ctx=json.dumps(self.context(), indent=1, ensure_ascii=False))
+        r = claude_run(prompt, "coach", model=TASK_MODEL, timeout=220)
+        answer = coach_strip(r["text"]) if r["ok"] else f"(mochi couldn't answer: {r['error'][:120]})"
+        log(f"coach question answered in {r['secs']:.0f}s (${r['cost']:.2f}): {answer[:120]}")
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            s.sendto(json.dumps({"event": "coach_answer", "id": qid, "text": answer[:4000]}, ensure_ascii=False).encode(), reply_to)
+            s.close()
+        except OSError as e:
+            log(f"coach answer not delivered: {e}")
 
     def on_answer(self, aid, label, via="pig"):
         """The user picked one of the options Claude put on an ask (on the pig, or on their phone). The label is
@@ -3587,6 +3637,12 @@ class Follower:
         if ev in ("ask", "answer", "chat"):
             self.pet.say("passed on" + (f" to me on {where}" if where else "; it waits for whoever wakes first"), 3)
         self.say(f"passed on: {ev}")
+
+
+def coach_strip(text):
+    """A run's reply without a mochi block it wasn't supposed to add, as a few plain lines."""
+    text = re.sub(r"```json\s*\{.*?\}\s*```\s*$", "", text.strip(), flags=re.S).strip()
+    return " ".join(text.split())
 
 
 def denials_of(j):

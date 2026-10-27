@@ -8,8 +8,14 @@
     mochi-vault lock                  forget the logins until the next unlock (or the next start, if remembered)
     mochi-vault status                locked or not, how many logins, what's allowed right now
     mochi-vault has URL               how many of your logins match a site (no names, no secrets)
-    mochi-vault fill --why TEXT [--page URL-PART] [--account TEXT]
-                                      Mochi: sign in on the page open in its Chrome, once you allow it on your phone
+    mochi-vault fill --why TEXT [--page URL-PART] [--account TEXT] [--from SITE]
+                                      Mochi: sign in on the page open in its Chrome, once you allow it on your phone;
+                                      --from: with the login saved for another site (a sign-in page on its own
+                                      address), and on Allow that site is added to the login in Bitwarden
+    mochi-vault signup --why TEXT --username NAME [--page URL-PART] [--submit]
+                                      Mochi: a new account on the sign-up page open in its Chrome, once you allow it
+                                      on your phone: the vault makes a strong password, saves it in your Bitwarden as
+                                      a new login, and types it into the form (both boxes); needs `remember`
     mochi-vault export URL --to FILE --why TEXT [--account TEXT]
                                       setup: copy one login (USERNAME=, PASSWORD= lines) into a file under
                                       ~/.config/mochi, for a tool that must hold it itself (Deluge's HTTP auth);
@@ -28,6 +34,18 @@ relay's own process (checked by the socket's peer pid against mochi-brain.servic
 username, password (or the one-time code, for a TOTP step) into the page and submits it, all inside one script in
 the page, which first checks the page is still on that host. Mochi gets back what was filled, never the values. An
 Allow holds for that account on that site for LEASE_MINUTES, so a two-step login doesn't ask twice.
+
+`fill --from SITE` is for a sign-in page that lives somewhere else than the site the login is saved for (Booking's
+applications are on external-workingatbooking.icims.com, its sign-in on login.icims.eu). The question names both
+sites; on Allow the vault fills there and adds the page's address to that login in Bitwarden (with the remembered
+master password, like `signup`), so the next time it matches by itself.
+
+`signup` is the same question for an account that doesn't exist yet ("make a new login for SITE"). On Allow the vault
+makes the password itself, saves it in Bitwarden first (it opens Bitwarden with the remembered master password for
+that one write and locks it again; without `remember` there is nothing to open it with, so it says so and stops),
+then fills it into every password box on the form and the username or email into an empty box that asks for it.
+It doesn't submit unless told to: sign-up forms tend to have a captcha or a terms box. If saving fails, nothing is
+filled, so a password never ends up on a site without being in Bitwarden.
 
 Setup once: `bw login` (and `bw config server https://vault.bitwarden.eu` first if your account is on the EU
 server), then `systemctl --user enable --now mochi-vault` and either `mochi-vault unlock` after each boot or
@@ -51,6 +69,7 @@ import re
 import secrets
 import shutil
 import socket
+import string
 import struct
 import subprocess
 import sys
@@ -70,6 +89,8 @@ BRAIN_SOCK = RUNTIME / "mochi-brain.sock"
 RELAY_UNIT = "mochi-brain.service"
 ASK_TIMEOUT = 8 * 60       # how long a fill waits for your tap
 LEASE_MINUTES = 10         # an Allow covers that account on that site this long
+PASSWORD_LENGTH = 20       # what `signup` makes: letters, digits and symbols, at least one of each
+SYMBOLS = "!@#$%^&*-_=+?"
 REFRESH_EVERY = 6 * 3600   # with the password remembered, re-read Bitwarden this often (new and changed logins)
 LOCAL_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal", ".localhost")
 # Second-level public suffixes common enough to matter for "same site" (Bitwarden uses the full public suffix list).
@@ -155,6 +176,15 @@ def identities(login, fields):
     if not name:
         name = next((v for n, v in texts if USER_NAME.search(n) and not EMAIL_NAME.search(n) and not EMAIL_RE.match(v)), "")
     return email, name
+
+
+def make_password(length=PASSWORD_LENGTH, symbols=True):
+    sets = [string.ascii_lowercase, string.ascii_uppercase, string.digits] + ([SYMBOLS] if symbols else [])
+    alphabet = "".join(sets)
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(max(length, 12)))
+        if all(any(c in s for c in pw) for s in sets):
+            return pw
 
 
 def matching(items, page):
@@ -333,7 +363,7 @@ FILL_JS = r"""(function (a) {
   if (!user && pw) user = inputs.slice(0, inputs.indexOf(pw)).filter(e => texty(e) && e !== otp).pop() || null;
   if (!user && !pw) user = inputs.find(e => texty(e) && e !== otp &&
     (e.type === "email" || /user|login|email|e-?mail|account|identifier/i.test(label(e)))) || null;
-  if (a.probe) return {ok: true, has: !!(pw || otp || user)};
+  if (a.probe) return {ok: true, has: a.signup ? !!pw : !!(pw || otp || user)};
   // The login keeps an email and/or a plain username (one in Username, the other in a custom field): a field that
   // plainly asks for one gets that one, any other field gets Bitwarden's Username, else whichever there is.
   const asksEmail = e => e.type === "email" || e.autocomplete === "email" ||
@@ -347,7 +377,16 @@ FILL_JS = r"""(function (a) {
     e.dispatchEvent(new Event("input", {bubbles: true})); e.dispatchEvent(new Event("change", {bubbles: true})); };
   const filled = []; let last = null;
   const fillId = e => { const v = idFor(e); if (v && e.value !== v) { set(e, v); filled.push(kind(e, v)); } return !!v; };
-  if (pw && a.password) {
+  if (a.signup) {
+    if (!pw || !a.password) return {ok: false, error: "no password box on this page"};
+    // a new account: the email or username only into an empty box before the password that plainly asks for it (a
+    // sign-up form has names and phones there too), then the new password into every password box (and its repeat)
+    inputs.slice(0, inputs.indexOf(pw)).filter(e => texty(e) && e !== otp && !e.value &&
+      (asksEmail(e) || asksName(e) || /username|email/.test(e.autocomplete || ""))).forEach(fillId);
+    const pws = inputs.filter(e => e.type === "password");
+    pws.forEach(e => set(e, a.password));
+    filled.push(pws.length > 1 ? `password (in ${pws.length} boxes)` : "password"); last = pws[pws.length - 1];
+  } else if (pw && a.password) {
     if (user) {
       fillId(user);
       // a form that asks for both, the email and the username, each in its own empty field before the password
@@ -356,6 +395,16 @@ FILL_JS = r"""(function (a) {
       if (other && idFor(other) !== user.value) fillId(other);
     }
     set(pw, a.password); filled.push("password"); last = pw;
+    // a form that wants it twice (an application re-opened after a reload): the repeat box too, but not on a
+    // change-password form, where the second box is the new password
+    const said = e => [e.name, e.id, e.placeholder, e.getAttribute("aria-label"),
+      ...[...(e.labels || [])].map(l => l.textContent)].join(" ");
+    const rest = inputs.filter(e => e.type === "password" && e !== pw);
+    const again = /confirm|repeat|re-?enter|re-?type|again|verif|повтор|подтвер|wiederhol|bestätig/i;
+    const twin = rest.length === 1 && pw.autocomplete !== "current-password" &&
+      !/current|old|текущ|стар|aktuell|alt/i.test(said(pw)) &&
+      (again.test(said(rest[0])) || !/new|neu|нов/i.test(said(rest[0]))) ? rest[0] : null;
+    if (twin) { set(twin, a.password); filled[filled.length - 1] = "password (and its repeat box)"; last = twin; }
   } else if (otp && a.totp) {
     set(otp, a.totp); filled.push("one-time code"); last = otp;
   } else if (otp) {
@@ -389,25 +438,25 @@ def run_in(c, frame, args):
     return (r.get("result") or {}).get("value") or {"ok": False, "error": "the page's script failed"}
 
 
-def probe(frame):
-    """Whether a frame shows login fields (nothing is filled)."""
+def probe(frame, signup=False):
+    """Whether a frame shows login fields, or for a sign-up a password box (nothing is filled)."""
     host = urlsplit(frame[0]).hostname or ""
     try:
         c = CDP(frame[1])
     except OSError:
         return False
     try:
-        return bool(run_in(c, frame, {"host": host, "probe": True}).get("has"))
+        return bool(run_in(c, frame, {"host": host, "probe": True, "signup": signup}).get("has"))
     except OSError:
         return False
     finally:
         c.close()
 
 
-def fill_page(frame, host, item, submit=True):
+def fill_page(frame, host, item, submit=True, signup=False):
     args = {"host": host, "username": item.get("username") or "", "email": item.get("email") or "",
             "login": item.get("login") or "", "password": item.get("password") or "",
-            "totp": totp(item.get("totp")) or "", "submit": submit}
+            "totp": totp(item.get("totp")) or "", "submit": submit, "signup": signup}
     c = CDP(frame[1])
     try:
         res = run_in(c, frame, args)
@@ -505,19 +554,20 @@ class Vault:
             env["BW_SESSION"] = session
         return env
 
-    def run_bw(self, args, session=None, pass_fds=(), timeout=120):
+    def run_bw(self, args, session=None, pass_fds=(), timeout=120, input=None):
         return subprocess.run([self.bw] + args, capture_output=True, text=True, timeout=timeout,
-                              env=self.bw_env(session), pass_fds=pass_fds)
+                              env=self.bw_env(session), pass_fds=pass_fds, input=input)
 
-    def unlock(self, password):
+    def open_bw(self, password):
+        """A Bitwarden session key for this password: (session, None) or (None, why not). The caller locks it."""
         if not self.bw:
-            return False, "the Bitwarden CLI isn't installed (npm install -g @bitwarden/cli)"
+            return None, "the Bitwarden CLI isn't installed (npm install -g @bitwarden/cli)"
         try:
             st = json.loads(self.run_bw(["status"]).stdout or "{}").get("status")
         except (ValueError, OSError, subprocess.TimeoutExpired):
             st = None
         if st == "unauthenticated":
-            return False, "Bitwarden isn't logged in on this machine yet: run `bw login` first"
+            return None, "Bitwarden isn't logged in on this machine yet: run `bw login` first"
         r, w = os.pipe()
         try:
             os.write(w, password.encode() + b"\n")
@@ -528,7 +578,14 @@ class Vault:
             password = None
         session = p.stdout.strip()
         if p.returncode != 0 or not session:
-            return False, (p.stderr.strip() or p.stdout.strip() or "unlock failed")[:200]
+            return None, (p.stderr.strip() or p.stdout.strip() or "unlock failed")[:200]
+        return session, None
+
+    def unlock(self, password):
+        session, err = self.open_bw(password)
+        password = None
+        if not session:
+            return False, err
         try:
             self.run_bw(["sync"], session)
             out = self.run_bw(["list", "items"], session, timeout=300)
@@ -590,7 +647,7 @@ class Vault:
         finally:
             s.close()
 
-    def fill(self, why, page="", account="", submit=True, timeout=ASK_TIMEOUT):
+    def fill(self, why, page="", account="", submit=True, timeout=ASK_TIMEOUT, from_site=""):
         if self.items is None:
             return False, "the vault is locked; ask them to run `mochi-vault unlock` in a terminal"
         why = (why or "").strip()
@@ -599,14 +656,20 @@ class Vault:
         ps = pages()
         if ps is None:
             return False, "Mochi's Chrome isn't reachable on its debugging port"
+        src = ""
+        if from_site:  # the login saved for another site, on this page
+            src = from_site if "://" in from_site else "https://" + from_site
+            if not matching(self.items, src):
+                return False, f"no login of theirs is saved for {urlsplit(src).hostname}"
+        found = lambda url: matching(self.items, src) if src else matching(self.items, url)
         cands = [t for t in ps if page and page in t.get("url", "")] if page else \
-            [t for t in ps if matching(self.items, t.get("url", ""))]
+            [t for t in ps if found(t.get("url", ""))] if not src else [t for t in ps if safe_page(t.get("url", ""))]
         if len(cands) != 1:
             return False, (f"{len(cands)} tabs match; name the tab with --page (part of its address)" if cands else
                            "no open tab " + (f"matching {page!r}" if page else "is on a site they have a login for"))
         target = cands[0]
         try:
-            places = [f for f in frames(target) if safe_page(f[0]) and matching(self.items, f[0])]
+            places = [f for f in frames(target) if safe_page(f[0]) and found(f[0])]
         except OSError as e:
             return False, f"couldn't reach the page: {e}"
         if not places:
@@ -618,7 +681,9 @@ class Vault:
         frame = next((f for f in places if probe(f)), places[0])
         url = frame[0]
         host = urlsplit(url).hostname or ""
-        items = matching(self.items, url)
+        items = found(url)
+        if src and matching(self.items, url):
+            src, items = "", matching(self.items, url)  # it's saved for this page already: an ordinary fill
         if account:
             items = [it for it in items if account.lower() in " ".join(
                 [it["name"], it["username"], it.get("email", ""), it.get("login", "")]).lower()]
@@ -628,7 +693,8 @@ class Vault:
         if len(leased) == 1:
             item = leased[0]
         else:
-            ok, item = self.ask(host, why, items, timeout)
+            ok, item = self.ask(host, why, items, timeout, **({"kind": "elsewhere", "source": urlsplit(src).hostname}
+                                                              if src else {}))
             if not ok:
                 return False, item
         with self.lock:
@@ -643,9 +709,142 @@ class Vault:
         how = {"button": "pressed the sign-in button", "form": "submitted the form", "enter": "pressed Enter",
                "not submitted": "not submitted"}.get(res.get("how"), res.get("how"))
         log(f"filled {', '.join(res['filled'])} for {label(item)} on {host}, {how} ({why[:80]})")
-        return True, (f"filled {', '.join(res['filled'])} for {item['name']} on {host} and {how}. Take a snapshot to "
+        added = ""
+        if src:
+            ok, msg = self.add_site(item, url)
+            added = f" Added {host} to that login in Bitwarden." if ok else f" Couldn't add {host} to the login: {msg}."
+        return True, (f"filled {', '.join(res['filled'])} for {item['name']} on {host} and {how}.{added} Take a snapshot to "
                       f"see where it landed; a next step on this site (a code, a second page) can fill again "
                       f"without asking for {LEASE_MINUTES} minutes.")
+
+    def add_site(self, item, url):
+        """The page's address added to a login in Bitwarden (open with the remembered master password, edit, lock),
+        and to the copy in memory. (ok, message)."""
+        p = urlsplit(url)
+        origin = f"{p.scheme}://{p.netloc}"
+        master = keyring_get()
+        if master is None:
+            return False, "their master password isn't remembered (`mochi-vault remember`)"
+        session, err = self.open_bw(master)
+        master = None
+        if not session:
+            return False, f"couldn't open Bitwarden: {err}"
+        try:
+            got = self.run_bw(["get", "item", item["id"]], session)
+            full = json.loads(got.stdout or "{}") if got.returncode == 0 else {}
+            if not full.get("login"):
+                return False, "Bitwarden didn't give the login back: " + (got.stderr.strip() or got.stdout.strip())[:200]
+            uris = full["login"].get("uris") or []
+            if not any(uri_matches(u.get("uri"), u.get("match"), url) for u in uris):
+                full["login"]["uris"] = uris + [{"uri": origin, "match": None}]
+                out = self.run_bw(["edit", "item", item["id"]], session,
+                                  input=base64.b64encode(json.dumps(full).encode()).decode())
+                if out.returncode != 0:
+                    return False, "Bitwarden didn't save it: " + (out.stderr.strip() or out.stdout.strip())[:200]
+        except (ValueError, OSError, subprocess.TimeoutExpired) as e:
+            return False, str(e)
+        finally:
+            self.run_bw(["lock"])
+            session = None
+            full = None
+        with self.lock:
+            item["uris"].append({"uri": origin, "match": None})
+        log(f"added {p.hostname} to the login {label(item)}")
+        return True, "added"
+
+    def save_login(self, url, username, password, why):
+        """A new login in their Bitwarden, written at once (open with the remembered master password, create, lock).
+        Returns (item for self.items, None) or (None, why not)."""
+        master = keyring_get()
+        if master is None:
+            return None, ("their master password isn't remembered, so the vault can't write to Bitwarden; they can "
+                          "run `mochi-vault remember` once, or make the login in Bitwarden themselves")
+        session, err = self.open_bw(master)
+        master = None
+        if not session:
+            return None, f"couldn't open Bitwarden: {err}"
+        p = urlsplit(url)
+        origin = f"{p.scheme}://{p.netloc}"
+        new = {"type": 1, "name": p.hostname, "favorite": False, "reprompt": 0, "folderId": None, "organizationId": None,
+               "notes": f"Made by mochi-vault {dt.datetime.now():%Y-%m-%d} for: {why[:200]}", "fields": [],
+               "login": {"username": username, "password": password, "totp": None,
+                         "uris": [{"uri": origin, "match": None}]}}
+        try:  # on stdin, never on a command line other processes could read
+            out = self.run_bw(["create", "item"], session, input=base64.b64encode(json.dumps(new).encode()).decode())
+            made = json.loads(out.stdout or "{}") if out.returncode == 0 else {}
+        except (ValueError, OSError, subprocess.TimeoutExpired) as e:
+            made, out = {}, None
+            err = str(e)
+        finally:
+            self.run_bw(["lock"])
+            session = None
+            new.clear()
+        if not made.get("id"):
+            return None, "Bitwarden didn't save it: " + (err if out is None else (out.stderr.strip() or out.stdout.strip())[:200])
+        email, name = identities({"username": username}, [])
+        return {"id": made["id"], "name": p.hostname, "username": username, "email": email, "login": name,
+                "password": password, "totp": "", "uris": [{"uri": origin, "match": None}]}, None
+
+    def signup(self, why, username, page="", submit=False, length=PASSWORD_LENGTH, symbols=True, timeout=ASK_TIMEOUT):
+        """A new account: asked on their phone, then a made-up password saved in Bitwarden and typed into the form."""
+        if self.items is None:
+            return False, "the vault is locked; ask them to run `mochi-vault unlock` in a terminal"
+        why, username = (why or "").strip(), (username or "").strip()
+        if not why:
+            return False, "say what it's for (--why): it goes on their phone with the question"
+        if not username:
+            return False, "say which username or email the account is for (--username)"
+        ps = pages()
+        if ps is None:
+            return False, "Mochi's Chrome isn't reachable on its debugging port"
+        cands = [t for t in ps if page in t.get("url", "")] if page else ps
+        if len(cands) != 1:
+            return False, (f"{len(cands)} tabs are open; name the sign-up tab with --page (part of its address)" if cands
+                           else "no open tab " + (f"matching {page!r}" if page else "in Mochi's Chrome"))
+        target = cands[0]
+        try:
+            places = [f for f in frames(target) if safe_page(f[0])]
+        except OSError as e:
+            return False, f"couldn't reach the page: {e}"
+        frame = next((f for f in places if probe(f, signup=True)), None)
+        if not frame:
+            url = target.get("url", "")
+            if not safe_page(url):
+                return False, f"not making an account on {url.split('?')[0]}: only https (or plain http on the local network)"
+            return False, f"no password box on {urlsplit(url).hostname}; open the sign-up form first"
+        url = frame[0]
+        host = urlsplit(url).hostname or ""
+        same = [it for it in matching(self.items, url) if username.lower() in
+                (it["username"].lower(), it.get("email", "").lower(), it.get("login", "").lower())]
+        if same:
+            return False, (f"they already have a login for {host} as {username} ({same[0]['name']}); "
+                           f"use `mochi-vault fill` to sign in with it")
+        ok, msg = self.ask(host, why, [{"name": "Create", "username": username}], timeout, kind="create")
+        if not ok:
+            return False, msg
+        item, err = self.save_login(url, username, make_password(length, symbols), why)
+        if not item:
+            log(f"signup on {host} as {username}: not saved ({err})")
+            return False, err + "; nothing was filled"
+        with self.lock:
+            if self.items is not None:
+                self.items.append(item)
+            self.leases[(host, item["id"])] = time.time() + LEASE_MINUTES * 60
+        log(f"saved a new login for {host} as {username} in Bitwarden ({why[:80]})")
+        try:
+            res = fill_page(frame, host, item, submit, signup=True)
+        except OSError as e:
+            res = {"ok": False, "error": f"couldn't reach the page: {e}"}
+        if not res.get("ok"):
+            log(f"signup fill on {host} failed: {res.get('error')}")
+            return False, (f"saved the new login for {host} in their Bitwarden, but couldn't fill the form: "
+                           f"{res.get('error')}. `mochi-vault fill --no-submit` can try again without asking")
+        how = {"button": "pressed the submit button", "form": "submitted the form", "enter": "pressed Enter",
+               "not submitted": "didn't submit it"}.get(res.get("how"), res.get("how"))
+        log(f"signup: filled {', '.join(res['filled'])} on {host}, {how}")
+        return True, (f"saved a new login for {host} ({username}) in their Bitwarden, filled "
+                      f"{', '.join(res['filled'])} and {how}. Take a snapshot: the rest of the form (a captcha, a "
+                      f"terms box) is still yours or theirs to do. `mochi-vault fill` signs in with it from now on.")
 
     def export(self, url, to, why, account="", timeout=ASK_TIMEOUT):
         """Copy one login into a file under ~/.config/mochi, for a tool that has to hold it itself (Deluge behind
@@ -695,16 +894,16 @@ class Vault:
         log(f"copied the login {label(item)} for {host} into {path} ({why[:80]})")
         return True, f"copied the login {item['name']} for {host} into {path} ({', '.join(k for k, _ in keys)}; mode 600)"
 
-    def ask(self, host, why, items, timeout, kind="fill"):
+    def ask(self, host, why, items, timeout, kind="fill", source=""):
         rid = secrets.token_hex(8)
         req = {"event": threading.Event(), "choice": None, "items": items, "reason": ""}
         with self.lock:
             self.pending[rid] = req
         try:
             if not self.notify(event="vault_ask", id=rid, host=host, why=why[:300], accounts=[label(i) for i in items],
-                               kind=kind):
+                               kind=kind, **({"source": source} if source else {})):
                 return False, "mochi-brain isn't running, so there's no way to ask them"
-            log(f"asking to {'copy the login for' if kind == 'copy' else 'sign in on'} {host} ({len(items)} matching) for: {why[:80]}")
+            log(f"asking to {dict(copy='copy the login for', create='make a new login for').get(kind, 'sign in on')} {host} ({len(items)} matching) for: {why[:80]}")
             if not req["event"].wait(timeout):
                 self.notify(event="vault_done", id=rid, label="⌛ no answer in time")
                 return False, "they didn't answer in time"
@@ -761,7 +960,11 @@ class Vault:
                 ok, msg = True, self.has(str(m.get("url") or ""))
             elif cmd == "fill":
                 ok, msg = self.fill(str(m.get("why") or ""), str(m.get("page") or ""), str(m.get("account") or ""),
-                                    bool(m.get("submit", True)))
+                                    bool(m.get("submit", True)), from_site=str(m.get("from") or ""))
+            elif cmd == "signup":
+                ok, msg = self.signup(str(m.get("why") or ""), str(m.get("username") or ""), str(m.get("page") or ""),
+                                      bool(m.get("submit")), int(m.get("length") or PASSWORD_LENGTH),
+                                      bool(m.get("symbols", True)))
             elif cmd == "export":
                 ok, msg = self.export(str(m.get("url") or ""), str(m.get("to") or ""), str(m.get("why") or ""),
                                       str(m.get("account") or ""))
@@ -858,6 +1061,15 @@ def main():
     f.add_argument("--page", default="", help="part of the tab's address, when more than one tab could be meant")
     f.add_argument("--account", default="", help="part of the login's name or username, when they have several")
     f.add_argument("--no-submit", action="store_true", help="fill but don't submit")
+    f.add_argument("--from", dest="from_site", default="", help="the site the login is saved for, when the sign-in page "
+                   "is on another address (on Allow, this page's site is added to the login)")
+    s = sub.add_parser("signup", help="a new account: password made, saved in Bitwarden, typed into the form")
+    s.add_argument("--why", required=True, help="what it's for; shown on their phone")
+    s.add_argument("--username", required=True, help="the email or username the new account uses")
+    s.add_argument("--page", default="", help="part of the sign-up tab's address, when more than one tab is open")
+    s.add_argument("--submit", action="store_true", help="submit the form too (default: leave it for a captcha or terms)")
+    s.add_argument("--length", type=int, default=PASSWORD_LENGTH, help="password length (at least 12)")
+    s.add_argument("--no-symbols", action="store_true", help="letters and digits only, for sites that refuse symbols")
     e = sub.add_parser("export", help="copy one login into a file under ~/.config/mochi (asked on your phone)")
     e.add_argument("url", help="the site, as a URL: which of your logins")
     e.add_argument("--to", required=True, help="the file to write (USERNAME=, PASSWORD= lines, mode 600)")
@@ -886,8 +1098,11 @@ def main():
         except Exception as e:
             r = {"ok": False, "text": f"couldn't reach the keyring: {e}"}
     elif a.cmd == "fill":
-        r = request({"cmd": "fill", "why": a.why, "page": a.page, "account": a.account, "submit": not a.no_submit},
-                    timeout=ASK_TIMEOUT + 90)
+        r = request({"cmd": "fill", "why": a.why, "page": a.page, "account": a.account, "submit": not a.no_submit,
+                     "from": a.from_site}, timeout=ASK_TIMEOUT + 180)
+    elif a.cmd == "signup":
+        r = request({"cmd": "signup", "why": a.why, "username": a.username, "page": a.page, "submit": a.submit,
+                     "length": a.length, "symbols": not a.no_symbols}, timeout=ASK_TIMEOUT + 180)
     elif a.cmd == "export":
         r = request({"cmd": "export", "url": a.url, "to": a.to, "why": a.why, "account": a.account}, timeout=ASK_TIMEOUT + 90)
     elif a.cmd == "has":

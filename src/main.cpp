@@ -653,6 +653,231 @@ private:
     }
 };
 
+// ---- the coach's overlay: a note, and highlights, drawn over the screen -------------------------
+// While Mochi sits in on a call (mochi-coach), what it has to say is drawn, never spoken: one click-through
+// window over the highlighted areas and a card with the note, typed out as it comes. Nothing here takes input.
+
+class Overlay {
+public:
+    explicit Overlay(Display* d) : dpy(d) {}
+    ~Overlay() { clear(); }
+
+    // boxes in root coordinates; the card goes under the first box, or beside the pig when there is none.
+    void show(const std::string& t, std::vector<Rect> bx, double secs, const Rect& mon, const Avoid& pig, bool pigHere) {
+        text = t;
+        boxes = std::move(bx);
+        life = secs;
+        age = 0;
+        typed = 0;
+        // Measure the card.
+        cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 4, 4);
+        cairo_t* cr = cairo_create(tmp);
+        setFont(cr);
+        lines = Menu::wrap(cr, text, CARD_W - 2 * PAD, 6);
+        double widest = 0;
+        for (auto& l : lines) {
+            cairo_text_extents_t te;
+            cairo_text_extents(cr, l.c_str(), &te);
+            widest = std::max(widest, te.x_advance);
+        }
+        cardW = (int)std::min<double>(CARD_W, widest + 2 * PAD + 14);  // 14: the pink mark on the left
+        cardH = 2 * PAD + LINE_H * (int)std::max<size_t>(1, lines.size()) - 4;
+        cairo_destroy(cr);
+        cairo_surface_destroy(tmp);
+        // Place it: under the first box (above when there's no room), else beside the pig, else the monitor's top right.
+        if (!boxes.empty()) {
+            const Rect& b = boxes[0];
+            cardX = b.x + b.w / 2 - cardW / 2;
+            cardY = b.y + b.h + 10;
+            if (cardY + cardH > mon.y + mon.h - 8) cardY = b.y - cardH - 10;
+        } else if (pigHere) {
+            cardX = pig.x + pig.w + 8;
+            cardY = pig.y + pig.h - cardH;
+            if (cardX + cardW > mon.x + mon.w - 8) cardX = pig.x - cardW - 8;
+        } else {
+            cardX = mon.x + mon.w - cardW - 24;
+            cardY = mon.y + 24;
+        }
+        cardX = (int)clampd(cardX, mon.x + 8, mon.x + mon.w - cardW - 8);
+        cardY = (int)clampd(cardY, mon.y + 8, mon.y + mon.h - cardH - 8);
+        // The window covers the card and every box, with room for the glow.
+        int x1 = cardX - M, y1 = cardY - M, x2 = cardX + cardW + M, y2 = cardY + cardH + M;
+        for (auto& b : boxes) {
+            x1 = std::min(x1, b.x - M); y1 = std::min(y1, b.y - M);
+            x2 = std::max(x2, b.x + b.w + M); y2 = std::max(y2, b.y + b.h + M);
+        }
+        x1 = std::max(x1, mon.x); y1 = std::max(y1, mon.y);
+        x2 = std::min(x2, mon.x + mon.w); y2 = std::min(y2, mon.y + mon.h);
+        Rect want{x1, y1, std::max(1, x2 - x1), std::max(1, y2 - y1)};
+        if (!win || want.w != geo.w || want.h != geo.h) {
+            destroy();
+            create(want);
+        } else if (want.x != geo.x || want.y != geo.y) {
+            XMoveWindow(dpy, win, want.x, want.y);
+        }
+        geo = want;
+        lastMask.clear();
+        XRaiseWindow(dpy, win);
+    }
+
+    void clear() {
+        if (win && age < life) life = std::min(life, age + FADE);  // fade out rather than vanish
+        if (win && life <= 0) destroy();
+    }
+
+    bool visible() const { return win != 0; }
+
+    // Where the pig should glance: the first box, else the card.
+    void focus(int& cx, int& cy) const {
+        if (!boxes.empty()) { cx = boxes[0].x + boxes[0].w / 2; cy = boxes[0].y + boxes[0].h / 2; }
+        else { cx = cardX + cardW / 2; cy = cardY + cardH / 2; }
+    }
+
+    void tick(double dt, bool compositor) {
+        if (!win) return;
+        age += dt;
+        typed = std::min<double>(typed + dt * TYPE_CPS, (double)text.size());
+        if (age >= life + FADE) { destroy(); return; }
+        draw(compositor);
+    }
+
+private:
+    static constexpr int CARD_W = 440, PAD = 12, LINE_H = 19, M = 10;
+    static constexpr double TYPE_CPS = 70, FADE = 0.5;
+    Display* dpy;
+    Window win = 0;
+    Visual* visual = nullptr;
+    cairo_surface_t* winSurf = nullptr;
+    cairo_surface_t* back = nullptr;
+    Rect geo{0, 0, 1, 1};
+    std::string text;
+    std::vector<std::string> lines;
+    std::vector<Rect> boxes;
+    int cardX = 0, cardY = 0, cardW = 0, cardH = 0;
+    double life = 0, age = 0, typed = 0;
+    std::vector<char> lastMask;
+    bool lastCompositor = false;
+
+    static void setFont(cairo_t* cr) {
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, 14);
+    }
+
+    void create(const Rect& r) {
+        int scr = DefaultScreen(dpy);
+        XVisualInfo vi;
+        bool argb = XMatchVisualInfo(dpy, scr, 32, TrueColor, &vi);
+        visual = argb ? vi.visual : DefaultVisual(dpy, scr);
+        XSetWindowAttributes swa{};
+        swa.override_redirect = True;
+        swa.colormap = argb ? XCreateColormap(dpy, DefaultRootWindow(dpy), visual, AllocNone) : DefaultColormap(dpy, scr);
+        swa.border_pixel = 0;
+        swa.background_pixel = 0;
+        win = XCreateWindow(dpy, DefaultRootWindow(dpy), r.x, r.y, r.w, r.h, 0, argb ? 32 : DefaultDepth(dpy, scr),
+                            InputOutput, visual, CWOverrideRedirect | CWColormap | CWBorderPixel | CWBackPixel, &swa);
+        XClassHint ch{(char*)"xpet", (char*)"xpet"};
+        XSetClassHint(dpy, win, &ch);
+        XStoreName(dpy, win, "xpet-coach");
+        Atom type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
+        Atom dnd = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DND", False);
+        XChangeProperty(dpy, win, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&dnd, 1);
+        XShapeCombineRectangles(dpy, win, ShapeInput, 0, 0, nullptr, 0, ShapeSet, Unsorted);  // clicks fall through
+        winSurf = cairo_xlib_surface_create(dpy, win, visual, r.w, r.h);
+        back = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, r.w, r.h);
+        XMapRaised(dpy, win);
+    }
+
+    void destroy() {
+        if (!win) return;
+        cairo_surface_destroy(back);
+        cairo_surface_destroy(winSurf);
+        XDestroyWindow(dpy, win);
+        win = 0;
+        back = winSurf = nullptr;
+        boxes.clear();
+        lastMask.clear();
+    }
+
+    void roundedRect(cairo_t* cr, double x, double y, double w, double h, double r) {
+        cairo_new_sub_path(cr);
+        cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
+        cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
+        cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
+        cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
+        cairo_close_path(cr);
+    }
+
+    void draw(bool compositor) {
+        cairo_t* cr = cairo_create(back);
+        cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+        cairo_paint(cr);
+        cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+        double a = age > life ? clampd(1 - (age - life) / FADE, 0, 1) : clampd(age / 0.25, 0, 1);  // in, then out
+        double pulse = compositor ? 0.75 + 0.25 * std::sin(age * 4.0) : 1.0;  // the highlight breathes
+        cairo_translate(cr, -geo.x, -geo.y);
+        for (auto& b : boxes) {
+            // a soft glow, then the outline: pink on the inside, a dark hairline outside, so it reads on any background
+            cairo_set_line_width(cr, 7);
+            cairo_set_source_rgba(cr, 0.98, 0.55, 0.65, 0.22 * a * pulse);
+            roundedRect(cr, b.x - 2, b.y - 2, b.w + 4, b.h + 4, 7);
+            cairo_stroke(cr);
+            cairo_set_line_width(cr, 4.5);
+            cairo_set_source_rgba(cr, 0.16, 0.12, 0.10, 0.55 * a);
+            roundedRect(cr, b.x - 2, b.y - 2, b.w + 4, b.h + 4, 7);
+            cairo_stroke(cr);
+            cairo_set_line_width(cr, 3);
+            cairo_set_source_rgba(cr, 0.96, 0.45, 0.56, a * (0.8 + 0.2 * pulse));
+            roundedRect(cr, b.x - 2, b.y - 2, b.w + 4, b.h + 4, 7);
+            cairo_stroke(cr);
+        }
+        // The card: the bubble's cream, a dark edge, a pink mark down the left (it's Mochi's).
+        roundedRect(cr, cardX, cardY, cardW, cardH, 8);
+        cairo_set_source_rgba(cr, 1.0, 0.98, 0.94, 0.96 * a);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, 0.16, 0.12, 0.10, a);
+        cairo_set_line_width(cr, 2);
+        cairo_stroke(cr);
+        cairo_set_source_rgba(cr, 0.96, 0.45, 0.56, a);
+        roundedRect(cr, cardX + 6, cardY + 8, 4, cardH - 16, 2);
+        cairo_fill(cr);
+        setFont(cr);
+        cairo_set_source_rgba(cr, 0.16, 0.12, 0.10, a);
+        size_t left = (size_t)typed;  // typed out line by line, a few dozen characters a second
+        for (size_t i = 0; i < lines.size() && left > 0; ++i) {
+            std::string l = lines[i].substr(0, std::min(left, lines[i].size()));
+            left -= std::min(left, lines[i].size() + 1);  // the space the wrap ate
+            cairo_move_to(cr, cardX + PAD + 14, cardY + PAD + 11 + LINE_H * (int)i);
+            cairo_show_text(cr, l.c_str());
+        }
+        cairo_destroy(cr);
+        cairo_surface_flush(back);
+        cairo_t* cw = cairo_create(winSurf);
+        cairo_set_operator(cw, CAIRO_OPERATOR_SOURCE);
+        cairo_set_source_surface(cw, back, 0, 0);
+        cairo_paint(cw);
+        cairo_destroy(cw);
+        cairo_surface_flush(winSurf);
+        // Without a compositor there is no alpha: cut the window to what's drawn (the mask changes while it types).
+        if (compositor != lastCompositor || !compositor) {
+            unsigned char* data = cairo_image_surface_get_data(back);
+            int stride = cairo_image_surface_get_stride(back);
+            int bpl = (geo.w + 7) / 8;
+            std::vector<char> bits(bpl * geo.h, 0);
+            if (!compositor)
+                for (int y = 0; y < geo.h; ++y)
+                    for (int x = 0; x < geo.w; ++x)
+                        if ((*(uint32_t*)(data + y * stride + x * 4) >> 24) > 40) bits[y * bpl + x / 8] |= (char)(1 << (x % 8));
+            if (bits != lastMask || compositor != lastCompositor) {
+                Pixmap pm = XCreateBitmapFromData(dpy, win, bits.data(), geo.w, geo.h);
+                XShapeCombineMask(dpy, win, ShapeBounding, 0, 0, compositor ? None : pm, ShapeSet);
+                XFreePixmap(dpy, pm);
+                lastMask.swap(bits);
+                lastCompositor = compositor;
+            }
+        }
+    }
+};
+
 // ---- the pig -------------------------------------------------------------------
 
 enum class St { Idle, Walk, Sit, Sleep, Air, Drag, Eat, Play, Away, Work };
@@ -710,7 +935,7 @@ Act actForTool(const std::string& t, std::string& detail) {
 
 class Pet {
 public:
-    Pet(Display* d, Desktop& desk, Stats& stats) : dpy(d), D(desk), s(stats), menu(d) { createWindow(); }
+    Pet(Display* d, Desktop& desk, Stats& stats) : dpy(d), D(desk), s(stats), menu(d), overlay(d) { createWindow(); }
 
     ~Pet() {
         menu.close();
@@ -762,6 +987,34 @@ public:
             std::string c = get("costume");
             costumeForced = c != "auto" && !c.empty();
             costume = costumeForced ? wardrobe::named(c) : wardrobe::today();
+            return;
+        }
+        if (ev == "coach") {  // mochi-coach: a note (with boxes in root coordinates) to draw, or its state
+            std::string state = get("state");
+            if (state == "on" || state == "off") {
+                coaching = state == "on";
+                if (coaching && grounded() && (st == St::Idle || st == St::Walk || st == St::Sit || st == St::Play)) {
+                    visitWin = 0;
+                    playLeft = 0;
+                    set(St::Sit, frand(6, 14));  // settles down where it is
+                }
+                return;
+            }
+            if (get("clear") == "1" || get("text").empty()) { overlay.clear(); return; }
+            std::vector<Rect> boxes;
+            for (int i = 0; i < 8; ++i) {
+                std::string k = "boxes." + std::to_string(i) + ".";
+                if (m.find(k + "3") == m.end()) break;
+                Rect r{atoi(get((k + "0").c_str()).c_str()), atoi(get((k + "1").c_str()).c_str()),
+                       atoi(get((k + "2").c_str()).c_str()), atoi(get((k + "3").c_str()).c_str())};
+                if (r.w > 2 && r.h > 2) boxes.push_back(r);
+            }
+            double secs = clampd(atof(get("secs").c_str()), 0, 120);
+            const Rect& mon = boxes.empty() ? D.monitorNear(px, py - 60) : D.monitorNear(boxes[0].x + boxes[0].w / 2.0, boxes[0].y + boxes[0].h / 2.0);
+            const Rect& pigMon = D.monitorNear(px, py - 60);
+            overlay.show(get("text"), boxes, secs > 0 ? secs : 10, mon, pigRect(), &mon == &pigMon);
+            overlay.focus(coachX, coachY);
+            coachLookUntil = now() + 4;
             return;
         }
         if (ev == "emote") {
@@ -1015,7 +1268,7 @@ public:
         prevHappy = happyLeft;
         if (askHop > 0 && !anim.busy() && grounded()) anim.start(art3d::Action::Hop, 0.5);
         if (st == St::Drag && !anim.busy() && chance(dt / 3)) anim.start(art3d::Action::Struggle, 1.1);
-        bool idle = (st == St::Idle || st == St::Sit) && !anim.busy() && bubbleLeft <= 0;
+        bool idle = (st == St::Idle || st == St::Sit) && !anim.busy() && bubbleLeft <= 0 && !coaching;  // no tricks mid-call
         if (idle && (idleActionIn -= dt) <= 0) {
             idleActionIn = frand(3, 9);
             double r = frand();
@@ -1064,7 +1317,7 @@ public:
         if (!wants) attentionSince = 0;
         else if (!attentionSince) attentionSince = t;
         if (closeT < 0) {
-            bool can = grounded() && st != St::Sleep && st != St::Work && !menu.open && !hidden;
+            bool can = grounded() && st != St::Sleep && st != St::Work && !menu.open && !hidden && !coaching;
             if (wants && can && t - attentionSince > 25 && t - lastCloseup > 100) closeT = 0;
             approach += (0 - approach) * 0.2;
             return;
@@ -1110,7 +1363,7 @@ public:
         }
         // Sometimes it goes over to sit on the window you've settled into.
         if (activeWin && activeWin != plat && t - winFocusAt > 20 && (st == St::Idle || st == St::Sit) && !anim.busy() &&
-            t - lastVisit > 240 && D.rects.count(activeWin) && chance(dt / 15)) {
+            !coaching && t - lastVisit > 240 && D.rects.count(activeWin) && chance(dt / 15)) {
             const Rect& r = D.rects[activeWin];
             if (std::hypot(r.x + r.w / 2.0 - px, r.y - py) < 1400) {
                 visitWin = activeWin;
@@ -1142,6 +1395,11 @@ public:
         if (talkingToYou || (glancing && !interested)) {
             lookKind = 2;
             lookW = 1;
+        } else if (t < coachLookUntil && std::hypot(coachX - headX, coachY - headY) < 2400) {  // what it just pointed at
+            lookKind = 1;
+            lookX = coachX - headX;
+            lookY = coachY - headY;
+            lookW = 0.9;
         } else if (interested && t - ptrMovedAt < 2.5 && ptrD > 90 && ptrD < 1100) {
             lookKind = 1;
             lookX = ptrX - headX;
@@ -1160,6 +1418,7 @@ public:
     }
 
     void render(bool compositor) {
+        overlay.tick(1.0 / 30, compositor);  // the coach's note lives on even while the pig hides (a fullscreen call)
         if (hidden) return;
         cairo_t* cr = cairo_create(back);
         cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
@@ -1270,6 +1529,15 @@ public:
             cairo_set_line_width(cr, 1.5);
             cairo_stroke(cr);
         }
+        if (coaching) {  // listening in on the call: a small pink dot on the other side, breathing slowly
+            double k = 0.8 + 0.2 * std::sin(tick / 30.0 * 2.5);
+            cairo_arc(cr, headCx + (mirror ? 13 : -13), headTop - 9, 3.5 * k, 0, 2 * M_PI);
+            cairo_set_source_rgb(cr, 0.96, 0.45, 0.56);
+            cairo_fill_preserve(cr);
+            cairo_set_source_rgb(cr, 0.16, 0.12, 0.10);
+            cairo_set_line_width(cr, 1.5);
+            cairo_stroke(cr);
+        }
         cairo_destroy(cr);
         cairo_surface_flush(back);
 
@@ -1290,6 +1558,10 @@ private:
     Desktop& D;
     Stats& s;
     Menu menu;
+    Overlay overlay;       // the coach's notes and highlights (mochi-coach), drawn over the screen
+    bool coaching = false; // a coach session is on: a small dot by the head says it's listening
+    double coachLookUntil = 0;  // after a note: it glances at what it pointed at
+    int coachX = 0, coachY = 0;
 
     Window win = 0;
     Visual* visual = nullptr;
@@ -1662,7 +1934,10 @@ private:
         std::vector<std::string> items;
         if (!asks.empty())
             items.push_back(asks.size() == 1 ? "1 question for you" : std::to_string(asks.size()) + " questions for you");
-        for (const char* s : {"Give me a task...", "Open a chat", "Recent...", "Shoo for 10 min", "Quit"})
+        for (const char* s : {"Give me a task...", "Open a chat", "Recent..."})
+            items.push_back(s);
+        items.push_back(coaching ? "Stop coaching" : "Coach this call");  // mochi-coach, through the brain
+        for (const char* s : {"Shoo for 10 min", "Quit"})
             items.push_back(s);
         menu.show(items, D.monitorNear(px, py - 60), pigRect());
     }
@@ -1769,6 +2044,13 @@ private:
             else say("my brain isn't running", 3);
             return;
         }
+        if (what == "Coach this call" || what == "Stop coaching") {
+            bool start = what == "Coach this call";
+            if (ipc::send(json::object({{"event", "coach"}, {"action", start ? "start" : "stop"}}), ipc::brainPath()))
+                say(start ? "listening in" : "ok, I'll stop", 3);
+            else say("my brain isn't running", 3);
+            return;
+        }
         if (what == "Shoo for 10 min") {
             say("fine.");
             awayLeft = 600;
@@ -1842,6 +2124,7 @@ private:
     // It looks after itself: eats when hungry, naps when tired, and now and then chases your pointer for fun.
     // No menu for any of that, and no nagging.
     void decide() {
+        if (coaching && grounded()) { set(St::Sit, frand(6, 14)); return; }  // sitting in on a call: it stays put
         if (eatPending || s.food < 30) { startEat(); return; }
         if (s.energy < 18) { goSleep(); return; }
         if (s.fun < 45 && s.energy > 30 && now() - ptrMovedAt < 6 && chance(0.3)) {

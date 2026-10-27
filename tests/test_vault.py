@@ -179,6 +179,69 @@ class Flow(unittest.TestCase):
         self.assertLess(time.time() - t0, 2)
 
 
+class FillFrom(unittest.TestCase):
+    """fill --from: the login saved for one site, on a sign-in page elsewhere; both named; the site added on Allow."""
+
+    def setUp(self):
+        import base64, json, subprocess
+        self.asked, self.filled, self.edited = [], [], []
+        self.v = mv.Vault(bw="/bin/false", relay_pid=lambda: RELAY, notify=self.notify)
+        self.v.items = [item("j", "jobs", "https://apply.jobs.example"), item("a", "GitHub", "github.com")]
+        self.tabs = [{"url": "https://login.jobs-id.example/signin?x=1", "webSocketDebuggerUrl": "ws://x/1"}]
+        mv.pages = lambda: self.tabs
+        mv.frames = lambda t: [(t["url"], t["webSocketDebuggerUrl"], None)]
+        mv.probe = lambda f, signup=False: True
+        mv.keyring_get = lambda: "master"
+        mv.fill_page = lambda f, host, it, submit=True, signup=False: (self.filled.append((host, it["id"])) or
+                                                                      {"ok": True, "filled": ["password"], "how": "button"})
+        self.v.open_bw = lambda pw: ("SESSION", None)
+
+        def run_bw(args, session=None, pass_fds=(), timeout=120, input=None):
+            if args[:2] == ["get", "item"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps(
+                    {"id": "j", "login": {"uris": [{"uri": "https://apply.jobs.example", "match": None}]}}), "")
+            if args[:2] == ["edit", "item"]:
+                self.edited.append(json.loads(base64.b64decode(input)))
+            return subprocess.CompletedProcess(args, 0, "{}", "")
+        self.v.run_bw = run_bw
+        self.answer = None
+
+    def notify(self, **m):
+        if m["event"] == "vault_ask":
+            self.asked.append(m)
+            if self.answer:
+                choice, pid = self.answer
+                threading.Timer(0.05, lambda: self.v.decide(m["id"], choice, pid=pid)).start()
+        return True
+
+    def test_plain_fill_finds_nothing(self):
+        ok, msg = self.v.fill("x", timeout=1)
+        self.assertFalse(ok)
+        self.assertEqual(self.asked, [])
+
+    def test_allow_fills_and_adds_the_site(self):
+        self.answer = (0, RELAY)
+        ok, msg = self.v.fill("finish the application", from_site="apply.jobs.example", timeout=2)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.asked[0]["kind"], "elsewhere")
+        self.assertEqual(self.asked[0]["source"], "apply.jobs.example")
+        self.assertEqual(self.asked[0]["host"], "login.jobs-id.example")
+        self.assertEqual(self.filled, [("login.jobs-id.example", "j")])
+        self.assertEqual(self.edited[0]["login"]["uris"][-1], {"uri": "https://login.jobs-id.example", "match": None})
+        self.assertIn("Added", msg)
+        # from now on an ordinary fill matches there
+        self.assertEqual(self.v.has("https://login.jobs-id.example/signin"), "1 login for login.jobs-id.example")
+
+    def test_deny_and_unknown_source(self):
+        self.answer = (None, RELAY)
+        ok, _ = self.v.fill("x", from_site="apply.jobs.example", timeout=2)
+        self.assertFalse(ok)
+        self.assertEqual((self.filled, self.edited), ([], []))
+        ok, msg = self.v.fill("x", from_site="nowhere.example", timeout=1)
+        self.assertFalse(ok)
+        self.assertIn("no login", msg)
+
+
 class Export(unittest.TestCase):
     """export: a login copied into a file under the config dir, after the tap; nowhere else; nothing printed."""
 
@@ -225,6 +288,104 @@ class Export(unittest.TestCase):
         self.assertIn("no login", msg)
         ok, msg = self.v.export("https://box.example/", str(Path(TMP) / "mochi" / "x.env"), "  ", timeout=1)
         self.assertFalse(ok)
+
+
+class Signup(unittest.TestCase):
+    """signup: asked on the phone, saved in Bitwarden before anything is typed, then filled; never without the save."""
+
+    def setUp(self):
+        self.asked, self.filled, self.created, self.bw_calls = [], [], [], []
+        self.v = mv.Vault(bw="/bin/false", relay_pid=lambda: RELAY, notify=self.notify)
+        self.v.items = [item("a", "GitHub", "github.com")]
+        self.tabs = [{"url": "https://jobs.example/apply/new", "webSocketDebuggerUrl": "ws://x/1"}]
+        mv.pages = lambda: self.tabs
+        mv.frames = lambda t: [(t["url"], t["webSocketDebuggerUrl"], None)]
+        mv.probe = lambda f, signup=False: True
+        mv.keyring_get = lambda: "master"
+        mv.fill_page = lambda f, host, it, submit=True, signup=False: (
+            self.filled.append((host, it["username"], it["password"], submit, signup)) or
+            {"ok": True, "filled": ["email", "password (in 2 boxes)"], "how": "not submitted"})
+        self.v.open_bw = lambda pw: ("SESSION", None)
+        self.v.run_bw = self.run_bw
+        self.save_fails = False
+        self.answer = None
+
+    def run_bw(self, args, session=None, pass_fds=(), timeout=120, input=None):
+        import base64, json, subprocess
+        self.bw_calls.append(args)
+        if args[:2] == ["create", "item"]:
+            if self.save_fails:
+                return subprocess.CompletedProcess(args, 1, "", "Not found.")
+            self.created.append(json.loads(base64.b64decode(input)))
+            return subprocess.CompletedProcess(args, 0, json.dumps({"id": "new-1"}), "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    def notify(self, **m):
+        if m["event"] == "vault_ask":
+            self.asked.append(m)
+            if self.answer:
+                choice, pid = self.answer
+                threading.Timer(0.05, lambda: self.v.decide(m["id"], choice, pid=pid)).start()
+        return True
+
+    def test_allow_saves_then_fills(self):
+        self.answer = (0, RELAY)
+        ok, msg = self.v.signup("apply for the job they picked", "me@example.com", timeout=2)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.asked[0]["kind"], "create")
+        self.assertEqual(self.asked[0]["host"], "jobs.example")
+        made = self.created[0]
+        pw = made["login"]["password"]
+        self.assertEqual(made["login"]["username"], "me@example.com")
+        self.assertEqual(made["login"]["uris"], [{"uri": "https://jobs.example", "match": None}])
+        self.assertGreaterEqual(len(pw), 20)
+        self.assertEqual(self.filled, [("jobs.example", "me@example.com", pw, False, True)])
+        self.assertEqual(self.bw_calls[-1], ["lock"])  # Bitwarden locked again after the write
+        self.assertNotIn(pw, msg + repr(self.asked))
+        # it's a login like any other now: a fill on that site finds it
+        self.assertEqual(self.v.has("https://jobs.example/login"), "1 login for jobs.example")
+
+    def test_save_fails_nothing_filled(self):
+        self.answer = (0, RELAY)
+        self.save_fails = True
+        ok, msg = self.v.signup("x", "me@example.com", timeout=2)
+        self.assertFalse(ok)
+        self.assertIn("nothing was filled", msg)
+        self.assertEqual(self.filled, [])
+        self.assertEqual(self.bw_calls[-1], ["lock"])
+
+    def test_not_remembered(self):
+        self.answer = (0, RELAY)
+        mv.keyring_get = lambda: None
+        ok, msg = self.v.signup("x", "me@example.com", timeout=2)
+        self.assertFalse(ok)
+        self.assertIn("remember", msg)
+        self.assertEqual(self.filled, [])
+
+    def test_deny(self):
+        self.answer = (None, RELAY)
+        ok, _ = self.v.signup("x", "me@example.com", timeout=2)
+        self.assertFalse(ok)
+        self.assertEqual((self.created, self.filled), ([], []))
+
+    def test_existing_login_and_unsafe_page(self):
+        self.tabs = [{"url": "https://github.com/signup", "webSocketDebuggerUrl": "ws://x/1"}]
+        ok, msg = self.v.signup("x", "me@example.com", timeout=1)
+        self.assertFalse(ok)
+        self.assertIn("already", msg)
+        self.tabs = [{"url": "http://jobs.example/apply", "webSocketDebuggerUrl": "ws://x/1"}]
+        ok, msg = self.v.signup("x", "me@example.com", timeout=1)
+        self.assertFalse(ok)
+        self.assertIn("https", msg)
+        self.assertEqual(self.asked, [])
+
+    def test_password_shape(self):
+        for _ in range(50):
+            pw = mv.make_password()
+            self.assertEqual(len(pw), 20)
+            self.assertTrue(any(c.islower() for c in pw) and any(c.isupper() for c in pw) and
+                            any(c.isdigit() for c in pw) and any(c in mv.SYMBOLS for c in pw))
+        self.assertTrue(mv.make_password(16, symbols=False).isalnum())
 
 
 if __name__ == "__main__":

@@ -1046,3 +1046,10 @@ class InWindows(unittest.TestCase):
         tg.relay = r2
         self.assertIsNone(r2.in_windows())
         self.assertTrue(tg.may_buzz(True))
+
+
+class CoachStrip(unittest.TestCase):
+    def test_strips_block_and_joins_lines(self):
+        text = 'agreed sat 19:00 (tg nastya 10-07)\nthe contract is in Drive\n\n```json\n{"say": null, "asks": []}\n```\n'
+        self.assertEqual(mb.coach_strip(text), "agreed sat 19:00 (tg nastya 10-07) the contract is in Drive")
+        self.assertEqual(mb.coach_strip("  plain  answer "), "plain answer")

@@ -52,13 +52,13 @@ half: it is built around one person's setup, and reading `brain/CLAUDE.md` is th
 ## The pig
 
 <p align="center">
-  <img src="docs/life.gif" alt="Eight pigs: walking, trotting, eating from a bowl, napping, and sitting at a laptop, a book, a terminal and a globe" width="880">
+  <img src="docs/life.gif" alt="Ten pigs: walking, trotting, eating from a bowl, napping, dreaming, sitting at a laptop, a book, a terminal and a globe, and pricking up an ear in its sleep" width="880">
 </p>
 
 **It has a life of its own.** A four-legged gait that matches its ground speed (a trot when it chases your cursor),
 each foot lifting as it swings forward, the head held level while the body sways; it steps round on its feet when it
 turns on the spot. Breathing, floppy ears that bounce as it goes, a wagging tail nub, blinking at a natural rhythm. It eats when it's hungry, chewing with a working snout as
-the bowl empties; it naps and twitches a leg in its sleep. There is nothing to feed and no stats to manage: it looks
+the bowl empties; it naps, paddles its legs after something in its dreams, and half-hears you come back without waking. There is nothing to feed and no stats to manage: it looks
 after itself, and time passes gently while it isn't running. It doesn't die.
 
 **It works when you work.** Hooked into Claude Code, it turns to face into the screen and sits down at its laptop when
@@ -66,11 +66,13 @@ a session writes code, a book when it reads or searches, a terminal when it runs
 tapping the keys and following the lines.
 
 <p align="center">
-  <img src="docs/tricks.gif" alt="Ten tricks: sniff, stretch, shake, hop, scratch, wiggle, look around, paw, land, cheer" width="880">
+  <img src="docs/tricks.gif" alt="Fifteen tricks: sniff, stretch, shake, hop, scratch, wiggle, look around, paw, land, cheer, chasing its tail, sneeze, yawn, scratching its rump, and a whoops on thin air" width="880">
 </p>
 
 **It has tricks.** On its own it sniffs the ground, stretches, shakes, scratches, wiggles, hops, paws at the floor
-and looks around. It
+and looks around; now and then it sneezes, chases its own tail, or backs up to the edge of the screen to scratch its
+rump on it, and past eleven it gets yawny. If its window goes out from under it, it stands on thin air a beat before it
+falls. It
 cheers (two jumps, turned round to you) when a Claude run finishes that touched five or more files, and sulks when a run
 keeps failing. Squash before a hop, stretch on take-off, a settle after landing: poses ease into each other instead of
 snapping. The ears follow through: flung up in a fall, slapped down on landing, flapping in a shake, flat when it
@@ -81,12 +83,12 @@ sulks or sleeps.
 </p>
 
 <p align="center">
-  <img src="docs/handled.gif" alt="Four pigs: kicking while held up, being petted, perking up when you're back, sulking" width="880">
+  <img src="docs/handled.gif" alt="Five pigs: kicking while held up, being petted, rolled over for a belly rub, perking up when you're back, sulking" width="880">
 </p>
 
 **It notices you.** Its eyes get to your pointer first and the head follows, looks over at the window you're working in, and looks out at *you*
 when it talks, when you pet it, and when you come back after a break. Pet it and it nuzzles your hand (until it has
-had enough and shakes its head). Pick it up and it kicks; throw it and it tumbles, then squashes on landing. Now and then
+had enough and shakes its head); pet it a few times and it flops over for a belly rub. Pick it up and it kicks; throw it and it tumbles, then squashes on landing. Now and then
 it walks over to sit on the window you've settled into.
 
 <p align="center">
@@ -428,6 +430,32 @@ messages from people. The rules for using it are in `brain/CLAUDE.md`, "Their ph
 from the webcam, a clip from the microphone (transcribed), what's on a monitor. Same rule as the phone: only in a
 run they asked for. `mochi-desk media` lists what was taken; files live in `~/.local/share/mochi/desk/media/`.
 
+### On a call: the coach
+
+`mochi-coach start` is Mochi sitting in on a call (their ask, 2026-10-25: "see my screen and knowing what we're
+discussing provide useful advice ... just draw text in realtime and maybe highlight areas"; then: "so it's normal
+mochi, but it knows it's getting chunks of transcriptions"). Both sides of the call (the microphone as `me`, what the
+speakers play as `them`) go through live speech-to-text, AssemblyAI's streaming models (`ASSEMBLYAI_API_KEY` in
+`~/.config/mochi/assemblyai.env`; 18 languages, no Russian) or Gemini's transcribe-live when there is no AssemblyAI key
+(`GEMINI_API_KEY` in `~/.config/mochi/gemini.env`), and the text goes every `--every` seconds (15) as a chunk into one
+running Claude Code session in Mochi's workspace: the normal Mochi, with its memory, senses and read-only tools, told
+that it is hearing a call. Each chunk gets one JSON line back: a note for the screen or nothing, a highlight box if it
+Read the fresh picture of the call's monitor (`desk/coach/frame.jpg`, named in every chunk), and a line to remember.
+The pig draws the note, typed out, with the box in pink, and sits down where it is for the whole session (no wandering,
+no tricks); the right-click menu has **Coach this call** / **Stop coaching**. A note lands five to ten seconds after
+its chunk goes; `--brief "who and what for"` gives Mochi the context; `--model sonnet` makes it cheaper and quicker;
+`--transcript` keeps the call's words in the session's notes (`~/.local/share/mochi/desk/coach/<stamp>.md`; without it
+only the notes it showed and what it was told to remember; the Claude session itself is kept in `~/.claude` like any
+chat). `mochi-coach show "TEXT" --box X,Y,W,H` tries the overlay by hand.
+
+`--engine live` is the first version: Google's Gemini Live API (`gemini-3.8-live`) hears the audio and sees the
+screen itself, one frame a second, and answers through a `show` tool within a second or two, with Mochi's notes read
+once at the start (`--context full|light|none`, which sends them to Google), live lookups through Mochi's senses,
+Google Search, and `ask_mochi` for a question to Mochi's brain through the relay. Faster, but not Mochi. Both engines
+need `make tools` (the `google-genai`, `claude-agent-sdk` and `assemblyai` SDKs), and in both the audio only reaches a
+model while someone is speaking (an energy gate on each stream; AssemblyAI gets the stream whole and finds the turns
+itself).
+
 ### Its own browser
 
 `brain/mochi_browser.py` (installed as `mochi-browser`) gives Mochi a Chrome of its own: a separate profile in
@@ -484,6 +512,8 @@ xpet --send 'build finished'                        # plain text = speech bubble
 xpet --send '{"event":"say","text":"hi","secs":5}'
 xpet --send '{"event":"emote","emote":"happy"}'     # happy | oof | sleep
 xpet --send '{"session":"x","event":"tool_start","tool":"Bash","detail":"deploying"}'
+xpet --send '{"event":"coach","text":"the figure on screen is 42k","boxes":[[1660,300,940,60]],"secs":10}'  # the coach's overlay; boxes in root px
+xpet --send '{"event":"coach","state":"on"}'            # on | off: the listening dot; {"event":"coach","clear":"1"} takes a note down
 ```
 
 Activity events (`prompt`, `tool_start`, `tool_end`, `notify`, `stop`, `session_end`, ...) make it drop what it's doing
