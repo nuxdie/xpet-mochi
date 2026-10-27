@@ -1239,6 +1239,8 @@ public:
             anim.action = art3d::Action::Idle;  // picked up or called away mid-rub: up at once (a pop, accepted)
         if (anim.action == art3d::Action::Rub && (st != St::Idle || !grounded() || std::fabs(vx) > 0.1))
             anim.action = art3d::Action::Idle;  // picked up off its scratching post, or off somewhere
+        if (anim.action == art3d::Action::Lean && ((st != St::Idle && st != St::Sit) || !grounded()))
+            anim.action = art3d::Action::Idle;  // picked up or off somewhere: no leaning on nothing
         if (st == St::Sleep && !lyingDown() && tick % 40 == 0) spawn(1);
         updateActivity();
         if (bubbleLeft > 0) bubbleLeft -= dt;
@@ -1285,7 +1287,10 @@ public:
                 else if (r < 0.5) anim.start(art3d::Action::Scratch, 1.7);
                 else if (r < 0.65) anim.start(art3d::Action::Shake, 0.9);
             } else {
-                if (r < 0.25) anim.start(art3d::Action::Sniff, 1.7);
+                if (r < 0.18) anim.start(art3d::Action::Sniff, 1.7);
+                // Sometimes the sniff turns up something worth digging for: it roots about and finds a truffle.
+                else if (r < 0.25 && grounded()) anim.start(art3d::Action::Root, art3d::ROOT_SECS);
+                else if (r < 0.25) anim.start(art3d::Action::Sniff, 1.7);
                 else if (r < 0.42) anim.start(art3d::Action::LookAround, 2.4);
                 else if (r < 0.57) anim.start(art3d::Action::Stretch, 2.2);
                 else if (r < 0.7) anim.start(art3d::Action::Shake, 0.9);
@@ -1378,6 +1383,25 @@ public:
             snuffleAt = t;
             anim.start(art3d::Action::Snuffle, 1.4);
         }
+        // Your hand resting on it: the pointer came to a stop on its back or head and stayed (a parked pointer it
+        // wandered under doesn't count: the stop must be recent). It leans up into it, and keeps leaning while the hand
+        // stays, moving or not, up to LEAN_MAX; take the hand away and it sighs and lets go.
+        bool handOnIt = std::fabs(ptrX - px) < 28 && ptrY > py - 62 && ptrY < py - 14 && !pressed;
+        if (handOnIt && t - ptrMovedAt > 1.2 && t - ptrMovedAt < 5 && t - leanedAt > LEAN_GAP && !anim.busy() &&
+            (st == St::Idle || st == St::Sit) && grounded() && std::fabs(vx) < 0.1 && !menu.open && !closeupOn()) {
+            leanedAt = t;
+            leanHeld = 0;
+            anim.start(art3d::Action::Lean, art3d::LEAN_SECS);
+            stLeft = std::max(stLeft, art3d::LEAN_SECS + 1);
+        }
+        if (anim.action == art3d::Action::Lean) {
+            if (handOnIt && anim.actionT > anim.actionLen * art3d::LEAN_HOLD && leanHeld < LEAN_MAX) {
+                anim.actionT -= dt;  // held where it leans hardest; the rub runs on the clock, so it keeps rubbing
+                leanHeld += dt;
+                stLeft = std::max(stLeft, anim.actionLen - anim.actionT + 1);
+            }
+            idleActionIn = std::max(idleActionIn, 5.0);  // no trick straight after: it's enjoying this
+        }
         bool perking = anim.action == art3d::Action::Perk && anim.actionT > anim.actionLen * art3d::PERK_LOOK;  // looking round at you
         bool uhoh = hanging && anim.actionT > anim.actionLen * art3d::WHOOPS_LOOK && anim.actionT < anim.actionLen * art3d::WHOOPS_RUN;  // the look at you before the drop
         bool talkingToYou = bubbleLeft > 0 || happyLeft > 0 || askHop > 0 || perking || uhoh || (closeupOn() && closeT < CLOSE_IN + CLOSE_STARE);
@@ -1441,10 +1465,17 @@ public:
             anim.actionT < anim.actionLen * art3d::SNEEZE_OPEN)
             eyes = art::Eyes::Closed;  // nobody sneezes with their eyes open
         if (anim.action == art3d::Action::Yawn && art3d::yawnEyesShut(anim.actionT / anim.actionLen)) eyes = art::Eyes::Closed;
+        if (anim.action == art3d::Action::Lean) {  // glad, then eyes shut while it leans into your hand
+            double q = anim.actionT / anim.actionLen;
+            if (q > 0.12 && q < 0.95) eyes = art3d::leanEyesShut(q) ? art::Eyes::Closed : art::Eyes::Happy;
+        }
         if (anim.action == art3d::Action::Rub) {  // a good scratch: content, and eyes shut in the best of it
             double q = anim.actionT / anim.actionLen;
             if (q > art3d::RUB_FROM && q < art3d::RUB_TO) eyes = q > art3d::RUB_BLISS && q < art3d::RUB_BLISS_END ? art::Eyes::Closed : art::Eyes::Happy;
         }
+        if (anim.action == art3d::Action::Root && anim.actionT > anim.actionLen * art3d::ROOT_FOUND &&
+            anim.actionT < anim.actionLen * art3d::ROOT_DONE)
+            eyes = art::Eyes::Happy;  // found one
         bool mirror = dir < 0;
         art::Prop prop = art::Prop::Nothing;
         if (working) {
@@ -1597,6 +1628,9 @@ private:
     double rubbedAt = -1e9;
     static constexpr double YAWN_GAP = 600;  // late-night yawns: at most one in ten minutes (animate)
     double yawnedAt = -1e9;
+    // the pointer resting on it like a hand: a lean-in at most once in LEAN_GAP, held for up to LEAN_MAX (attention)
+    static constexpr double LEAN_GAP = 90, LEAN_MAX = 8;
+    double leanedAt = -1e9, leanHeld = 0;
     // the belly rub: this many pets within ten seconds roll it over, not twice within ROLL_GAP; rubs extend the lie-down
     static constexpr size_t ROLL_PETS = 4;
     static constexpr double ROLL_GAP = 120;
@@ -2567,8 +2601,14 @@ int writeStrip(const std::string& name, const char* path) {
                 if (row == 2) f.yaw = 150;
                 if (p > art3d::RUB_FROM && p < art3d::RUB_TO) f.eyes = p > art3d::RUB_BLISS && p < art3d::RUB_BLISS_END ? art::Eyes::Closed : art::Eyes::Happy;
             }
+            if (a->action == art3d::Action::Root) {  // only ever standing about, never at the desk: the third row faces left
+                f.pose = art3d::Pose::Stand; f.prop = art3d::Prop::Nothing;
+                if (row == 2) f.yaw = 150;
+                if (p > art3d::ROOT_FOUND && p < art3d::ROOT_DONE) f.eyes = art::Eyes::Happy;
+            }
             if (a->action == art3d::Action::Sneeze && p > art3d::SNEEZE_SHUT && p < art3d::SNEEZE_OPEN) f.eyes = art::Eyes::Closed;
             if (a->action == art3d::Action::Yawn && art3d::yawnEyesShut(p)) f.eyes = art::Eyes::Closed;
+            if (a->action == art3d::Action::Lean && p > 0.12 && p < 0.95) f.eyes = art3d::leanEyesShut(p) ? art::Eyes::Closed : art::Eyes::Happy;
             f.t = 1.0 + p * a->secs;
             f.costume = wardrobe::today();
             art3d::renderStill(cr, f, i * cellW + cellW / 2.0, row * cellH + cellH - 14 * zoom, zoom, a->action, p);
