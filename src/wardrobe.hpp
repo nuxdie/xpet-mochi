@@ -22,7 +22,9 @@ using art3d::Decal;
 using art3d::rgb;
 
 inline const art3d::RGB RUST = rgb(0xC8552B), CREAM = rgb(0xF3E3C3), WITCH = rgb(0x3B2650), PUMPKIN = rgb(0xF08A24),
-                        BUCKLE = rgb(0xF2D04B), TEAL = rgb(0x2A7F86), DEEP_TEAL = rgb(0x1F6168);
+                        BUCKLE = rgb(0xF2D04B), TEAL = rgb(0x2A7F86), DEEP_TEAL = rgb(0x1F6168),
+                        OILSKIN = rgb(0xFFD43A), OCHRE = rgb(0xB8870F),
+                        COLLAR = rgb(0xE9B422);
 
 // Autumn: a chunky knitted scarf round the neck, one end hanging down the side.
 inline Costume autumnScarf() {
@@ -84,9 +86,41 @@ inline Costume bobbleHat() {
     return c;
 }
 
+// Amsterdam's wet months: a yellow oilskin sou'wester (short brim over the face, long one down the back of the
+// neck, a strap under the chin) and a little dog-style raincoat to match, with a reflective stripe down each side.
+inline Costume souWester() {
+    Costume c{"sou-wester", {}, 2.7};
+    // The brim: short at the front, just over the eyes (they end at y 3), then lower and longer behind, ending in a
+    // flap down the back of the neck. Its sides stop short of the ears' hinge (x 5.5) at the back, like the cuff.
+    // Seen from the front, the wider back brim shows below the front one at both sides: the droop that makes it a
+    // sou'wester and not a builder's helmet (a tall crown with a band read as one, first try).
+    Box front{{6.1, 4.2, 0}, {6.2, 0.6, 9.4}, OILSKIN, 0, {}};
+    front.decals.push_back({0, 0, 0, 0.12, 4.6, OCHRE});  // the stitched edge (+x face: u is y, v is z)
+    c.pieces.push_back({Anchor::Head, front});
+    c.pieces.push_back({Anchor::Head, {{1.6, 3.5, 0}, {5.0, 0.6, 11.4}, OILSKIN, 0, {}}});
+    c.pieces.push_back({Anchor::Head, {{-1.0, 2.9, 0}, {1.6, 0.6, 11.0}, OILSKIN, 0, {}}});
+    c.pieces.push_back({Anchor::Head, {{-1.9, 1.9, 0}, {0.6, 1.8, 10.2}, OILSKIN, 0, {}}});  // the neck flap
+    // A low, soft crown with its panels' seams crossing over the top.
+    c.pieces.push_back({Anchor::Head, {{4.2, 5.2, 0}, {7.0, 1.8, 7.6}, OILSKIN, 0, {}}});
+    Box top{{4.2, 6.4, 0}, {5.4, 0.6, 6.0}, OILSKIN, 0, {}};
+    top.decals.push_back({2, 0, 0, 0.14, 2.7, OCHRE});  // front to back (top: u is z, v is x)
+    top.decals.push_back({2, 0, 0, 3.0, 0.14, OCHRE});  // side to side
+    c.pieces.push_back({Anchor::Head, top});
+    for (double side : {-1.0, 1.0})  // the chin strap, behind the eyes and the ears' hinge
+        c.pieces.push_back({Anchor::Head, {{2.6, -0.2, side * 4.1}, {0.5, 7.2, 0.3}, OCHRE, 0, {}}});
+    // The coat: over the back from the neck to just before the rump, so the tail and the pink behind stay out.
+    Box coat{{1.2, 4.8, 0}, {14.2, 7.0, 10.8}, OILSKIN, 0, {}};
+    coat.decals.push_back({4, 0, -1.9, 6.6, 0.35, CREAM});  // reflective stripes (+z: u is x, v is y)
+    coat.decals.push_back({5, -1.9, 0, 0.35, 6.6, CREAM});  // (-z: u is y, v is x)
+    coat.decals.push_back({2, 0, 0, 0.14, 6.8, OCHRE});     // the seam down the back
+    c.pieces.push_back({Anchor::Body, coat});
+    c.pieces.push_back({Anchor::Body, {{7.9, 4.9, 0}, {1.2, 7.6, 11.4}, COLLAR, 0, {}}});  // the collar
+    return c;
+}
+
 // Every costume there is (the render test goes through all of them).
 inline const std::vector<Costume>& all() {
-    static const std::vector<Costume> v = {autumnScarf(), witchHat(), bobbleHat()};
+    static const std::vector<Costume> v = {autumnScarf(), witchHat(), bobbleHat(), souWester()};
     return v;
 }
 
@@ -108,6 +142,7 @@ inline const Season SEASONS[] = {
     {"witch-hat", 1024, 1101},
     {"autumn-scarf", 922, 1120},
     {"bobble-hat", 1121, 228},  // all winter, through the new year
+    {"sou-wester", 1015, 1215},  // the rainy months: takes turns with the scarf, then the bobble hat
 };
 inline constexpr int DAY_SPAN = 14;
 
