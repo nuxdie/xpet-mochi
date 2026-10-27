@@ -1034,7 +1034,10 @@ public:
                 else if (r < 0.5) anim.start(art3d::Action::Scratch, 1.7);
                 else if (r < 0.65) anim.start(art3d::Action::Shake, 0.9);
             } else {
-                if (r < 0.25) anim.start(art3d::Action::Sniff, 1.7);
+                if (r < 0.18) anim.start(art3d::Action::Sniff, 1.7);
+                // Sometimes the sniff turns up something worth digging for: it roots about and finds a truffle.
+                else if (r < 0.25 && grounded()) anim.start(art3d::Action::Root, art3d::ROOT_SECS);
+                else if (r < 0.25) anim.start(art3d::Action::Sniff, 1.7);
                 else if (r < 0.42) anim.start(art3d::Action::LookAround, 2.4);
                 else if (r < 0.57) anim.start(art3d::Action::Stretch, 2.2);
                 else if (r < 0.7) anim.start(art3d::Action::Shake, 0.9);
@@ -1211,6 +1214,9 @@ public:
             double q = anim.actionT / anim.actionLen;
             if (q > art3d::RUB_FROM && q < art3d::RUB_TO) eyes = q > art3d::RUB_BLISS && q < art3d::RUB_BLISS_END ? art::Eyes::Closed : art::Eyes::Happy;
         }
+        if (anim.action == art3d::Action::Root && anim.actionT > anim.actionLen * art3d::ROOT_FOUND &&
+            anim.actionT < anim.actionLen * art3d::ROOT_DONE)
+            eyes = art::Eyes::Happy;  // found one
         bool mirror = dir < 0;
         art::Prop prop = art::Prop::Nothing;
         if (working) {
@@ -2311,6 +2317,11 @@ int writeStrip(const std::string& name, const char* path) {
                 f.pose = art3d::Pose::Stand; f.prop = art3d::Prop::Nothing;
                 if (row == 2) f.yaw = 150;
                 if (p > art3d::RUB_FROM && p < art3d::RUB_TO) f.eyes = p > art3d::RUB_BLISS && p < art3d::RUB_BLISS_END ? art::Eyes::Closed : art::Eyes::Happy;
+            }
+            if (a->action == art3d::Action::Root) {  // only ever standing about, never at the desk: the third row faces left
+                f.pose = art3d::Pose::Stand; f.prop = art3d::Prop::Nothing;
+                if (row == 2) f.yaw = 150;
+                if (p > art3d::ROOT_FOUND && p < art3d::ROOT_DONE) f.eyes = art::Eyes::Happy;
             }
             if (a->action == art3d::Action::Sneeze && p > art3d::SNEEZE_SHUT && p < art3d::SNEEZE_OPEN) f.eyes = art::Eyes::Closed;
             if (a->action == art3d::Action::Yawn && art3d::yawnEyesShut(p)) f.eyes = art::Eyes::Closed;

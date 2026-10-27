@@ -148,7 +148,7 @@ inline const RGB SNOUT_FACE = rgb(0xF19E98), SNOUT_MID = rgb(0xE67E7B), NOSTRIL 
 
 // ---- what the pet tells the animator each frame -------------------------------------------------------
 
-enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops, Roll, Rub, Yawn, Lean };
+enum class Action { Idle, Sniff, Stretch, Shake, LookAround, Hop, Struggle, Nuzzle, HeadShake, Land, Jump, Wiggle, Scratch, Sulk, Cheer, Snuffle, Rouse, Bedtime, Perk, Paw, Dream, Stir, Chase, Sneeze, Ride, Leap, Whoops, Roll, Rub, Yawn, Lean, Root };
 
 // Every action by name, with how long it normally plays. The render test, the sheet's --strip and the socket's
 // "trick" event all go through this table, so a new action belongs here too.
@@ -168,7 +168,11 @@ inline const ActionInfo ACTIONS[] = {
     {"chase", Action::Chase, 3.0},     {"sneeze", Action::Sneeze, 2.0},       {"ride", Action::Ride, 2.0},
     {"leap", Action::Leap, 1.3},       {"whoops", Action::Whoops, 1.2},     {"roll", Action::Roll, 4.2},
     {"rub", Action::Rub, 3.6},         {"yawn", Action::Yawn, 3.0},           {"lean", Action::Lean, 3.4},
+    {"root", Action::Root, 3.4},
 };
+// Root: nose to the ground, it roots about like a pig after truffles: a sniff, then shove after shove with the snout
+// scooping up the earth, and at ROOT_FOUND the head pops up chewing, pleased (happy eyes until ROOT_DONE).
+constexpr double ROOT_FOUND = 0.7, ROOT_DONE = 0.92, ROOT_SECS = 3.4;
 // Lean: your pointer comes to rest on its back or head, like a hand, and it pushes up into it, eyes shut (LEAN_SHUT to
 // LEAN_OPEN), rubbing against it. While the hand stays the pet holds it at LEAN_HOLD (main.cpp), so it leans as long as
 // you leave it there, up to a point; the hand gone, it lets go with a contented sigh.
@@ -983,6 +987,35 @@ inline Rig actionRig(Action a, double p, double t, int flank = 1) {
             r.tail = 30 * std::sin(t * 6) * rub + 15 * out;
             r.ear = -14 * push + 10 * out;
             r.earSwing = -16 * push;
+            break;
+        }
+        case Action::Root: {  // rooting for truffles: a sniff, nose in the ground, shove, shove, shove, found one
+            // The sniff brings the head down; then the snout digs in and shoves forward and up, about one and a half
+            // shoves a second: the neck reaches, the body follows a little, the hind legs push, the ears flap with each
+            // and the head works a little to one side and the other. At ROOT_FOUND the head pops up past level with a
+            // small bounce, chewing, ears up, tail going (the pet makes the eyes happy). Ends at zero.
+            double sniff = env(p / 0.2);
+            double dig = smoothstep((p - 0.14) / 0.1) * (1 - smoothstep((p - ROOT_FOUND + 0.02) / 0.06));
+            double pop = smoothstep((p - ROOT_FOUND) / 0.05) * (1 - smoothstep((p - ROOT_DONE) / 0.08));
+            double bounce = env((p - ROOT_FOUND) / 0.1);
+            double shove = 0.5 - 0.5 * std::cos(t * 9);  // 0 nose in, 1 the shove forward and up
+            double push = shove * dig;
+            r.headPitch = 30 * sniff * (1 - dig) + (60 - 30 * shove) * dig - 10 * pop;  // snout in the dirt, then scooping
+            r.neck = 0.4 * dig + 1.8 * push;
+            r.headRoll = 8 * std::sin(t * 4.5) * dig + 6 * pop;
+            r.headYaw = 6 * std::sin(t * 4.5 + 0.8) * dig;
+            r.bodyX = 0.6 * push;
+            r.bodyY = -0.4 * sniff - 0.6 * dig;
+            r.bodyPitch = -5 * dig;  // front down: the front legs reach forward so the hooves stay on the floor
+            r.scaleXZ = 1 + 0.04 * push;
+            r.scaleY = 1 - 0.03 * push + 0.06 * bounce;
+            r.lift = 0.8 * bounce;
+            r.leg[0] = r.leg[1] = 18 * dig;  // braced
+            r.leg[2] = r.leg[3] = -10 * push;  // driving it on
+            r.snout = 1 + 0.18 * std::fabs(std::sin(t * 22)) * sniff + 0.2 * push + 0.14 * std::fabs(std::sin(t * 24)) * pop;
+            r.earSwing = 12 * sniff + 14 * dig;
+            r.ear = 14 * push + 20 * pop;
+            r.tail = 25 * std::sin(t * 13) * dig + 40 * std::sin(t * 17) * pop;
             break;
         }
         case Action::Whoops: {  // the floor's gone: it looks down, looks at you, then its legs run on the air
