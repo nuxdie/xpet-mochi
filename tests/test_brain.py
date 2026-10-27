@@ -553,12 +553,23 @@ class Workshop(unittest.TestCase):
         g("checkout", "--", ".")
         self.assertTrue(WS.keep()["ok"])
         self.assertTrue((repo / "src" / "hat.hpp").exists())
+        # Main moves on while a night's change waits: keep merges it in with a merge commit.
+        (WS.TREE / "src" / "scarf.hpp").write_text("// a scarf\n")
+        WS.git("add", "-A")
+        WS.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a scarf")
+        (repo / "src" / "c.hpp").write_text("// c\n")
+        g("add", "-A")
+        g("commit", "-qm", "theirs first")
+        r = WS.keep()
+        self.assertTrue(r["ok"], r)
+        self.assertTrue((repo / "src" / "scarf.hpp").exists())
+        self.assertIn("Merge branch", WS.git("log", "-1", "--format=%s", cwd=repo)[1])
         # Main moves on; the next night merges it in.
         (repo / "src" / "b.hpp").write_text("// b\n")
         g("add", "-A")
         g("commit", "-qm", "theirs")
         r = WS.prepare()
-        self.assertTrue(r["ok"] and "merged 1" in r["msg"], r)
+        self.assertTrue(r["ok"] and "merged 3" in r["msg"], r)  # theirs first, the merge, theirs
         self.assertTrue((WS.TREE / "src" / "b.hpp").exists())
 
 

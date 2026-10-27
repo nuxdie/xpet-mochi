@@ -275,7 +275,8 @@ def undo(sha):
 
 
 def keep():
-    """Bring the workshop's commits into main, if that's a fast-forward and main's checkout is untouched."""
+    """Bring the workshop's commits into main while main's checkout is untouched: a fast-forward when main hasn't
+    moved, otherwise a merge commit (everything it makes is kept, so it shouldn't wait for the next night)."""
     R = repo()
     if git("rev-parse", "--abbrev-ref", "HEAD", cwd=R)[1].strip() != "main":
         return out(False, "the repo isn't on main; left on the branch")
@@ -283,10 +284,14 @@ def keep():
         return out(False, "main has uncommitted changes; left on the branch for now")
     if git("rev-list", "--count", f"main..{BRANCH}", cwd=R)[1].strip() == "0":
         return out(True, "main already has it")
-    code, msg = git("merge", "--ff-only", BRANCH, cwd=R)
+    if git("merge", "--ff-only", BRANCH, cwd=R)[0] == 0:
+        return out(True, "main now has it")
+    code, msg = sh(["git", "-c", "user.name=Mochi", "-c", "user.email=mochi@localhost", "merge", "--no-ff", "--no-edit",
+                    "-m", f"Merge branch '{BRANCH}' (kept)", BRANCH], cwd=R)
     if code:
-        return out(False, f"not a fast-forward (main moved on); it merges at the next workshop night: {msg[-200:]}")
-    return out(True, "main now has it")
+        sh(["git", "merge", "--abort"], cwd=R)
+        return out(False, f"main moved on and the merge conflicts; it merges at the next workshop night: {msg[-200:]}")
+    return out(True, "main now has it (merged)")
 
 
 # ---- Mochi's side ------------------------------------------------------------------------------------
